@@ -16,17 +16,24 @@ use aws_sdk_s3::{config::{
     Builder as S3ConfigBuilder,
     RequestChecksumCalculation,
     ResponseChecksumValidation,
-}, Client as S3Client, Client};
+}, Client as AWSClient};
 use clap::{Arg, ArgMatches, Command};
+use compio::fs::File;
+use cyper::{Body, Client, Request, RequestBuilder};
 use futures::future::join_all;
+use http::Method;
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::Duration;
+use tokio;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::{Receiver, Sender};
 use tracing_subscriber::{fmt, EnvFilter};
+use url::Url;
 
 static CONFIG_PATH: &str = "config.json";
 static DEFAULT_REGION:&str = "us-east-1";
 
-//#[compio::main]
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -46,7 +53,6 @@ async fn main() -> Result<()> {
     match method {
         CephS3 => run_s3_ceph(bucket, path),
     }.await;
-
 
     Ok(())
 }
@@ -94,6 +100,7 @@ fn walk_dir_files(dir: impl AsRef<Path>, mut on_file: impl FnMut(&Path) -> io::R
 }
 
 async fn run_s3_ceph(bucket: &str, path: &Path) {
+    let (compio_tx, mut reply_rx) = start_compio_worker();
 
     // Read config file
     let config = create_config();
@@ -103,32 +110,47 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
 
     let root = PathBuf::from(path);
     let mut upload_object_future_group = Vec::new();
+    let mut completed_file_count = 0;
 
     walk_dir_files(&root, |file_path| {
         let metadata = fs::metadata(file_path)?;
         let size = metadata.len();
 
         println!("{}: {} bytes", file_path.display(), size);
-        let file_path_clone = file_path.to_path_buf();
         let key_clone = file_path.file_name().unwrap().to_str().unwrap().to_string();
         let bucket_clone = bucket.to_string();
         let client_clone = client.clone();
+        let compio_tx_clone = compio_tx.clone();
+        let file_path_str = file_path.to_str().unwrap().to_string();
 
-        let upload_object_future = async move {
+
+        let future = async move {
             let presigned = presign_put_object(&client_clone, &bucket_clone, &key_clone, 900).await;
             println!("Presign url: {}", presigned.uri());
-            upload_object(&client_clone, &bucket_clone, &file_path_clone, &key_clone).await
+
+            compio_tx_clone.send(CompioCmd::PutFile {
+                url: presigned.uri().into(),
+                path: file_path_str,
+            }).await.expect("Failed to send command");
+
         };
 
-        upload_object_future_group.push(upload_object_future);
+        upload_object_future_group.push(future);
 
         Ok(())
     }).expect("Iterating over path failed");
 
+    println!("Starting upload of {} files", upload_object_future_group.len());
     join_all(upload_object_future_group).await;
+    while let Some(evt) = reply_rx.recv().await {
+        println!("{:?} uploaded.", evt);
+        completed_file_count = completed_file_count + 1;
 
+        if completed_file_count == 3 { //TODO JON: fix :)
+            break;
+        }
+    }
 
-    //TODO: Try to parallize with combio, possibly replacing tokio from main, since combio is an async runtime as well
     //TODO: Start multipart upload with aws client: https://github.com/awsdocs/aws-doc-sdk-examples/blob/main/rustv1/examples/s3/src/bin/s3-multipart-upload.rs#L48
     //TODO: read large file in chunks
     //TODO: End multipart upload with aws client
@@ -139,9 +161,65 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
     println!("File uploaded successfully.");
 }
 
+async fn put_file(url: &str, path: &str, client: Client) {
+    // Open the file asynchronously with Compio (io_uring on Linux).
+    let file = match File::open(Path::new(path)).await {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("{url} ERROR opening {path}: {e}");
+            return;
+        }
+    };
+
+    // Stream the file directly as the HTTP request body.
+    // Cyper implements Body::from(compio::fs::File)
+    let body = Body::from(file); // [1](https://docs.rs/compio/latest/compio/fs/struct.Metadata.html)
+
+    let builder = RequestBuilder::new(client, Request::new(Method::PUT, Url::parse(url).unwrap()));
+
+    match builder.body(body).send().await {
+        Ok(_res) => {
+            // Optionally read the response
+            //let bytes = res.into_body().read_to_end().await.unwrap_or_default();
+            println!("{url} PUT OK");
+        }
+        Err(e) => {
+            eprintln!("{url} ERROR: {e}");
+        }
+    }
+}
+
+enum CompioCmd {
+    PutFile { url: String, path: String },
+}
+
+fn start_compio_worker() -> (Sender<CompioCmd>, Receiver<String>) {
+    let (tx, mut rx) = mpsc::channel::<CompioCmd>(64);
+    let (reply_tx, reply_rx) = mpsc::channel::<String>(64);
+
+    thread::spawn(move || {
+        // Compio must live on this thread
+        let rt = compio::runtime::Runtime::new().expect("compio runtime");
+        rt.block_on(async move {
+            let client = cyper::Client::builder().use_rustls_default().build();
+
+            while let Some(cmd) = rx.recv().await {
+                match cmd {
+                    CompioCmd::PutFile { url, path } => {
+                        put_file(&url, &path, client.clone()).await;
+                        let _ = reply_tx.send(path.clone()).await;
+                    }
+                }
+            }
+        });
+    });
+
+    (tx, reply_rx)
+}
+
 /// Generate a URL for a presigned GET request.
 async fn presign_put_object(
-    client: &Client,
+    client: &AWSClient,
     bucket: &str,
     key: &str,
     expires_in: u64,
@@ -172,7 +250,7 @@ fn create_config() -> Config {
 }
 
 pub async fn create_bucket(
-    client: &Client,
+    client: &AWSClient,
     bucket_name: &str,
 ) -> std::result::Result<Option<CreateBucketOutput>, S3ExampleError> {
     let create = client
@@ -243,7 +321,7 @@ fn parse_arguments() -> ArgMatches {
 /// * `filename` - a reference to a path that will be read and uploaded to S3.
 /// * `key` - the string key that the object will be uploaded as inside the bucket.
 async fn list_bucket(
-    client: &Client,
+    client: &AWSClient,
     bucket: &str,
 ) -> std::result::Result<(), S3ExampleError> {
     // List the buckets in this account
@@ -273,39 +351,6 @@ async fn list_bucket(
     Ok(())
 }
 
-async fn upload_object(
-    client: &Client,
-    bucket: &str,
-    filepath: &Path,
-    key: &str,
-) -> std::result::Result<(), S3ExampleError> {
-
-    // Prepare a ByteStream around the file, and upload the object using that ByteStream.
-    let body = aws_sdk_s3::primitives::ByteStream::from_path(filepath)
-        .await
-        .map_err(|err| {
-            S3ExampleError::new(format!(
-                "Failed to create bytestream for {filepath:?} ({err:?})"
-            ))
-        })?;
-    let resp = client
-        .put_object()
-        .bucket(bucket)
-        .key(key)
-        .body(body)
-        .send()
-        .await?;
-    println!("etag: {}", resp.e_tag().unwrap());
-
-    /*
-    // Retrieve the just-uploaded object.
-    let resp = client.get_object().bucket(bucket).key(key).send().await?;
-    println!("etag: {}", resp.e_tag().unwrap_or("(missing)"));
-     */
-
-    Ok(())
-}
-
 fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
@@ -316,7 +361,7 @@ fn init_logging() {
         .init();
 }
 
-async fn create_client(region: Region, access_key: &str, secret_key: &str, url: &str) -> Client {
+async fn create_client(region: Region, access_key: &str, secret_key: &str, url: &str) -> AWSClient {
     let creds = Credentials::new(
         access_key,
         secret_key,
@@ -339,7 +384,7 @@ async fn create_client(region: Region, access_key: &str, secret_key: &str, url: 
         .build();
 
 
-    let client = S3Client::from_conf(s3_conf);
+    let client = AWSClient::from_conf(s3_conf);
     client
 }
 
