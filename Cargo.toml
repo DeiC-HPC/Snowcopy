@@ -12,3 +12,5 @@ serde = { version = "1.0.228", features = ["derive"] }
 tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "macros"] }
 clap = { version = "4.5.54", features = ["derive"] }
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+futures = "0.3.31"
+chrono = "0.4.43"

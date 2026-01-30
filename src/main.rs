@@ -4,22 +4,24 @@ use crate::TransferMethod::CephS3;
 use serde;
 use serde::{Deserialize, Serialize};
 use serde_json::Result;
-use std::env;
+use std::{fs, io};
 
 use aws_sdk_s3::config::{Credentials, Region};
 
-use aws_sdk_s3::{Client as S3Client, config::{
+use crate::s3example_error::S3ExampleError;
+use aws_config::BehaviorVersion;
+use aws_sdk_s3::operation::create_bucket::CreateBucketOutput;
+use aws_sdk_s3::presigning::{PresignedRequest, PresigningConfig};
+use aws_sdk_s3::{config::{
     Builder as S3ConfigBuilder,
     RequestChecksumCalculation,
     ResponseChecksumValidation,
-}, Client};
-
+}, Client as S3Client, Client};
 use clap::{Arg, ArgMatches, Command};
-use std::path::Path;
-use aws_config::BehaviorVersion;
-use aws_sdk_s3::operation::create_bucket::CreateBucketOutput;
-use tracing_subscriber::{EnvFilter, fmt};
-use crate::s3example_error::S3ExampleError;
+use futures::future::join_all;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+use tracing_subscriber::{fmt, EnvFilter};
 
 static CONFIG_PATH: &str = "config.json";
 static DEFAULT_REGION:&str = "us-east-1";
@@ -50,7 +52,7 @@ async fn main() -> Result<()> {
 }
 
 enum TransferMethod {
-    CephS3
+    CephS3,
 }
 
 fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
@@ -67,71 +69,111 @@ struct Config {
     s3_url: String
 }
 
-struct Args {
-    /// Path to the file to upload
-    file_path: String,
 
-    /// S3 object key
-    object_key: String,
+fn walk_dir_files(dir: impl AsRef<Path>, mut on_file: impl FnMut(&Path) -> io::Result<()>) -> io::Result<()> {
+    fn recurse(dir: &Path, on_file: &mut dyn FnMut(&Path) -> io::Result<()>) -> io::Result<()> {
+        for entry_res in fs::read_dir(dir)? {
+            let entry = entry_res?;
+            let path = entry.path();
 
-    /// Transfer method
-    //#[arg(short, default_value = "o1")]
-    transfer_method: String,
+            // Follow directories; process files
+            if path.is_dir() {
+                recurse(&path, on_file)?;
+            } else if path.is_file() {
+                on_file(&path)?;
+            }
+        }
+        Ok(())
+    }
+
+    if dir.as_ref().is_file() {
+        on_file(&dir.as_ref().to_path_buf())
+    } else {
+        recurse(dir.as_ref(), &mut on_file)
+    }
 }
 
 async fn run_s3_ceph(bucket: &str, path: &Path) {
-    //TODO: iterate over all files in path instead of assuming only one exists
-            //Upload files iterated over
-    //TODO: Make presigner work for PUT request and use hyper client to manually make putrequest for a single file: https://github.com/awsdocs/aws-doc-sdk-examples/blob/main/rustv1/examples/s3/src/bin/get-object-presigned.rs
+
+    // Read config file
+    let config = create_config();
+
+    let client = create_client(Region::new(DEFAULT_REGION), config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await;
+    create_bucket(&client, bucket).await.unwrap();
+
+    let root = PathBuf::from(path);
+    let mut upload_object_future_group = Vec::new();
+
+    walk_dir_files(&root, |file_path| {
+        let metadata = fs::metadata(file_path)?;
+        let size = metadata.len();
+
+        println!("{}: {} bytes", file_path.display(), size);
+        let file_path_clone = file_path.to_path_buf();
+        let key_clone = file_path.file_name().unwrap().to_str().unwrap().to_string();
+        let bucket_clone = bucket.to_string();
+        let client_clone = client.clone();
+
+        let upload_object_future = async move {
+            let presigned = presign_put_object(&client_clone, &bucket_clone, &key_clone, 900).await;
+            println!("Presign url: {}", presigned.uri());
+            upload_object(&client_clone, &bucket_clone, &file_path_clone, &key_clone).await
+        };
+
+        upload_object_future_group.push(upload_object_future);
+
+        Ok(())
+    }).expect("Iterating over path failed");
+
+    join_all(upload_object_future_group).await;
+
+
     //TODO: Try to parallize with combio, possibly replacing tokio from main, since combio is an async runtime as well
     //TODO: Start multipart upload with aws client: https://github.com/awsdocs/aws-doc-sdk-examples/blob/main/rustv1/examples/s3/src/bin/s3-multipart-upload.rs#L48
     //TODO: read large file in chunks
     //TODO: End multipart upload with aws client
 
 
-    // Read config file
+    list_bucket(&client, bucket).await.unwrap();
+
+    println!("File uploaded successfully.");
+}
+
+/// Generate a URL for a presigned GET request.
+async fn presign_put_object(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    expires_in: u64,
+) -> PresignedRequest {
+    let expires_in = Duration::from_secs(expires_in);
+    let result = PresigningConfig::expires_in(expires_in).expect("Failed to create presigning config");
+    let presigned_request = client
+        .put_object()
+        .bucket(bucket)
+        .key(key)
+        .presigned(result)
+        .await.unwrap();
+
+    println!("Object URI: {}", presigned_request.uri());
+    let valid_until = chrono::offset::Local::now() + expires_in;
+    println!("Valid until: {valid_until}");
+
+    presigned_request
+}
+
+fn create_config() -> Config {
     let config: Config = serde_json::from_str(
         std::fs::read_to_string(&CONFIG_PATH)
             .expect("Error: failed to read config file.")
             .as_str()
     ).expect("Error: failed to deserialize config file.");
-
-    let client = create_client(Region::new(DEFAULT_REGION), config.s3_access_key.as_str(), config.s3_secret_key.as_str()).await;
-
-    create_bucket(&client, bucket, &Region::new(DEFAULT_REGION)).await.unwrap();
-    list_bucket_and_upload_object(&client, bucket, path, path.file_name().unwrap().to_str().unwrap()).await.unwrap();
-
-
-    /*
-    // Set up AWS region and credentials
-    let region_provider = RegionProviderChain::default_provider().or_else("us-east-1");
-    let config = aws_config::from_env().region(region_provider).load().await;
-    let client = aws_sdk_s3::Client::new(&config);
-
-    // Open the file asynchronously using compio
-    let file = File::open(file_path).await.unwrap();
-    let (read, buffer) = file.read_to_end_at(Vec::with_capacity(1024), 0).await.unwrap();
-    assert_eq!(read, buffer.len());
-    let buffer = String::from_utf8(buffer).unwrap();
-    let reader = BufReader::new(buffer);
-
-   // Upload the file to S3
-    client
-        .put_object()
-        .bucket(bucket)
-        .key(file_name)
-        .body(reader)
-        .send()
-        .await?;
-
- */
-    println!("File uploaded successfully.");
+    config
 }
 
 pub async fn create_bucket(
-    client: &aws_sdk_s3::Client,
+    client: &Client,
     bucket_name: &str,
-    region: &aws_config::Region,
 ) -> std::result::Result<Option<CreateBucketOutput>, S3ExampleError> {
     let create = client
         .create_bucket()
@@ -200,11 +242,9 @@ fn parse_arguments() -> ArgMatches {
 /// * `bucket` - the bucket name that the object will be uploaded to. Must be present in the region the `client` is configured to use.
 /// * `filename` - a reference to a path that will be read and uploaded to S3.
 /// * `key` - the string key that the object will be uploaded as inside the bucket.
-async fn list_bucket_and_upload_object(
-    client: &aws_sdk_s3::Client,
+async fn list_bucket(
+    client: &Client,
     bucket: &str,
-    filepath: &Path,
-    key: &str,
 ) -> std::result::Result<(), S3ExampleError> {
     // List the buckets in this account
     let mut objects = client
@@ -230,11 +270,21 @@ async fn list_bucket_and_upload_object(
         }
     }
 
+    Ok(())
+}
+
+async fn upload_object(
+    client: &Client,
+    bucket: &str,
+    filepath: &Path,
+    key: &str,
+) -> std::result::Result<(), S3ExampleError> {
+
     // Prepare a ByteStream around the file, and upload the object using that ByteStream.
     let body = aws_sdk_s3::primitives::ByteStream::from_path(filepath)
         .await
         .map_err(|err| {
-            s3example_error::S3ExampleError::new(format!(
+            S3ExampleError::new(format!(
                 "Failed to create bytestream for {filepath:?} ({err:?})"
             ))
         })?;
@@ -246,7 +296,6 @@ async fn list_bucket_and_upload_object(
         .send()
         .await?;
     println!("etag: {}", resp.e_tag().unwrap());
-
 
     /*
     // Retrieve the just-uploaded object.
@@ -267,7 +316,7 @@ fn init_logging() {
         .init();
 }
 
-async fn create_client(region: Region, access_key: &str, secret_key: &str) -> Client {
+async fn create_client(region: Region, access_key: &str, secret_key: &str, url: &str) -> Client {
     let creds = Credentials::new(
         access_key,
         secret_key,
@@ -279,7 +328,7 @@ async fn create_client(region: Region, access_key: &str, secret_key: &str) -> Cl
     let shared_config = aws_config::defaults(BehaviorVersion::v2026_01_12())
         .credentials_provider(creds)
         .region(region.clone())
-        .endpoint_url("https://lumidata.eu")
+        .endpoint_url(url)
         .load()
         .await;
 
