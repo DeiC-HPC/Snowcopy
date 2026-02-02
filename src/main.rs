@@ -150,7 +150,7 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
             if(size > constants::CHUNK_SIZE) {
                 println!("File too large for PUT, starting multipart upload");
 
-                tokio::spawn(async move {
+                async move {
                     //Start
                     let output: CreateMultipartUploadOutput = client_clone.create_multipart_upload().bucket(bucket_clone.clone()).key(key_clone.clone()).send().await.unwrap();
 
@@ -169,7 +169,7 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
 
                         compio_tx_clone.send(CompioCmd::PutMultipart { url: part_presigned.uri().into(), path: file_path_str.clone(), start_pos, end_pos, part_number, upload_id: upload_id.to_string(), total_parts }).await.expect("Failed to send command");
                     }
-                }).await.expect("Failed to spawn multipart upload task");
+                }.await
             } else {
                 compio_tx_clone.send(CompioCmd::PutFile {
                     url: presigned.uri().into(),
