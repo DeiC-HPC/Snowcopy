@@ -161,7 +161,7 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
 
                     for i in 0..chunk_amount_u64 {
                         let start_pos = i * constants::CHUNK_SIZE;
-                        let end_pos = std::cmp::min((i + 1) * constants::CHUNK_SIZE - 1, size - 1);
+                        let end_pos = std::cmp::min((i + 1) * constants::CHUNK_SIZE, size);
 
                         let part_number = (i + 1) as i32;
                         let part_presigned = presign_upload_part(&client_clone, &bucket_clone, &key_clone, upload_id, part_number, constants::presignLifetime).await;
@@ -370,8 +370,8 @@ fn start_compio_worker() -> (Sender<CompioCmd>, Receiver<CompioReply>) {
                         let _ = reply_tx.send(PutFile { path }).await;
                     },
                     CompioCmd::PutMultipart { url, path, start_pos, end_pos, part_number, upload_id, total_parts } => {
-                        println!("Starting multipart upload for {}", path);
-                        
+                        println!("Putting part {} of {} for {}", part_number, total_parts, path);
+
                         let etag = put_file_multipart(&url, &path, start_pos, end_pos, client.clone()).await;
 
                         let _ = reply_tx.send(PutMultipart { path, part_number, etag, upload_id, total_parts }).await;
