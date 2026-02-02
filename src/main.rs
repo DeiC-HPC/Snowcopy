@@ -28,7 +28,7 @@ use compio::fs::{File, OpenOptions};
 use compio::io::AsyncReadAt;
 use cyper::{Body, Client, Request, RequestBuilder};
 use futures::future::join_all;
-use http::Method;
+use http::{Method, StatusCode};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -134,22 +134,14 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
         let metadata = fs::metadata(file_path)?;
         let size = metadata.len();
 
-        println!("{}: {} bytes", file_path.display(), size);
-        let key_clone = file_path.file_name().unwrap().to_str().unwrap().to_string();
+        let key_clone = normalize_path(file_path.to_str().unwrap()).to_string();
         let bucket_clone = bucket.to_string();
         let client_clone = client.clone();
         let compio_tx_clone = compio_tx.clone();
         let file_path_str = file_path.to_str().unwrap().to_string();
 
-
         let future = async move {
-            let presigned = presign_put_object(&client_clone, &bucket_clone, &key_clone, constants::presignLifetime).await;
-            println!("Presign url: {}", presigned.uri());
-
-
-            if(size > constants::CHUNK_SIZE) {
-                println!("File too large for PUT, starting multipart upload");
-
+                        if(size > constants::CHUNK_SIZE) {
                 async move {
                     //Start
                     let output: CreateMultipartUploadOutput = client_clone.create_multipart_upload().bucket(bucket_clone.clone()).key(key_clone.clone()).send().await.unwrap();
@@ -166,11 +158,11 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
                         let part_number = (i + 1) as i32;
                         let part_presigned = presign_upload_part(&client_clone, &bucket_clone, &key_clone, upload_id, part_number, constants::presignLifetime).await;
 
-
                         compio_tx_clone.send(CompioCmd::PutMultipart { url: part_presigned.uri().into(), path: file_path_str.clone(), start_pos, end_pos, part_number, upload_id: upload_id.to_string(), total_parts }).await.expect("Failed to send command");
                     }
                 }.await
             } else {
+                let presigned = presign_put_object(&client_clone, &bucket_clone, &key_clone, constants::presignLifetime).await;
                 compio_tx_clone.send(CompioCmd::PutFile {
                     url: presigned.uri().into(),
                     path: file_path_str,
@@ -225,15 +217,37 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
             }
         }
 
+        println!("Completed file {} of {}", completed_file_count, upload_count);
+
         if completed_file_count == upload_count {
             break;
         }
     }
 
     list_bucket(&client, bucket).await.unwrap();
-
-    println!("File uploaded successfully.");
 }
+
+fn normalize_path(path: &str) -> String {
+    // Step 1: Normalize using Path components
+    let cleaned: PathBuf = Path::new(path).components().collect();
+
+    // Step 2: Convert to string and force `/` separators
+    let mut s = cleaned.to_string_lossy().replace('\\', "/");
+
+    // Step 3: Remove all leading "./" and "../"
+    loop {
+        if s.starts_with("./") {
+            s = s[2..].to_string();
+        } else if s.starts_with("../") {
+            s = s[3..].to_string();
+        } else {
+            break;
+        }
+    }
+
+    s
+}
+
 
 /// Complete a multipart upload by providing all parts.
 async fn complete_multipart_upload(
@@ -280,7 +294,7 @@ async fn put_file(url: &str, path: &str, client: Client) {
         Ok(_res) => {
             // Optionally read the response
             //let bytes = res.into_body().read_to_end().await.unwrap_or_default();
-            println!("{url} PUT OK");
+
         }
         Err(e) => {
             eprintln!("{url} ERROR: {e}");
@@ -339,7 +353,9 @@ async fn put_file_multipart(url: &str, path: &str, start_pos: u64, end_pos: u64,
         .build();
 
     let resp = client.execute(req).await.unwrap();
-    println!("{}", resp.status());
+    if resp.status() != StatusCode::OK {
+        println!("{}", resp.status());
+    }
     resp.headers().get("etag").unwrap().to_str().unwrap().to_string()
 }
 
@@ -364,6 +380,9 @@ fn start_compio_worker() -> (Sender<CompioCmd>, Receiver<CompioReply>) {
             let client = cyper::Client::builder().use_rustls_default().build();
 
             while let Some(cmd) = rx.recv().await {
+                
+                println!("Compio consumed command");
+
                 match cmd {
                     CompioCmd::PutFile { url, path } => {
                         put_file(&url, &path, client.clone()).await;
@@ -400,10 +419,6 @@ async fn presign_put_object(
         .presigned(result)
         .await.unwrap();
 
-    println!("Object URI: {}", presigned_request.uri());
-    let valid_until = chrono::offset::Local::now() + expires_in;
-    println!("Valid until: {valid_until}");
-
     presigned_request
 }
 
@@ -426,8 +441,6 @@ async fn presign_upload_part(
         .part_number(part_number)
         .presigned(result)
         .await.unwrap();
-
-    println!("Part {} URI: {}", part_number, presigned_request.uri());
 
     presigned_request
 }
