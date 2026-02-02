@@ -15,7 +15,10 @@ chrono = "0.4.43"
 http = "1.4.0"
 url = "2.5.8"
 compio = { version = "0.17.0", features = ["macros", "tls"] }
-cyper  = { version = "0.7.1", features = ["rustls"] }
+cyper  = { version = "0.7.1", features = ["rustls", "stream"] }
 tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "macros"] }  # HTTPS via rustl
 anyhow = "1.0.100"
-crossbeam-channel = "0.5.15"  # HTTPS via rustl
+crossbeam-channel = "0.5.15"
+futures-util = "0.3.31"  # HTTPS via rustl
+bytes = "1"
+send_wrapper = "0.6.0"                                                  # for Bytes in Body::stream

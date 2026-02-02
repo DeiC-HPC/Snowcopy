@@ -1,4 +1,5 @@
 mod s3example_error;
+mod constants;
 
 use crate::TransferMethod::CephS3;
 use serde;
@@ -7,21 +8,28 @@ use serde_json::Result;
 use std::{fs, io};
 
 use aws_sdk_s3::config::{Credentials, Region};
+use std::time::Instant;
 
 use crate::s3example_error::S3ExampleError;
+use crate::CompioReply::PutFile;
+use crate::CompioReply::PutMultipart;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::operation::create_bucket::CreateBucketOutput;
+use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadOutput;
 use aws_sdk_s3::presigning::{PresignedRequest, PresigningConfig};
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::{config::{
     Builder as S3ConfigBuilder,
     RequestChecksumCalculation,
     ResponseChecksumValidation,
 }, Client as AWSClient};
 use clap::{Arg, ArgMatches, Command};
-use compio::fs::File;
+use compio::fs::{File, OpenOptions};
+use compio::io::AsyncReadAt;
 use cyper::{Body, Client, Request, RequestBuilder};
 use futures::future::join_all;
 use http::Method;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
@@ -31,11 +39,15 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tracing_subscriber::{fmt, EnvFilter};
 use url::Url;
 
-static CONFIG_PATH: &str = "config.json";
-static DEFAULT_REGION:&str = "us-east-1";
+use bytes::Bytes;
+use compio::io::AsyncReadAtExt;
+use compio::BufResult;
+use futures_util::stream;
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let start_time = Instant::now();
     init_logging();
 
     // Read Commandline Arguments
@@ -53,6 +65,9 @@ async fn main() -> Result<()> {
     match method {
         CephS3 => run_s3_ceph(bucket, path),
     }.await;
+
+    let elapsed = start_time.elapsed();
+    println!("Program execution time: {:.2?}", elapsed);
 
     Ok(())
 }
@@ -105,12 +120,15 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
     // Read config file
     let config = create_config();
 
-    let client = create_client(Region::new(DEFAULT_REGION), config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await;
+    let client = create_client(Region::new(constants::DEFAULT_REGION), config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await;
     create_bucket(&client, bucket).await.unwrap();
 
     let root = PathBuf::from(path);
     let mut upload_object_future_group = Vec::new();
     let mut completed_file_count = 0;
+
+    // Track multipart uploads: path -> (upload_id, key, total_parts, collected_parts)
+    let mut multipart_state: HashMap<String, (String, String, i32, Vec<CompletedPart>)> = HashMap::new();
 
     walk_dir_files(&root, |file_path| {
         let metadata = fs::metadata(file_path)?;
@@ -125,14 +143,39 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
 
 
         let future = async move {
-            let presigned = presign_put_object(&client_clone, &bucket_clone, &key_clone, 900).await;
+            let presigned = presign_put_object(&client_clone, &bucket_clone, &key_clone, constants::presignLifetime).await;
             println!("Presign url: {}", presigned.uri());
 
-            compio_tx_clone.send(CompioCmd::PutFile {
-                url: presigned.uri().into(),
-                path: file_path_str,
-            }).await.expect("Failed to send command");
 
+            if(size > constants::CHUNK_SIZE) {
+                println!("File too large for PUT, starting multipart upload");
+
+                tokio::spawn(async move {
+                    //Start
+                    let output: CreateMultipartUploadOutput = client_clone.create_multipart_upload().bucket(bucket_clone.clone()).key(key_clone.clone()).send().await.unwrap();
+
+                    let upload_id = output.upload_id().unwrap();
+
+                    let chunk_amount_u64 = (size + constants::CHUNK_SIZE - 1) / constants::CHUNK_SIZE;
+                    let total_parts = chunk_amount_u64 as i32;
+
+                    for i in 0..chunk_amount_u64 {
+                        let start_pos = i * constants::CHUNK_SIZE;
+                        let end_pos = std::cmp::min((i + 1) * constants::CHUNK_SIZE - 1, size - 1);
+
+                        let part_number = (i + 1) as i32;
+                        let part_presigned = presign_upload_part(&client_clone, &bucket_clone, &key_clone, upload_id, part_number, constants::presignLifetime).await;
+
+
+                        compio_tx_clone.send(CompioCmd::PutMultipart { url: part_presigned.uri().into(), path: file_path_str.clone(), start_pos, end_pos, part_number, upload_id: upload_id.to_string(), total_parts }).await.expect("Failed to send command");
+                    }
+                }).await.expect("Failed to spawn multipart upload task");
+            } else {
+                compio_tx_clone.send(CompioCmd::PutFile {
+                    url: presigned.uri().into(),
+                    path: file_path_str,
+                }).await.expect("Failed to send command");
+            }
         };
 
         upload_object_future_group.push(future);
@@ -140,25 +183,81 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
         Ok(())
     }).expect("Iterating over path failed");
 
-    println!("Starting upload of {} files", upload_object_future_group.len());
+    let upload_count = upload_object_future_group.len();
+    println!("Starting upload of {} files", upload_count);
     join_all(upload_object_future_group).await;
     while let Some(evt) = reply_rx.recv().await {
-        println!("{:?} uploaded.", evt);
-        completed_file_count = completed_file_count + 1;
 
-        if completed_file_count == 3 { //TODO JON: fix :)
+        match evt {
+            PutFile { path } => {
+            println!("{:?} uploaded.", path);
+                completed_file_count = completed_file_count + 1;
+            }
+            PutMultipart { path, part_number, etag, upload_id, total_parts } => {
+                println!("{:?} uploaded. Part number: {}, etag: {}", path, part_number, etag);
+
+                let entry = multipart_state.entry(path.clone()).or_insert((upload_id.clone(), String::new(), total_parts, Vec::new()));
+
+                // Store the key from the path if not already set
+                if entry.1.is_empty() {
+                    entry.1 = PathBuf::from(&path).file_name().unwrap().to_str().unwrap().to_string();
+                }
+
+                // Add the completed part
+                entry.3.push(CompletedPart::builder()
+                    .part_number(part_number)
+                    .e_tag(etag)
+                    .build());
+
+                // Check if all parts have been received
+                if entry.3.len() == total_parts as usize {
+                    println!("All parts received for {:?}, completing multipart upload", path);
+
+                    // Sort parts by part number
+                    entry.3.sort_by_key(|p| p.part_number());
+
+                    let (upload_id_val, key_val, _, parts) = multipart_state.remove(&path).unwrap();
+
+                    complete_multipart_upload(&client, bucket, &key_val, &upload_id_val, parts).await.expect("Failed to complete multipart upload");
+
+                    completed_file_count = completed_file_count + 1;
+                }
+            }
+        }
+
+        if completed_file_count == upload_count {
             break;
         }
     }
 
-    //TODO: Start multipart upload with aws client: https://github.com/awsdocs/aws-doc-sdk-examples/blob/main/rustv1/examples/s3/src/bin/s3-multipart-upload.rs#L48
-    //TODO: read large file in chunks
-    //TODO: End multipart upload with aws client
-
-
     list_bucket(&client, bucket).await.unwrap();
 
     println!("File uploaded successfully.");
+}
+
+/// Complete a multipart upload by providing all parts.
+async fn complete_multipart_upload(
+    client: &AWSClient,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    parts: Vec<CompletedPart>,
+) -> std::result::Result<(), S3ExampleError> {
+    let completed_multipart_upload = CompletedMultipartUpload::builder()
+        .set_parts(Some(parts))
+        .build();
+
+    client
+        .complete_multipart_upload()
+        .bucket(bucket)
+        .key(key)
+        .upload_id(upload_id)
+        .multipart_upload(completed_multipart_upload)
+        .send()
+        .await?;
+
+    println!("Completed multipart upload for key: {}", key);
+    Ok(())
 }
 
 async fn put_file(url: &str, path: &str, client: Client) {
@@ -189,13 +288,74 @@ async fn put_file(url: &str, path: &str, client: Client) {
     }
 }
 
-enum CompioCmd {
-    PutFile { url: String, path: String },
+
+
+/// Stream 'len' bytes from 'file' starting at 'start', in chunks up to 'chunk_size'.
+/// The stream yields `Bytes` and is accepted by `cyper::Body::stream`.
+fn file_slice_stream(
+    file: compio::fs::File,  // <-- not Arc
+    start: u64,
+    len: u64,
+    chunk_size: usize,
+) -> impl futures_util::Stream<Item = cyper::Result<Bytes>> + 'static {
+    stream::unfold((file, start, len), move |(file, mut pos, mut remaining)| async move {
+        if remaining == 0 {
+            return None;
+        }
+
+        let to_read = remaining.min(chunk_size as u64) as usize;
+        let buf = Vec::with_capacity(to_read);
+
+        match file.read_at(buf, pos).await {
+            BufResult(Ok(n), mut buf) => {
+                if n == 0 {
+                    return None;
+                }
+                unsafe { buf.set_len(n); }
+                let chunk = Bytes::from(buf);
+                pos += n as u64;
+                remaining -= n as u64;
+                Some((Ok(chunk), (file, pos, remaining)))
+            }
+            BufResult(Err(e), buf) => {
+                Some((Err(cyper::Error::from(e)), (file, pos, 0)))
+            }
+        }
+
+    })
 }
 
-fn start_compio_worker() -> (Sender<CompioCmd>, Receiver<String>) {
+
+
+async fn put_file_multipart(url: &str, path: &str, start_pos: u64, end_pos: u64, client: Client) -> String {
+    let file = OpenOptions::new().read(true).open(path).await.unwrap();
+    let stream = file_slice_stream(file, start_pos, end_pos - start_pos, 256 * 1024);
+
+    let stream = send_wrapper::SendWrapper::new(stream);
+
+    let req = client
+        .put(url).unwrap()
+        .body(Body::stream(stream))
+        .build();
+
+    let resp = client.execute(req).await.unwrap();
+    println!("{}", resp.status());
+    resp.headers().get("etag").unwrap().to_str().unwrap().to_string()
+}
+
+enum CompioCmd {
+    PutFile { url: String, path: String },
+    PutMultipart { url: String, path: String, start_pos: u64, end_pos: u64, part_number: i32, upload_id: String, total_parts: i32 },
+}
+
+enum CompioReply {
+    PutFile { path: String },
+    PutMultipart { path: String, part_number: i32, etag: String, upload_id: String, total_parts: i32 },
+}
+
+fn start_compio_worker() -> (Sender<CompioCmd>, Receiver<CompioReply>) {
     let (tx, mut rx) = mpsc::channel::<CompioCmd>(64);
-    let (reply_tx, reply_rx) = mpsc::channel::<String>(64);
+    let (reply_tx, reply_rx) = mpsc::channel::<CompioReply>(64);
 
     thread::spawn(move || {
         // Compio must live on this thread
@@ -207,7 +367,14 @@ fn start_compio_worker() -> (Sender<CompioCmd>, Receiver<String>) {
                 match cmd {
                     CompioCmd::PutFile { url, path } => {
                         put_file(&url, &path, client.clone()).await;
-                        let _ = reply_tx.send(path.clone()).await;
+                        let _ = reply_tx.send(PutFile { path }).await;
+                    },
+                    CompioCmd::PutMultipart { url, path, start_pos, end_pos, part_number, upload_id, total_parts } => {
+                        println!("Starting multipart upload for {}", path);
+                        
+                        let etag = put_file_multipart(&url, &path, start_pos, end_pos, client.clone()).await;
+
+                        let _ = reply_tx.send(PutMultipart { path, part_number, etag, upload_id, total_parts }).await;
                     }
                 }
             }
@@ -240,9 +407,34 @@ async fn presign_put_object(
     presigned_request
 }
 
+/// Generate a presigned URL for uploading a specific part in a multipart upload.
+async fn presign_upload_part(
+    client: &AWSClient,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    part_number: i32,
+    expires_in: u64,
+) -> PresignedRequest {
+    let expires_in = Duration::from_secs(expires_in);
+    let result = PresigningConfig::expires_in(expires_in).expect("Failed to create presigning config");
+    let presigned_request = client
+        .upload_part()
+        .bucket(bucket)
+        .key(key)
+        .upload_id(upload_id)
+        .part_number(part_number)
+        .presigned(result)
+        .await.unwrap();
+
+    println!("Part {} URI: {}", part_number, presigned_request.uri());
+
+    presigned_request
+}
+
 fn create_config() -> Config {
     let config: Config = serde_json::from_str(
-        std::fs::read_to_string(&CONFIG_PATH)
+        std::fs::read_to_string(&constants::CONFIG_PATH)
             .expect("Error: failed to read config file.")
             .as_str()
     ).expect("Error: failed to deserialize config file.");
