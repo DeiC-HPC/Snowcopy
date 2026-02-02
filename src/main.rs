@@ -36,6 +36,9 @@ use std::time::Duration;
 use tokio;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::Semaphore;
+use std::sync::Arc;
+use std::thread::sleep;
 use tracing_subscriber::{fmt, EnvFilter};
 use url::Url;
 
@@ -217,7 +220,7 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
             }
         }
 
-        println!("Completed file {} of {}", completed_file_count, upload_count);
+        println!("Completed files {} of {}", completed_file_count, upload_count);
 
         if completed_file_count == upload_count {
             break;
@@ -261,17 +264,23 @@ async fn complete_multipart_upload(
         .set_parts(Some(parts))
         .build();
 
-    client
+    match client
         .complete_multipart_upload()
         .bucket(bucket)
         .key(key)
         .upload_id(upload_id)
         .multipart_upload(completed_multipart_upload)
         .send()
-        .await?;
-
-    println!("Completed multipart upload for key: {}", key);
-    Ok(())
+        .await {
+        Ok(_) => {
+            println!("Completed multipart upload for key: {}", key);
+            Ok(())
+        },
+        Err(e) => {
+            eprintln!("Error completing multipart upload for key {}: {:?}", key, e);
+            Err(S3ExampleError::from(e))
+        }
+    }
 }
 
 async fn put_file(url: &str, path: &str, client: Client) {
@@ -378,24 +387,35 @@ fn start_compio_worker() -> (Sender<CompioCmd>, Receiver<CompioReply>) {
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async move {
             let client = cyper::Client::builder().use_rustls_default().build();
+            let semaphore = Arc::new(Semaphore::new(100));
 
             while let Some(cmd) = rx.recv().await {
-                
-                println!("Compio consumed command");
 
-                match cmd {
-                    CompioCmd::PutFile { url, path } => {
-                        put_file(&url, &path, client.clone()).await;
-                        let _ = reply_tx.send(PutFile { path }).await;
-                    },
-                    CompioCmd::PutMultipart { url, path, start_pos, end_pos, part_number, upload_id, total_parts } => {
-                        println!("Putting part {} of {} for {}", part_number, total_parts, path);
+                //println!("Compio consumed command");
 
-                        let etag = put_file_multipart(&url, &path, start_pos, end_pos, client.clone()).await;
+                let client_clone = client.clone();
+                let reply_tx_clone = reply_tx.clone();
+                let sem_clone = semaphore.clone();
 
-                        let _ = reply_tx.send(PutMultipart { path, part_number, etag, upload_id, total_parts }).await;
+                compio::runtime::spawn(async move {
+                    let _permit = sem_clone.acquire().await.unwrap();
+
+                    match cmd {
+                        CompioCmd::PutFile { url, path } => {
+                            println!("Putting file {}", path);
+
+                            put_file(&url, &path, client_clone).await;
+                            let _ = reply_tx_clone.send(PutFile { path }).await;
+                        },
+                        CompioCmd::PutMultipart { url, path, start_pos, end_pos, part_number, upload_id, total_parts } => {
+                            println!("Putting part {} of {} for {}", part_number, total_parts, path);
+
+                            let etag = put_file_multipart(&url, &path, start_pos, end_pos, client_clone).await;
+
+                            let _ = reply_tx_clone.send(PutMultipart { path, part_number, etag, upload_id, total_parts }).await;
+                        }
                     }
-                }
+                }).detach();
             }
         });
     });
