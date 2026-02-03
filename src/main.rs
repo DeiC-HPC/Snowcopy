@@ -14,6 +14,7 @@ use crate::s3example_error::S3ExampleError;
 use crate::CompioReply::PutFile;
 use crate::CompioReply::PutMultipart;
 use aws_config::BehaviorVersion;
+use aws_sdk_s3::config::timeout::TimeoutConfig;
 use aws_sdk_s3::operation::create_bucket::CreateBucketOutput;
 use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadOutput;
 use aws_sdk_s3::presigning::{PresignedRequest, PresigningConfig};
@@ -31,14 +32,13 @@ use futures::future::join_all;
 use http::{Method, StatusCode};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tokio;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::Semaphore;
-use std::sync::Arc;
-use std::thread::sleep;
 use tracing_subscriber::{fmt, EnvFilter};
 use url::Url;
 
@@ -144,7 +144,7 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
         let file_path_str = file_path.to_str().unwrap().to_string();
 
         let future = async move {
-                        if(size > constants::CHUNK_SIZE) {
+            if size > constants::CHUNK_SIZE {
                 async move {
                     //Start
                     let output: CreateMultipartUploadOutput = client_clone.create_multipart_upload().bucket(bucket_clone.clone()).key(key_clone.clone()).send().await.unwrap();
@@ -159,13 +159,13 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
                         let end_pos = std::cmp::min((i + 1) * constants::CHUNK_SIZE, size);
 
                         let part_number = (i + 1) as i32;
-                        let part_presigned = presign_upload_part(&client_clone, &bucket_clone, &key_clone, upload_id, part_number, constants::presignLifetime).await;
+                        let part_presigned = presign_upload_part(&client_clone, &bucket_clone, &key_clone, upload_id, part_number, constants::PRESIGN_LIFETIME).await;
 
                         compio_tx_clone.send(CompioCmd::PutMultipart { url: part_presigned.uri().into(), path: file_path_str.clone(), start_pos, end_pos, part_number, upload_id: upload_id.to_string(), total_parts }).await.expect("Failed to send command");
                     }
                 }.await
             } else {
-                let presigned = presign_put_object(&client_clone, &bucket_clone, &key_clone, constants::presignLifetime).await;
+                let presigned = presign_put_object(&client_clone, &bucket_clone, &key_clone, constants::PRESIGN_LIFETIME).await;
                 compio_tx_clone.send(CompioCmd::PutFile {
                     url: presigned.uri().into(),
                     path: file_path_str,
@@ -277,6 +277,9 @@ async fn complete_multipart_upload(
             Ok(())
         },
         Err(e) => {
+            if let Some(status) = e.raw_response().map(|r| r.status()) {
+                eprintln!("HTTP status code: {}", status);
+            }
             eprintln!("Error completing multipart upload for key {}: {:?}", key, e);
             Err(S3ExampleError::from(e))
         }
@@ -312,7 +315,6 @@ async fn put_file(url: &str, path: &str, client: Client) {
 }
 
 
-
 /// Stream 'len' bytes from 'file' starting at 'start', in chunks up to 'chunk_size'.
 /// The stream yields `Bytes` and is accepted by `cyper::Body::stream`.
 fn file_slice_stream(
@@ -340,7 +342,7 @@ fn file_slice_stream(
                 remaining -= n as u64;
                 Some((Ok(chunk), (file, pos, remaining)))
             }
-            BufResult(Err(e), buf) => {
+            BufResult(Err(e), _) => {
                 Some((Err(cyper::Error::from(e)), (file, pos, 0)))
             }
         }
@@ -602,10 +604,17 @@ async fn create_client(region: Region, access_key: &str, secret_key: &str, url: 
         .load()
         .await;
 
+
+    let timeout_config = TimeoutConfig::builder()
+        .operation_timeout(Duration::from_secs(120))
+        .build();
+
+
     let s3_conf = S3ConfigBuilder::from(&shared_config)
         .force_path_style(true)
         .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
         .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
+        .timeout_config(timeout_config)
         .build();
 
 
