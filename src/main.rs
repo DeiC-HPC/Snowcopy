@@ -122,12 +122,52 @@ fn walk_dir_files(dir: impl AsRef<Path>, mut on_file: impl FnMut(&Path) -> io::R
     }
 }
 
+
+fn start_workers(num_workers: usize, permits : usize)
+                     -> (mpsc::Sender<CompioCmd>, mpsc::Receiver<CompioReply>)
+{
+    let (cmd_tx, mut cmd_rx) = mpsc::channel::<CompioCmd>(256);
+    let (reply_tx, reply_rx) = mpsc::channel::<CompioReply>(256);
+
+    let global_sem = Arc::new(Semaphore::new(permits));
+    //let client = cyper::Client::builder().use_rustls_default().build();
+
+    // Each worker gets its own inbound queue
+    let mut worker_senders = Vec::new();
+
+    for _ in 0..num_workers {
+        let (w_tx, w_rx) = mpsc::channel::<CompioCmd>(64);
+        worker_senders.push(w_tx);
+
+        // Start each worker thread
+        start_compio_worker(w_rx, reply_tx.clone(), global_sem.clone(), cyper::Client::builder().use_rustls_default().build()); //TODO Jon: can we use one client?
+    }
+
+    // A dispatcher task that owns cmd_rx
+    tokio::spawn(async move {
+        let mut round_robin = 0;
+
+        while let Some(cmd) = cmd_rx.recv().await {
+            let idx = round_robin % worker_senders.len();
+            round_robin += 1;
+
+            let _ = worker_senders[idx].send(cmd).await;
+        }
+    });
+
+    (cmd_tx, reply_rx)
+}
+
+
 async fn run_s3_ceph(bucket: &str, path: &Path) {
-    let (compio_tx, mut reply_rx) = start_compio_worker();
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    let (cmd_tx, mut reply_rx) = start_workers(std::cmp::max(num_cpus -1, 1), 100);
 
     // Read config file
     let config = create_config();
-
 
     let client = create_client(Region::new(constants::DEFAULT_REGION), config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await;
     create_bucket(&client, bucket).await.unwrap();
@@ -146,7 +186,7 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
         let key_clone = normalize_path(file_path.to_str().unwrap()).to_string();
         let bucket_clone = bucket.to_string();
         let client_clone = client.clone();
-        let compio_tx_clone = compio_tx.clone();
+        let cmd_tx = cmd_tx.clone();
         let file_path_str = file_path.to_str().unwrap().to_string();
 
         let future = async move {
@@ -167,14 +207,15 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
                         let part_number = (i + 1) as i32;
                         let part_presigned = presign_upload_part(&client_clone, &bucket_clone, &key_clone, upload_id, part_number, constants::PRESIGN_LIFETIME).await;
 
-                        compio_tx_clone.send(CompioCmd::PutMultipart { url: part_presigned.uri().into(), path: file_path_str.clone(), start_pos, end_pos, part_number, upload_id: upload_id.to_string(), total_parts }).await.expect("Failed to send command");
+
+                        cmd_tx.send(CompioCmd::PutMultipart { url: part_presigned.uri().into(), path: file_path_str.clone(), start_pos, end_pos, part_number, upload_id: upload_id.to_string(), total_parts}).await.expect("Failed to send command");
                     }
                 }.await
             } else {
                 let presigned = presign_put_object(&client_clone, &bucket_clone, &key_clone, constants::PRESIGN_LIFETIME).await;
-                compio_tx_clone.send(CompioCmd::PutFile {
+                cmd_tx.send(CompioCmd::PutFile {
                     url: presigned.uri().into(),
-                    path: file_path_str,
+                    path: file_path_str
                 }).await.expect("Failed to send command");
             }
         };
@@ -192,11 +233,12 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
 
         match evt {
             PutFile { path } => {
-            println!("{:?} uploaded.", path);
+                println!("{:?} uploaded.", path);
                 completed_file_count = completed_file_count + 1;
+                println!("Completed files {} of {}", completed_file_count, upload_count);
             }
             PutMultipart { path, part_number, etag, upload_id, total_parts } => {
-                println!("{:?} uploaded. Part number: {}, etag: {}", path, part_number, etag);
+                //println!("{:?} uploaded. Part number: {}, etag: {}", path, part_number, etag);
 
                 let entry = multipart_state.entry(path.clone()).or_insert((upload_id.clone(), String::new(), total_parts, Vec::new()));
 
@@ -213,7 +255,7 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
 
                 // Check if all parts have been received
                 if entry.3.len() == total_parts as usize {
-                    println!("All parts received for {:?}, completing multipart upload", path);
+                    //println!("All parts received for {:?}, completing multipart upload", path);
 
                     // Sort parts by part number
                     entry.3.sort_by_key(|p| p.part_number());
@@ -228,25 +270,26 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
                     complete_multipart_upload(&client, bucket, &key_val, &upload_id_val, parts).await.expect("Failed to complete multipart upload");
 
                     completed_file_count = completed_file_count + 1;
+                    println!("{:?} uploaded.", path);
+                    println!("Completed files {} of {}", completed_file_count, upload_count);
+
                 }
             }
 
             /*
             CompioReply::CompleteMultipart { .. } => {
                 completed_file_count = completed_file_count + 1;
+
             }
 
              */
         }
 
-        println!("Completed files {} of {}", completed_file_count, upload_count);
 
         if completed_file_count == upload_count {
             break;
         }
     }
-
-    list_bucket(&client, bucket).await.unwrap();
 }
 
 fn normalize_path(path: &str) -> String {
@@ -373,7 +416,7 @@ fn file_slice_stream(
 
 async fn put_file_multipart(url: &str, path: &str, start_pos: u64, end_pos: u64, client: Client) -> String {
     let file = OpenOptions::new().read(true).open(path).await.unwrap();
-    let stream = file_slice_stream(file, start_pos, end_pos - start_pos, 256 * 1024);
+    let stream = file_slice_stream(file, start_pos, end_pos - start_pos, 1024 * 1024);
 
     let stream = send_wrapper::SendWrapper::new(stream);
 
@@ -391,47 +434,47 @@ async fn put_file_multipart(url: &str, path: &str, start_pos: u64, end_pos: u64,
 
 enum CompioCmd {
     PutFile { url: String, path: String },
-    PutMultipart { url: String, path: String, start_pos: u64, end_pos: u64, part_number: i32, upload_id: String, total_parts: i32 },
+    PutMultipart { url: String, path: String, start_pos: u64, end_pos: u64, part_number: i32, upload_id: String, total_parts: i32},
     //CompleteMultipart {key: String, upload_id: String, parts: Vec<CompletedPart> , config: Config, bucket: String},
 }
 
 enum CompioReply {
-    PutFile { path: String },
-    PutMultipart { path: String, part_number: i32, etag: String, upload_id: String, total_parts: i32 },
+    PutFile { path: String,},
+    PutMultipart { path: String, part_number: i32, etag: String, upload_id: String, total_parts: i32,},
     //CompleteMultipart { key: String, upload_id: String},
 }
 
-fn start_compio_worker() -> (Sender<CompioCmd>, Receiver<CompioReply>) {
-    let (tx, mut rx) = mpsc::channel::<CompioCmd>(64);
-    let (reply_tx, reply_rx) = mpsc::channel::<CompioReply>(64);
+fn start_compio_worker(
+    mut cmd_rx: mpsc::Receiver<CompioCmd>,
+    reply_tx: mpsc::Sender<CompioReply>,
+    global_sem: Arc<Semaphore>,
+    client: Client,
+) {
 
     thread::spawn(move || {
         // Compio must live on this thread
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async move {
-            let client = cyper::Client::builder().use_rustls_default().build();
-            let semaphore = Arc::new(Semaphore::new(100));
-
-            while let Some(cmd) = rx.recv().await {
+            while let Some(cmd) = cmd_rx.recv().await {
 
                 //println!("Compio consumed command");
 
                 let client_clone = client.clone();
                 let reply_tx_clone = reply_tx.clone();
-                let sem_clone = semaphore.clone();
+                let sem_clone = global_sem.clone();
 
                 compio::runtime::spawn(async move {
                     let _permit = sem_clone.acquire().await.unwrap();
 
                     match cmd {
                         CompioCmd::PutFile { url, path } => {
-                            println!("Putting file {}", path);
+                            //println!("Putting file {}", path);
 
                             put_file(&url, &path, client_clone).await;
                             let _ = reply_tx_clone.send(PutFile { path }).await;
                         },
-                        CompioCmd::PutMultipart { url, path, start_pos, end_pos, part_number, upload_id, total_parts } => {
-                            println!("Putting part {} of {} for {}", part_number, total_parts, path);
+                        CompioCmd::PutMultipart { url, path, start_pos, end_pos, part_number, upload_id, total_parts} => {
+                            //println!("Putting part {} of {} for {}", part_number, total_parts, path);
 
                             let etag = put_file_multipart(&url, &path, start_pos, end_pos, client_clone).await;
 
@@ -451,8 +494,6 @@ fn start_compio_worker() -> (Sender<CompioCmd>, Receiver<CompioReply>) {
             }
         });
     });
-
-    (tx, reply_rx)
 }
 
 /// Generate a URL for a presigned GET request.
@@ -548,14 +589,14 @@ fn parse_arguments() -> ArgMatches {
                 .help("Input path")
                 .required(true)
                 .value_name("PATH")
-                //.index(1),
+            //.index(1),
         )
         .arg(
             Arg::new("o")
                 .help("Transfer method")
                 .required(false)
                 .default_value("o1")
-                //.index(1),
+            //.index(1),
         )
         .after_help("Example:\n  snowplowRust -b jon-test testData2")
         .get_matches();
