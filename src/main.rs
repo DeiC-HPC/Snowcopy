@@ -1,5 +1,6 @@
 mod s3example_error;
 mod constants;
+mod signer;
 
 use crate::TransferMethod::CephS3;
 use serde;
@@ -11,7 +12,7 @@ use aws_sdk_s3::config::{Credentials, Region};
 use std::time::Instant;
 
 use crate::s3example_error::S3ExampleError;
-use crate::CompioReply::PutFile;
+use crate::CompioReply::{PutFile};
 use crate::CompioReply::PutMultipart;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::config::timeout::TimeoutConfig;
@@ -43,10 +44,14 @@ use tracing_subscriber::{fmt, EnvFilter};
 use url::Url;
 
 use bytes::Bytes;
-use compio::io::AsyncReadAtExt;
+use chrono::{DateTime, Utc};
 use compio::BufResult;
 use futures_util::stream;
 
+use hmac::{Hmac, Mac};
+use hex;
+//TODO jon should this be something from the compio crate?
+use sha2::{Digest, Sha256};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -86,7 +91,7 @@ fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct Config {
     s3_access_key: String,
     s3_secret_key: String,
@@ -122,6 +127,7 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
 
     // Read config file
     let config = create_config();
+
 
     let client = create_client(Region::new(constants::DEFAULT_REGION), config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await;
     create_bucket(&client, bucket).await.unwrap();
@@ -182,6 +188,7 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
     println!("Starting upload of {} files", upload_count);
     join_all(upload_object_future_group).await;
     while let Some(evt) = reply_rx.recv().await {
+        let config_clone = config.clone();
 
         match evt {
             PutFile { path } => {
@@ -195,7 +202,7 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
 
                 // Store the key from the path if not already set
                 if entry.1.is_empty() {
-                    entry.1 = PathBuf::from(&path).file_name().unwrap().to_str().unwrap().to_string();
+                    entry.1 = path.clone();
                 }
 
                 // Add the completed part
@@ -213,11 +220,23 @@ async fn run_s3_ceph(bucket: &str, path: &Path) {
 
                     let (upload_id_val, key_val, _, parts) = multipart_state.remove(&path).unwrap();
 
+                    /*
+                    let bucket = String::from(bucket);
+                    compio_tx.clone().send(CompioCmd::CompleteMultipart { key: key_val.clone(), upload_id: upload_id_val.clone(), parts: parts.clone(), config : config_clone, bucket }).await.expect("Failed to send command");
+                    */
+
                     complete_multipart_upload(&client, bucket, &key_val, &upload_id_val, parts).await.expect("Failed to complete multipart upload");
 
                     completed_file_count = completed_file_count + 1;
                 }
             }
+
+            /*
+            CompioReply::CompleteMultipart { .. } => {
+                completed_file_count = completed_file_count + 1;
+            }
+
+             */
         }
 
         println!("Completed files {} of {}", completed_file_count, upload_count);
@@ -373,11 +392,13 @@ async fn put_file_multipart(url: &str, path: &str, start_pos: u64, end_pos: u64,
 enum CompioCmd {
     PutFile { url: String, path: String },
     PutMultipart { url: String, path: String, start_pos: u64, end_pos: u64, part_number: i32, upload_id: String, total_parts: i32 },
+    //CompleteMultipart {key: String, upload_id: String, parts: Vec<CompletedPart> , config: Config, bucket: String},
 }
 
 enum CompioReply {
     PutFile { path: String },
     PutMultipart { path: String, part_number: i32, etag: String, upload_id: String, total_parts: i32 },
+    //CompleteMultipart { key: String, upload_id: String},
 }
 
 fn start_compio_worker() -> (Sender<CompioCmd>, Receiver<CompioReply>) {
@@ -415,7 +436,16 @@ fn start_compio_worker() -> (Sender<CompioCmd>, Receiver<CompioReply>) {
                             let etag = put_file_multipart(&url, &path, start_pos, end_pos, client_clone).await;
 
                             let _ = reply_tx_clone.send(PutMultipart { path, part_number, etag, upload_id, total_parts }).await;
+                        },
+
+                        /*
+                        CompioCmd::CompleteMultipart { key, upload_id, parts, config, bucket } => {
+                            println!("Completing multipart upload for {}", key);
+                            complete_multipart_upload_manual(&client_clone, &bucket, &key, &upload_id, parts, &config).await.expect("Failed to complete multipart upload manually");
+                            let _ = reply_tx_clone.send(CompleteMultipart {key, upload_id }).await;
                         }
+                        */
+
                     }
                 }).detach();
             }
