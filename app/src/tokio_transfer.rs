@@ -3,11 +3,13 @@ use crate::{constants, create_config};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore, Mutex};
+use std::sync::Arc;
 use walkdir::WalkDir;
 use aws_layer::{AWSClient, CompletedPartAws};
 use http_layer::{build_https_client, PoolClient};
 use util_layer::normalize_path;
+use futures::future::join_all;
 
 
 pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path) {
@@ -20,42 +22,74 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path) {
     aws_layer::create_bucket(&client, bucket).await.unwrap();
 
     let hyper_client = build_https_client();
+    let file_sem = Arc::new(Semaphore::new(150));
+    let req_sem = Arc::new(Semaphore::new(150));
+    let mut handles = Vec::new();
 
     while let Some(result) = rx.recv().await {
         match result {
             Ok(file_info) => {
-                upload_file(bucket, &client, hyper_client.clone(), file_info).await;
+                let bucket = bucket.to_string();
+                let client = client.clone();
+                let hyper_client = hyper_client.clone();
+                let file_sem_clone = file_sem.clone();
+                let req_sem_clone = req_sem.clone();
+
+                let handle = tokio::spawn(async move {
+                    let _permit = file_sem_clone.acquire().await.unwrap();
+                    upload_file(&bucket, &client, hyper_client, file_info, req_sem_clone.clone()).await;
+                });
+                handles.push(handle);
             }
             Err(e) => {
                 eprintln!("Error walking directory: {}", e);
             }
         }
     }
+
+    join_all(handles).await;
 }
 
-async fn upload_file(bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo) {
+async fn upload_file(bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo, req_sem: Arc<Semaphore>) {
     println!("Processing file: {:?}", file_info.file_path);
     if file_info.file_size > constants::CHUNK_SIZE {
-        let key = file_info.key.clone();
-        let create_multipart_upload_output = aws_client.create_multipart_upload().bucket(bucket.clone()).key(key).send().await.unwrap();
-        let upload_id = create_multipart_upload_output.upload_id().unwrap();
+        upload_with_multipart(&bucket, aws_client, &hyper_client, &file_info, req_sem).await;
+    } else {
+        small_file_upload(bucket, &aws_client, hyper_client, file_info, req_sem).await;
+    }
+}
 
-        let chunk_amount_u64 = (file_info.file_size + constants::CHUNK_SIZE - 1) / constants::CHUNK_SIZE;
-        let total_parts = chunk_amount_u64 as i32;
+async fn upload_with_multipart(bucket: &&str, aws_client: &AWSClient, hyper_client: &PoolClient, file_info: &FileInfo, semaphore: Arc<Semaphore>) {
+    let key = file_info.key.clone();
+    let create_multipart_upload_output = aws_client.create_multipart_upload().bucket(bucket.clone()).key(key).send().await.unwrap();
+    let upload_id = create_multipart_upload_output.upload_id().unwrap();
 
-        let mut completed_parts = Vec::new();
+    let chunk_amount_u64 = (file_info.file_size + constants::CHUNK_SIZE - 1) / constants::CHUNK_SIZE;
+    let total_parts = chunk_amount_u64 as i32;
 
-        for i in 0..chunk_amount_u64 {
-            let start_pos = i * constants::CHUNK_SIZE;
-            let amount = std::cmp::min(constants::CHUNK_SIZE, file_info.file_size - start_pos);
+    let completed_parts = Arc::new(Mutex::new(Vec::new()));
+    let mut handles = Vec::new();
 
-            let part_number = (i + 1) as i32;
-            let part_presigned = aws_layer::presign_upload_part(aws_client, &bucket, &file_info.key, upload_id, part_number, constants::PRESIGN_LIFETIME).await;
+    for i in 0..chunk_amount_u64 {
+        let start_pos = i * constants::CHUNK_SIZE;
+        let amount = std::cmp::min(constants::CHUNK_SIZE, file_info.file_size - start_pos);
+
+        let part_number = (i + 1) as i32;
+        let part_presigned = aws_layer::presign_upload_part(aws_client, &bucket, &file_info.key, upload_id, part_number, constants::PRESIGN_LIFETIME).await;
+
+        let hyper_client = hyper_client.clone();
+        let file_path = file_info.file_path.clone();
+        let presigned_uri = part_presigned.uri().to_string();
+        let semaphore = semaphore.clone();
+        let completed_parts = completed_parts.clone();
+
+        let handle = tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.unwrap();
 
             let etag = put_file_multipart(
-                hyper_client.clone(),
-                part_presigned.uri(),
-                file_info.file_path.to_str().unwrap(),
+                hyper_client,
+                &presigned_uri,
+                file_path.to_str().unwrap(),
                 start_pos,
                 amount,
             ).await;
@@ -65,17 +99,20 @@ async fn upload_file(bucket: &str, aws_client: &AWSClient, hyper_client: PoolCli
                     .e_tag(etag)
                     .part_number(part_number)
                     .build();
-                completed_parts.push(completed_part);
+                completed_parts.lock().await.push(completed_part);
             }
-        }
+        });
 
-        aws_layer::complete_multipart_upload(aws_client, bucket, &file_info.key, upload_id, completed_parts).await.unwrap();
-    } else {
-        small_file_upload(bucket, &aws_client, hyper_client, file_info).await;
+        handles.push(handle);
     }
+
+    join_all(handles).await;
+
+    let completed_parts = Arc::try_unwrap(completed_parts).unwrap().into_inner();
+    aws_layer::complete_multipart_upload(aws_client, bucket, &file_info.key, upload_id, completed_parts).await.unwrap();
 }
 
-async fn small_file_upload(bucket: &str, aws_client: &&AWSClient, hyper_client: PoolClient, file_info: FileInfo) {
+async fn small_file_upload(bucket: &str, aws_client: &&AWSClient, hyper_client: PoolClient, file_info: FileInfo, req_sem: Arc<Semaphore>) {
     let presigned_request = aws_layer::presign_put(
         &aws_client,
         bucket,
@@ -83,6 +120,9 @@ async fn small_file_upload(bucket: &str, aws_client: &&AWSClient, hyper_client: 
         constants::PRESIGN_LIFETIME,
     )
         .await;
+
+
+    let _permit = req_sem.acquire().await.unwrap(); //get lock
 
     put_file(
         hyper_client.clone(),

@@ -6,13 +6,12 @@ mod old_compio_code;
 use serde;
 use serde::{Deserialize, Serialize};
 use serde_json::Result;
-use std::{fs, io};
 
 use std::time::Instant;
 
 use clap::{Arg, ArgMatches, Command};
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -65,9 +64,6 @@ struct Config {
     s3_url: String
 }
 
-
-
-
 fn create_config() -> Config {
     let config: Config = serde_json::from_str(
         std::fs::read_to_string(&constants::CONFIG_PATH)
@@ -102,7 +98,7 @@ fn parse_arguments() -> ArgMatches {
                 .help("Transfer method")
                 .short('o')
                 .required(false)
-                .default_value("o1")
+                .default_value("o2")
             //.index(1),
         )
         .after_help("Example:\n  snowplowRust -b jon-test testData2")
