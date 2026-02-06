@@ -1,0 +1,16 @@
+[package]
+name = "http_layer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hyper = { version = "1", features = ["http1"] }
+hyper-util = { version = "0.1", features = ["client","client-legacy","http1","tokio"] }
+hyper-rustls = "0.27"
+http-body-util = "0.1"
+tokio-util = { version = "0.7.18", features = ["io"] }
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+anyhow = "1"
+futures-util = "0.3.31"
+

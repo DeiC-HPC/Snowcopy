@@ -1,3 +1,4 @@
+/*
 use aws_sdk_s3::types::CompletedPart;
 use cyper::{Body, Client};
 use url::Url;
@@ -115,3 +116,6 @@ pub fn aws_v4_sign_with_s3v4(
 
     (authorization, signature.date_time)
 }
+
+
+ */

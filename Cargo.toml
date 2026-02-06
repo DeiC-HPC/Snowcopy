@@ -1,29 +1,3 @@
-[package]
-name = "snowplowRust"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-aws-config = { version = "1.8.12", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1.120.0"
-serde_json = "1.0"
-serde = { version = "1.0.228", features = ["derive"] }
-clap = { version = "4.5.54", features = ["derive"] }
-tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-futures = "0.3.31"
-chrono = "0.4.43"
-http = "1.4.0"
-url = "2.5.8"
-compio = { version = "0.17.0", features = ["macros", "tls"] }
-cyper  = { version = "0.7.1", features = ["rustls", "stream"] }
-tokio = { version = "1.49.0", features = ["rt", "rt-multi-thread", "macros"] }  # HTTPS via rustl
-anyhow = "1.0.100"
-crossbeam-channel = "0.5.15"
-futures-util = "0.3.31"  # HTTPS via rustl
-bytes = "1"
-send_wrapper = "0.6.0"
-hex = "0.4.3"
-hmac = "0.12.1"
-sha2 = "0.10.9"
-urlencoding = "2.1.3"
-s3v4 = "0.3.5"                                                  # for Bytes in Body::stream
+[workspace]
+resolver = "2"
+members = ["app", "aws_layer", "http_layer", "util_layer"]
