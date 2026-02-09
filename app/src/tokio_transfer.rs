@@ -1,15 +1,13 @@
-
 use crate::{constants, create_config};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use tokio::sync::{mpsc, Semaphore, Mutex};
-use std::sync::Arc;
-use walkdir::WalkDir;
 use aws_layer::{AWSClient, CompletedPartAws};
-use http_layer::{build_https_client, PoolClient};
-use util_layer::normalize_path;
 use futures::future::join_all;
+use http_layer::{build_https_client, PoolClient};
+use std::sync::Arc;
+use tokio::sync::{mpsc, Mutex, Semaphore};
+use walkdir::WalkDir;
 
 
 pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path) {
@@ -159,7 +157,6 @@ pub async fn walk_directory(base_path: PathBuf) -> mpsc::Receiver<Result<FileInf
     let (tx, rx) = mpsc::channel(100);
 
     tokio::spawn(async move {
-        let base = base_path.clone();
         for entry in WalkDir::new(base_path) {
             match entry {
                 Ok(entry) => {
