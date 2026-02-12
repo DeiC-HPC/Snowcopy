@@ -11,6 +11,7 @@ use hyper_util::{
 };
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 // Optimized buffer size for file reading (256 KB)
 const READ_BUFFER_SIZE: usize = 256 * 1024;
@@ -42,17 +43,7 @@ pub async fn put_file(url: &str, path: &str, client: &PoolClient) -> Result<()> 
     let file = File::open(path).await?;
     let len = file.metadata().await?.len();
 
-    let byte_stream = ReaderStream::with_capacity(file, READ_BUFFER_SIZE).map_ok(Frame::data);
-    let body: StreamingBody = StreamBody::new(byte_stream).boxed();
-
-    let req = Request::builder()
-        .method(Method::PUT)
-        .uri(uri)
-        .header("content-type", "application/octet-stream")
-        .header("content-length", len.to_string())
-        .header("connection", "keep-alive")
-        .body(body)?;
-
+    let req = create_streaming_body_put(len, uri, file)?;
     let resp = client.request(req).await?;
     let status = resp.status();
 
@@ -66,7 +57,7 @@ pub async fn put_file(url: &str, path: &str, client: &PoolClient) -> Result<()> 
 }
 
 pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, hyper_client: &PoolClient) -> Result<Option<String>> {
-    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
 
     let uri: Uri = url.parse()?;
     let mut file = File::open(path).await?;
@@ -74,20 +65,7 @@ pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, hyper
     // Seek to the starting position
     file.seek(std::io::SeekFrom::Start(from)).await?;
 
-    // Take only the bytes in the range [from, to]
-    let limited_reader = file.take(amount);
-
-    // Convert to a stream of Frames
-    let byte_stream = ReaderStream::with_capacity(limited_reader, READ_BUFFER_SIZE).map_ok(Frame::data);
-    let body: StreamingBody = StreamBody::new(byte_stream).boxed();
-
-    let req = Request::builder()
-        .method(Method::PUT)
-        .uri(uri)
-        .header("content-type", "application/octet-stream")
-        .header("content-length", amount.to_string())
-        .header("connection", "keep-alive")
-        .body(body)?;
+    let req = create_streaming_body_put(amount, uri, file)?;
 
     let resp = hyper_client.request(req).await?;
 
@@ -106,4 +84,23 @@ pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, hyper
     }
 
     Ok(etag)
+}
+
+fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::http::Result<Request<StreamingBody>> {
+
+    // Take only the bytes in the range [from, to]
+    let limited_reader = file.take(amount);
+
+    // Convert to a stream of Frames
+    let byte_stream = ReaderStream::with_capacity(limited_reader, READ_BUFFER_SIZE).map_ok(Frame::data);
+    let body: StreamingBody = StreamBody::new(byte_stream).boxed();
+
+    Request::builder()
+        .method(Method::PUT)
+        .uri(uri)
+        .header("content-type", "application/octet-stream")
+        .header("content-length", amount.to_string())
+        .header("connection", "keep-alive")
+        .body(body)
+
 }

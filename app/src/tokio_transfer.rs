@@ -63,7 +63,6 @@ async fn upload_with_multipart(bucket: &&str, aws_client: &AWSClient, hyper_clie
     let upload_id = create_multipart_upload_output.upload_id().unwrap();
 
     let chunk_amount_u64 = (file_info.file_size + constants::CHUNK_SIZE - 1) / constants::CHUNK_SIZE;
-    let total_parts = chunk_amount_u64 as i32;
 
     let completed_parts = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::new();

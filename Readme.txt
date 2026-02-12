@@ -20,3 +20,6 @@ RUST_LOG=info cargo run
 
 
 Useful examples for coding https://github.com/awsdocs/aws-doc-sdk-examples/tree/main/rustv1/examples/s3#code-examples
+
+Build on Linux with:
+cargo build --release --target x86_64-unknown-linux-musl
