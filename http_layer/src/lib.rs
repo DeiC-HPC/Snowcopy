@@ -92,7 +92,6 @@ pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, clien
 }
 
 async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::http::Result<Request<StreamingBody>> {
-
     // Take only the bytes in the range [from, to]
     let limited_reader = file.take(amount);
 
@@ -135,7 +134,7 @@ async fn create_in_memory_body_put_with_hashes(amount: u64, uri: Uri, mut file: 
         .header("content-type", "application/octet-stream")
         .header("content-length", amount.to_string())
         .header("connection", "keep-alive")
-        .header("x-amz-content-sha256", sha256_hash)
+        //.header("x-amz-content-sha256", sha256_hash) //TODO enable when using S3 v4 auth
         .header("content-md5", md5_hash)
         .body(body)
 }
