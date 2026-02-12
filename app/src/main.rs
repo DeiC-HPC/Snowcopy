@@ -108,7 +108,7 @@ fn parse_arguments() -> ArgMatches {
 
 fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+        .unwrap_or_else(|_| EnvFilter::new("info,hyper=info,hyper_util=info"));
 
     fmt()
         .with_env_filter(filter)

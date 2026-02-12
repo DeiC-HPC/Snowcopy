@@ -1,8 +1,10 @@
+mod logging;
+
 use anyhow::Result;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, StreamBody};
+use http_body_util::{BodyExt, StreamBody, Full};
 use hyper::body::Frame;
 use hyper::{Method, Request, Uri};
 use hyper_util::{
@@ -12,6 +14,9 @@ use hyper_util::{
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use sha2::{Sha256, Digest as ShaDigest};
+use md5;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 
 // Optimized buffer size for file reading (256 KB)
 const READ_BUFFER_SIZE: usize = 256 * 1024;
@@ -43,8 +48,9 @@ pub async fn put_file(url: &str, path: &str, client: &PoolClient) -> Result<()> 
     let file = File::open(path).await?;
     let len = file.metadata().await?.len();
 
-    let req = create_streaming_body_put(len, uri, file)?;
-    let resp = client.request(req).await?;
+    //let req = create_streaming_body_put(len, uri, file).await?;
+    let req = create_in_memory_body_put_with_hashes(len, uri, file).await?;
+    let resp = send_with_logging(client, req).await?;
     let status = resp.status();
 
     //drain body so the connection can be returned to the pool.
@@ -56,18 +62,17 @@ pub async fn put_file(url: &str, path: &str, client: &PoolClient) -> Result<()> 
     Ok(())
 }
 
-pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, hyper_client: &PoolClient) -> Result<Option<String>> {
-
-
+pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, client: &PoolClient) -> Result<Option<String>> {
     let uri: Uri = url.parse()?;
     let mut file = File::open(path).await?;
 
     // Seek to the starting position
     file.seek(std::io::SeekFrom::Start(from)).await?;
 
-    let req = create_streaming_body_put(amount, uri, file)?;
+    //let req = create_streaming_body_put(amount, uri, file).await?;
+    let req = create_in_memory_body_put_with_hashes(amount, uri, file).await?;
 
-    let resp = hyper_client.request(req).await?;
+    let resp = send_with_logging(client, req).await?;
 
     let status = resp.status();
     let etag = resp
@@ -86,7 +91,7 @@ pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, hyper
     Ok(etag)
 }
 
-fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::http::Result<Request<StreamingBody>> {
+async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::http::Result<Request<StreamingBody>> {
 
     // Take only the bytes in the range [from, to]
     let limited_reader = file.take(amount);
@@ -103,4 +108,46 @@ fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::http::
         .header("connection", "keep-alive")
         .body(body)
 
+}
+
+async fn create_in_memory_body_put_with_hashes(amount: u64, uri: Uri, mut file: File) -> hyper::http::Result<Request<StreamingBody>> {
+    // Read the entire range into memory
+    let mut buffer = vec![0u8; amount as usize];
+    file.read_exact(&mut buffer).await.expect("failed to read file");
+
+    // Calculate SHA256
+    let mut sha256_hasher = Sha256::new();
+    sha256_hasher.update(&buffer);
+    let sha256_hash = hex::encode(sha256_hasher.finalize());
+
+    // --- MD5 for Content-MD5: BASE64 ---
+    let md5_digest = md5::compute(&buffer);
+    let md5_hash = BASE64.encode(md5_digest.0);
+
+    // Create request with in-memory body
+    let body: StreamingBody = Full::new(Bytes::from(buffer))
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "infallible"))
+        .boxed();
+
+    Request::builder()
+        .method(Method::PUT)
+        .uri(uri)
+        .header("content-type", "application/octet-stream")
+        .header("content-length", amount.to_string())
+        .header("connection", "keep-alive")
+        .header("x-amz-content-sha256", sha256_hash)
+        .header("content-md5", md5_hash)
+        .body(body)
+}
+
+
+pub async fn send_with_logging(
+    client: &crate::PoolClient,
+    req: hyper::Request<crate::StreamingBody>,
+) -> Result<hyper::Response<hyper::body::Incoming
+>> {
+    logging::log_request_headers(&req);
+    let resp = client.request(req).await?;
+    logging::log_response_headers(&resp);
+    Ok(resp)
 }
