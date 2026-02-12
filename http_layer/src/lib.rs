@@ -113,22 +113,23 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
 
 async fn create_in_memory_body_put_with_hashes(amount: u64, uri: Uri, mut file: File) -> Result<Request<StreamingBody>> {
     let mut buffer = vec![0u8; amount as usize];
+    let mut hasher = Hasher::new(MessageDigest::md5())?;
 
-    file.read_exact(&mut buffer).await?;
+    let mut total_read = 0usize;
+    let chunk_size = READ_BUFFER_SIZE.min(amount as usize);
 
-    // Hash efficiently
-    /*
-    let sha256_hash = {
-        let mut h = Sha256::new();
-        h.update(&buffer);
-        hex::encode(h.finalize())
-    }; */
+    while total_read < amount as usize {
+        let remaining = amount as usize - total_read;
+        let to_read = remaining.min(chunk_size);
+        let chunk = &mut buffer[total_read..total_read + to_read];
+
+        file.read_exact(chunk).await?;
+        hasher.update(chunk)?;
+        total_read += to_read;
+    }
 
     let md5_hash = {
-        let mut hasher = Hasher::new(MessageDigest::md5())?;
-        hasher.update(buffer.as_slice())?;
         let bytes_hash = hasher.finish()?;
-
         general_purpose::STANDARD.encode(&bytes_hash)
     };
 

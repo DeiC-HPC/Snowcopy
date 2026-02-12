@@ -23,3 +23,7 @@ Useful examples for coding https://github.com/awsdocs/aws-doc-sdk-examples/tree/
 
 Build on Linux with:
 cargo build --release --target x86_64-unknown-linux-musl
+
+Build on Windows with:
+
+
