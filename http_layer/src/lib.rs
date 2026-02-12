@@ -1,5 +1,6 @@
 mod logging;
 
+use std::convert::Infallible;
 use anyhow::Result;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
@@ -17,6 +18,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use sha2::{Sha256, Digest as ShaDigest};
 use md5;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+
 
 // Optimized buffer size for file reading (256 KB)
 const READ_BUFFER_SIZE: usize = 256 * 1024;
@@ -50,7 +52,7 @@ pub async fn put_file(url: &str, path: &str, client: &PoolClient) -> Result<()> 
 
     //let req = create_streaming_body_put(len, uri, file).await?;
     let req = create_in_memory_body_put_with_hashes(len, uri, file).await?;
-    let resp = send_with_logging(client, req).await?;
+    let resp = client.request(req).await?; //send_with_logging(client, req).await?;
     let status = resp.status();
 
     //drain body so the connection can be returned to the pool.
@@ -109,36 +111,42 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
 
 }
 
-async fn create_in_memory_body_put_with_hashes(amount: u64, uri: Uri, mut file: File) -> hyper::http::Result<Request<StreamingBody>> {
-    // Read the entire range into memory
+async fn create_in_memory_body_put_with_hashes(amount: u64, uri: Uri, mut file: File) -> Result<Request<StreamingBody>> {
+
     let mut buffer = vec![0u8; amount as usize];
-    file.read_exact(&mut buffer).await.expect("failed to read file");
 
-    // Calculate SHA256
-    let mut sha256_hasher = Sha256::new();
-    sha256_hasher.update(&buffer);
-    let sha256_hash = hex::encode(sha256_hasher.finalize());
+    file.read_exact(&mut buffer).await?;
+    
+    // Hash efficiently
+    let sha256_hash = {
+        let mut h = Sha256::new();
+        h.update(&buffer);
+        hex::encode(h.finalize())
+    };
 
-    // --- MD5 for Content-MD5: BASE64 ---
-    let md5_digest = md5::compute(&buffer);
-    let md5_hash = BASE64.encode(md5_digest.0);
+    let md5_hash = {
+        let mut h = md5::Context::new();
+        h.consume(&buffer);
+        BASE64.encode(h.finalize().0)
+    };
 
-    // Create request with in-memory body
+    // Build hyper body (convert Infallible -> std::io::Error to match StreamingBody)
     let body: StreamingBody = Full::new(Bytes::from(buffer))
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "infallible"))
+        .map_err(|inf: Infallible| match inf {})
         .boxed();
 
-    Request::builder()
+    let req = Request::builder()
         .method(Method::PUT)
         .uri(uri)
         .header("content-type", "application/octet-stream")
         .header("content-length", amount.to_string())
         .header("connection", "keep-alive")
-        //.header("x-amz-content-sha256", sha256_hash) //TODO enable when using S3 v4 auth
+        //.header("X-Amz-Content-Sha256", sha256_hash)
         .header("content-md5", md5_hash)
-        .body(body)
-}
+        .body(body)?;
 
+    Ok(req)
+}
 
 pub async fn send_with_logging(
     client: &crate::PoolClient,
