@@ -2,6 +2,8 @@ mod logging;
 
 use std::convert::Infallible;
 use anyhow::Result;
+use base64::Engine;
+use base64::engine::general_purpose;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use http_body_util::combinators::BoxBody;
@@ -15,9 +17,7 @@ use hyper_util::{
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use sha2::{Sha256, Digest as ShaDigest};
-use md5;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use openssl::hash::{Hasher, MessageDigest};
 
 
 // Optimized buffer size for file reading (256 KB)
@@ -112,22 +112,24 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
 }
 
 async fn create_in_memory_body_put_with_hashes(amount: u64, uri: Uri, mut file: File) -> Result<Request<StreamingBody>> {
-
     let mut buffer = vec![0u8; amount as usize];
 
     file.read_exact(&mut buffer).await?;
-    
+
     // Hash efficiently
+    /*
     let sha256_hash = {
         let mut h = Sha256::new();
         h.update(&buffer);
         hex::encode(h.finalize())
-    };
+    }; */
 
     let md5_hash = {
-        let mut h = md5::Context::new();
-        h.consume(&buffer);
-        BASE64.encode(h.finalize().0)
+        let mut hasher = Hasher::new(MessageDigest::md5())?;
+        hasher.update(buffer.as_slice())?;
+        let bytes_hash = hasher.finish()?;
+
+        general_purpose::STANDARD.encode(&bytes_hash)
     };
 
     // Build hyper body (convert Infallible -> std::io::Error to match StreamingBody)
@@ -151,8 +153,7 @@ async fn create_in_memory_body_put_with_hashes(amount: u64, uri: Uri, mut file: 
 pub async fn send_with_logging(
     client: &crate::PoolClient,
     req: hyper::Request<crate::StreamingBody>,
-) -> Result<hyper::Response<hyper::body::Incoming
->> {
+) -> Result<hyper::Response<hyper::body::Incoming>> {
     logging::log_request_headers(&req);
     let resp = client.request(req).await?;
     logging::log_response_headers(&resp);
