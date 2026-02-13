@@ -75,7 +75,6 @@ pub async fn complete_multipart_upload(
         .send()
         .await {
         Ok(_) => {
-            println!("Completed multipart upload for key: {}", key);
             Ok(())
         },
         Err(e) => {

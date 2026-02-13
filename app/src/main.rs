@@ -29,8 +29,8 @@ async fn main() -> Result<()> {
     let file_limit = matches.get_one::<usize>("file_limit").copied();
     let req_limit = matches.get_one::<usize>("req_limit").copied();
 
-    println!("Bucket (-b): {}", bucket);
-    println!("Path: {}", path_as_string);
+    //println!("Bucket (-b): {}", bucket);
+    //println!("Path: {}", path_as_string);
     let path = Path::new(path_as_string);
 
     let method = match_transfer_method(Some(transfer_method)).expect(format!("Transfer method {} unknown", transfer_method).as_str());
