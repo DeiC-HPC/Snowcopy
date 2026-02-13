@@ -26,6 +26,8 @@ async fn main() -> Result<()> {
     let bucket = matches.get_one::<String>("bucket").expect("required");
     let path_as_string = matches.get_one::<String>("path").expect("required");
     let transfer_method = matches.get_one::<String>("o").expect("required");
+    let file_limit = matches.get_one::<usize>("file_limit").copied();
+    let req_limit = matches.get_one::<usize>("req_limit").copied();
 
     println!("Bucket (-b): {}", bucket);
     println!("Path: {}", path_as_string);
@@ -35,7 +37,7 @@ async fn main() -> Result<()> {
 
     match method {
         TransferMethod::CephS3 => panic!("functionality removed"), //run_s3_ceph_compio(bucket, path).await,
-        TransferMethod::CephS3Tokio => tokio_transfer::run_s3_ceph_tokio(bucket, path).await,
+        TransferMethod::CephS3Tokio => tokio_transfer::run_s3_ceph_tokio(bucket, path, file_limit, req_limit).await,
     };
 
     let elapsed = start_time.elapsed();
@@ -100,6 +102,26 @@ fn parse_arguments() -> ArgMatches {
                 .required(false)
                 .default_value("o2")
             //.index(1),
+        )
+        .arg(
+            Arg::new("file_limit")
+                .short('f')
+                .long("file-limit")
+                .value_name("NUMBER")
+                .help("Maximum number of files to process")
+                .required(false)
+                .value_parser(clap::value_parser!(usize))
+                .num_args(1),
+        )
+        .arg(
+            Arg::new("req_limit")
+                .short('r')
+                .long("req-limit")
+                .value_name("NUMBER")
+                .help("Maximum number of concurrent requests")
+                .required(false)
+                .value_parser(clap::value_parser!(usize))
+                .num_args(1),
         )
         .after_help("Example:\n  snowplowRust -b jon-test testData2")
         .get_matches();

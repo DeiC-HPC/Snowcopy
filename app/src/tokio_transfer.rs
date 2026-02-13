@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, Mutex, Semaphore};
 use walkdir::WalkDir;
 
 
-pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path) {
+pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>) {
     let mut rx = walk_directory(path.to_path_buf()).await;
 
     // Read config file
@@ -20,7 +20,7 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path) {
     aws_layer::create_bucket(&client, bucket).await.unwrap();
 
     let hyper_client = build_https_client();
-    let (file_sem, req_sem) = auto_tune_semaphores();
+    let (file_sem, req_sem) = auto_tune_semaphores(file_limit, req_limit);
     let mut handles = Vec::new();
 
     while let Some(result) = rx.recv().await {
@@ -47,35 +47,66 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path) {
     join_all(handles).await;
 }
 
-fn auto_tune_semaphores() -> (Arc<Semaphore>, Arc<Semaphore>) {
+fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>) -> (Arc<Semaphore>, Arc<Semaphore>) {
+    let file_limit = if let Some(limit) = file_limit_override {
+        println!("Using provided file_limit: {}", limit);
+        limit
+    } else {
+        #[cfg(target_os = "linux")]
+        let limit = {
+            50
+        };
 
-    #[cfg(target_os = "linux")]
-    let (file_limit, req_limit) = {
-        println!("Detected platform: Linux");
-        (50, 50)
+        #[cfg(target_os = "windows")]
+        let limit = {
+            80
+        };
 
+        #[cfg(target_os = "macos")]
+        let limit = {
+            150
+        };
+
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        let limit = {
+            println!("Detected platform: Other");
+            150
+        };
+
+        limit
     };
 
-    #[cfg(target_os = "windows")]
-    let (file_limit, req_limit) = {
-        println!("Detected platform: Windows");
-        (80, 80)
-    };
+    let req_limit = if let Some(limit) = req_limit_override {
+        println!("Using provided req_limit: {}", limit);
+        limit
+    } else {
+        #[cfg(target_os = "linux")]
+        let limit = {
+            50
+        };
 
-    #[cfg(target_os = "macos")]
-    let (file_limit, req_limit) = {
-        println!("Detected platform: macOS");
-        (150, 150)
-    };
+        #[cfg(target_os = "windows")]
+        let limit = {
+            80
+        };
 
-    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-    let (file_limit, req_limit) = {
-        println!("Detected platform: Other");
-        (150, 150)
+        #[cfg(target_os = "macos")]
+        let limit = {
+            150
+        };
+
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        let limit = {
+            150
+        };
+
+        limit
     };
 
     let file_sem = Arc::new(Semaphore::new(file_limit));
     let req_sem = Arc::new(Semaphore::new(req_limit));
+
+    println!("Auto-tuning result - file_limit: {}, req_limit: {}", file_limit, req_limit);
 
     (file_sem, req_sem)
 }
