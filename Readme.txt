@@ -24,6 +24,17 @@ Useful examples for coding https://github.com/awsdocs/aws-doc-sdk-examples/tree/
 Build on Linux with:
 cargo build --release --target x86_64-unknown-linux-musl
 
-Build on Windows with:
+Build on Windows setup:
 
 
+rustup toolchain install stable-x86_64-pc-windows-msvc
+rustup default stable-x86_64-pc-windows-msvc
+
+Install strawberry perl https://strawberryperl.com/
+Perl must be in PATH
+
+Open https://visualstudio.microsoft.com/visual-cpp-build-tools/
+Install:  Desktop development with C++
+You only need the build tools — not the full Visual Studio IDE.
+
+cargo build --release --target x86_64-pc-windows-msvc

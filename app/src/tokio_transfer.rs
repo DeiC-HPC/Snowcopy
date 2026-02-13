@@ -20,8 +20,7 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path) {
     aws_layer::create_bucket(&client, bucket).await.unwrap();
 
     let hyper_client = build_https_client();
-    let file_sem = Arc::new(Semaphore::new(150));
-    let req_sem = Arc::new(Semaphore::new(150));
+    let (file_sem, req_sem) = auto_tune_semaphores();
     let mut handles = Vec::new();
 
     while let Some(result) = rx.recv().await {
@@ -46,6 +45,39 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path) {
     }
 
     join_all(handles).await;
+}
+
+fn auto_tune_semaphores() -> (Arc<Semaphore>, Arc<Semaphore>) {
+
+    #[cfg(target_os = "linux")]
+    let (file_limit, req_limit) = {
+        println!("Detected platform: Linux");
+        (50, 50)
+
+    };
+
+    #[cfg(target_os = "windows")]
+    let (file_limit, req_limit) = {
+        println!("Detected platform: Windows");
+        (80, 80)
+    };
+
+    #[cfg(target_os = "macos")]
+    let (file_limit, req_limit) = {
+        println!("Detected platform: macOS");
+        (150, 150)
+    };
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+    let (file_limit, req_limit) = {
+        println!("Detected platform: Other");
+        (150, 150)
+    };
+
+    let file_sem = Arc::new(Semaphore::new(file_limit));
+    let req_sem = Arc::new(Semaphore::new(req_limit));
+
+    (file_sem, req_sem)
 }
 
 async fn upload_file(bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo, req_sem: Arc<Semaphore>) {
