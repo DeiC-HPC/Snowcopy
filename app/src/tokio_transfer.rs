@@ -20,9 +20,9 @@ pub enum UiEvent {
     Message(String),
 }
 
-pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>) {
+pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool) {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiEvent>();
-    let mut file_discovery_channel = walk_directory(path.to_path_buf(), ui_tx.clone()).await;
+    let mut file_discovery_channel = walk_directory(path.to_path_buf(), ui_tx.clone(), silent).await;
 
     // Read config file
     let config = create_config();
@@ -31,17 +31,26 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
     aws_layer::create_bucket(&client, bucket).await.unwrap();
 
     let hyper_client = build_https_client();
-    let (file_sem, req_sem) = auto_tune_semaphores(file_limit, req_limit);
-    
-    let pb = ProgressBar::new(0);
-    pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})  Status: {msg:25!} ")
-        .unwrap()
-        .progress_chars("#>-"));
-    pb.set_message("File discovery");
+    let (file_sem, req_sem) = auto_tune_semaphores(file_limit, req_limit, silent);
+
+    let pb = if !silent {
+        let pb = ProgressBar::new(0);
+        pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})  Status: {msg:25!} ")
+            .unwrap()
+            .progress_chars("#>-"));
+        pb.set_message("File discovery");
+        Some(pb)
+    } else {
+        None
+    };
 
     // UI task
-    let pb_ui = pb.clone();
-    let ui_handle = start_ui_task(ui_rx, pb_ui);
+    let ui_handle = if !silent {
+        let pb_ui = pb.as_ref().unwrap().clone();
+        Some(start_ui_task(ui_rx, pb_ui))
+    } else {
+        None
+    };
 
     let mut handles = Vec::new();
 
@@ -67,13 +76,19 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
         }
     }
 
-    pb.set_message("Uploading");
+    if let Some(ref pb) = pb {
+        pb.set_message("Uploading");
+    }
     drop(ui_tx); //This allows the UI task to exit gracefully when all files have been uploaded
 
     join_all(handles).await;
-    pb.finish_with_message("Success");
+    if let Some(ref pb) = pb {
+        pb.finish_with_message("Success");
+    }
 
-    let _ = ui_handle.await;
+    if let Some(ui_handle) = ui_handle {
+        let _ = ui_handle.await;
+    }
 }
 
 fn start_ui_task(mut ui_rx: UnboundedReceiver<UiEvent>, pb_ui: ProgressBar) -> JoinHandle<()> {
@@ -116,7 +131,7 @@ fn start_ui_task(mut ui_rx: UnboundedReceiver<UiEvent>, pb_ui: ProgressBar) -> J
     ui_handle
 }
 
-fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>) -> (Arc<Semaphore>, Arc<Semaphore>) {
+fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, silent: bool) -> (Arc<Semaphore>, Arc<Semaphore>) {
     let file_limit = if let Some(limit) = file_limit_override {
         //println!("Using provided file_limit: {}", limit);
         limit
@@ -175,7 +190,9 @@ fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: 
     let file_sem = Arc::new(Semaphore::new(file_limit));
     let req_sem = Arc::new(Semaphore::new(req_limit));
 
-    println!("<Init. tuning: file_limit: {}, req_limit: {}>", file_limit, req_limit);
+    if !silent {
+        println!("<Init. tuning: file_limit: {}, req_limit: {}>", file_limit, req_limit);
+    }
 
     (file_sem, req_sem)
 }
@@ -288,7 +305,7 @@ async fn put_file(hyper_client: PoolClient, url: &str, path: &str) {
     }
 }
 
-pub async fn walk_directory(base_path: PathBuf, ui_tx: UnboundedSender<UiEvent>) -> mpsc::Receiver<Result<FileInfo, io::Error>> {
+pub async fn walk_directory(base_path: PathBuf, ui_tx: UnboundedSender<UiEvent>, silent: bool) -> mpsc::Receiver<Result<FileInfo, io::Error>> {
     let (tx, rx) = mpsc::channel(100);
 
     tokio::spawn(async move {
@@ -299,10 +316,12 @@ pub async fn walk_directory(base_path: PathBuf, ui_tx: UnboundedSender<UiEvent>)
                         let file_size = entry.metadata().unwrap().len();
                         let file_path = entry.path().to_path_buf();
                         let key: String = util_layer::normalize_path(file_path.to_str().unwrap());
-                        
-                        let add_to_total = UiEvent::AddToTotal(file_size);
-                        if ui_tx.send(add_to_total).is_err(){
-                            break;
+
+                        if !silent {
+                            let add_to_total = UiEvent::AddToTotal(file_size);
+                            if ui_tx.send(add_to_total).is_err() {
+                                break;
+                            }
                         }
                         let file_info = FileInfo { file_path, key, file_size };
                         if tx.send(Ok(file_info)).await.is_err() {

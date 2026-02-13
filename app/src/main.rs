@@ -28,6 +28,8 @@ async fn main() -> Result<()> {
     let transfer_method = matches.get_one::<String>("o").expect("required");
     let file_limit = matches.get_one::<usize>("file_limit").copied();
     let req_limit = matches.get_one::<usize>("req_limit").copied();
+    let silent = matches.get_flag("silent");
+
 
     //println!("Bucket (-b): {}", bucket);
     //println!("Path: {}", path_as_string);
@@ -37,11 +39,13 @@ async fn main() -> Result<()> {
 
     match method {
         TransferMethod::CephS3 => panic!("functionality removed"), //run_s3_ceph_compio(bucket, path).await,
-        TransferMethod::CephS3Tokio => tokio_transfer::run_s3_ceph_tokio(bucket, path, file_limit, req_limit).await,
+        TransferMethod::CephS3Tokio => tokio_transfer::run_s3_ceph_tokio(bucket, path, file_limit, req_limit, silent).await,
     };
 
     let elapsed = start_time.elapsed();
-    println!("Program execution time: {:.2?}", elapsed);
+    if !silent {
+        println!("Program execution time: {:.2?}", elapsed);
+    }
 
     Ok(())
 }
@@ -122,6 +126,14 @@ fn parse_arguments() -> ArgMatches {
                 .required(false)
                 .value_parser(clap::value_parser!(usize))
                 .num_args(1),
+        )
+        .arg(
+            Arg::new("silent")
+                .short('s')
+                .long("silent")
+                .help("Suppress output messages")
+                .required(false)
+                .action(clap::ArgAction::SetTrue),
         )
         .after_help("Example:\n  snowplowRust -b jon-test testData2")
         .get_matches();
