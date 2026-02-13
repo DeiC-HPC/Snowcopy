@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use walkdir::WalkDir;
 
 pub enum UiEvent {
@@ -31,8 +32,7 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
 
     let hyper_client = build_https_client();
     let (file_sem, req_sem) = auto_tune_semaphores(file_limit, req_limit);
-
-
+    
     let pb = ProgressBar::new(0);
     pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})  Status: {msg:25!} ")
         .unwrap()
@@ -80,6 +80,9 @@ fn start_ui_task(mut ui_rx: UnboundedReceiver<UiEvent>, pb_ui: ProgressBar) -> J
     let ui_handle = tokio::spawn(async move {
         let mut total_set = false;
         let mut total: u64 = 0;
+        let mut last_update = Instant::now();
+        let mut accumulated_bytes: u64 = 0;
+        let update_interval = Duration::from_millis(100);
 
         while let Some(ev) = ui_rx.recv().await {
             match ev {
@@ -92,9 +95,22 @@ fn start_ui_task(mut ui_rx: UnboundedReceiver<UiEvent>, pb_ui: ProgressBar) -> J
                         pb_ui.inc_length(delta);
                     }
                 }
-                UiEvent::Uploaded(delta) => pb_ui.inc(delta),
+                UiEvent::Uploaded(delta) => {
+                    accumulated_bytes = accumulated_bytes.saturating_add(delta);
+                    let now = Instant::now();
+                    if now.duration_since(last_update) >= update_interval {
+                        pb_ui.inc(accumulated_bytes);
+                        accumulated_bytes = 0;
+                        last_update = now;
+                    }
+                }
                 UiEvent::Message(msg) => pb_ui.set_message(msg),
             }
+        }
+
+        // Final update to ensure all bytes are accounted for
+        if accumulated_bytes > 0 {
+            pb_ui.inc(accumulated_bytes);
         }
     });
     ui_handle
@@ -283,16 +299,16 @@ pub async fn walk_directory(base_path: PathBuf, ui_tx: UnboundedSender<UiEvent>)
                         let file_size = entry.metadata().unwrap().len();
                         let file_path = entry.path().to_path_buf();
                         let key: String = util_layer::normalize_path(file_path.to_str().unwrap());
-
-                        let file_info = FileInfo { file_path, key, file_size };
-
-                        if tx.send(Ok(file_info)).await.is_err() {
-                            break;
-                        }
+                        
                         let add_to_total = UiEvent::AddToTotal(file_size);
                         if ui_tx.send(add_to_total).is_err(){
                             break;
                         }
+                        let file_info = FileInfo { file_path, key, file_size };
+                        if tx.send(Ok(file_info)).await.is_err() {
+                            break;
+                        }
+
                     }
                 }
                 Err(e) => {
