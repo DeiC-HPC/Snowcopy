@@ -64,8 +64,10 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
                 let req_sem_clone = req_sem.clone();
                 let ui_channel = ui_tx.clone();
 
+                let _permit = file_sem_clone.acquire_owned().await.unwrap();
+
                 let handle = tokio::spawn(async move {
-                    let _permit = file_sem_clone.acquire().await.unwrap();
+                    let _permit = _permit;
                     upload_file(&bucket, &client, hyper_client, file_info, req_sem_clone.clone(), ui_channel.clone()).await;
                 });
                 handles.push(handle);
@@ -76,9 +78,6 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
         }
     }
 
-    if let Some(ref pb) = pb {
-        pb.set_message("Uploading");
-    }
     drop(ui_tx); //This allows the UI task to exit gracefully when all files have been uploaded
 
     join_all(handles).await;
@@ -97,23 +96,30 @@ fn start_ui_task(mut ui_rx: UnboundedReceiver<UiEvent>, pb_ui: ProgressBar) -> J
         let mut total: u64 = 0;
         let mut last_update = Instant::now();
         let mut accumulated_bytes: u64 = 0;
-        let update_interval = Duration::from_millis(100);
+        let mut accumulated_total: u64 = 0;
+        let update_interval = Duration::from_millis(200);
 
         while let Some(ev) = ui_rx.recv().await {
             match ev {
                 UiEvent::AddToTotal(delta) => {
                     total = total.saturating_add(delta);
-                    if !total_set {
-                        pb_ui.set_length(total);
-                        total_set = true;
-                    } else {
-                        pb_ui.inc_length(delta);
-                    }
+                    accumulated_total = accumulated_total.saturating_add(delta);
                 }
                 UiEvent::Uploaded(delta) => {
                     accumulated_bytes = accumulated_bytes.saturating_add(delta);
                     let now = Instant::now();
                     if now.duration_since(last_update) >= update_interval {
+                        // Flush accumulated total when updating uploaded bytes
+                        if accumulated_total > 0 {
+                            if !total_set {
+                                pb_ui.set_length(total);
+                                total_set = true;
+                            } else {
+                                pb_ui.inc_length(accumulated_total);
+                            }
+                            accumulated_total = 0;
+                        }
+
                         pb_ui.inc(accumulated_bytes);
                         accumulated_bytes = 0;
                         last_update = now;
@@ -123,7 +129,14 @@ fn start_ui_task(mut ui_rx: UnboundedReceiver<UiEvent>, pb_ui: ProgressBar) -> J
             }
         }
 
-        // Final update to ensure all bytes are accounted for
+        // Final update to ensure all bytes and total are accounted for
+        if accumulated_total > 0 {
+            if !total_set {
+                pb_ui.set_length(total);
+            } else {
+                pb_ui.inc_length(accumulated_total);
+            }
+        }
         if accumulated_bytes > 0 {
             pb_ui.inc(accumulated_bytes);
         }
@@ -239,6 +252,8 @@ async fn upload_with_multipart(bucket: &&str, aws_client: &AWSClient, hyper_clie
                 start_pos,
                 amount,
             ).await;
+            
+            drop(_permit);
 
             if let Some(etag) = etag {
                 let completed_part = CompletedPartAws::builder()
@@ -279,6 +294,7 @@ async fn small_file_upload(bucket: &str, aws_client: &&AWSClient, hyper_client: 
     )
         .await;
 
+    drop(_permit);
     sender.send(UiEvent::Uploaded(file_info.file_size)).unwrap();
 }
 
@@ -306,9 +322,9 @@ async fn put_file(hyper_client: PoolClient, url: &str, path: &str) {
 }
 
 pub async fn walk_directory(base_path: PathBuf, ui_tx: UnboundedSender<UiEvent>, silent: bool) -> mpsc::Receiver<Result<FileInfo, io::Error>> {
-    let (tx, rx) = mpsc::channel(100);
+    let (tx, rx) = mpsc::channel(1000);
 
-    tokio::spawn(async move {
+    tokio::task::spawn_blocking(move || {
         for entry in WalkDir::new(base_path) {
             match entry {
                 Ok(entry) => {
@@ -324,20 +340,20 @@ pub async fn walk_directory(base_path: PathBuf, ui_tx: UnboundedSender<UiEvent>,
                             }
                         }
                         let file_info = FileInfo { file_path, key, file_size };
-                        if tx.send(Ok(file_info)).await.is_err() {
+                        if tx.blocking_send(Ok(file_info)).is_err() {
                             break;
                         }
-
                     }
                 }
                 Err(e) => {
                     let io_error = io::Error::new(io::ErrorKind::Other, e);
-                    if tx.send(Err(io_error)).await.is_err() {
+                    if tx.blocking_send(Err(io_error)).is_err() {
                         break;
                     }
                 }
             }
         }
+        ui_tx.send(UiEvent::Message("Uploading".to_string()))
     });
 
     rx

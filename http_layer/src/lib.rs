@@ -33,6 +33,7 @@ pub fn build_https_client() -> PoolClient {
 
     let mut http = HttpConnector::new();
     http.enforce_http(false); // allow https
+    http.set_nodelay(true);
 
     let https = HttpsConnectorBuilder::new()
         .with_native_roots()
@@ -106,9 +107,7 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
         .uri(uri)
         .header("content-type", "application/octet-stream")
         .header("content-length", amount.to_string())
-        .header("connection", "keep-alive")
         .body(body)
-
 }
 
 async fn create_in_memory_body_put_with_hashes(amount: u64, uri: Uri, mut file: File) -> Result<Request<StreamingBody>> {
@@ -143,8 +142,6 @@ async fn create_in_memory_body_put_with_hashes(amount: u64, uri: Uri, mut file: 
         .uri(uri)
         .header("content-type", "application/octet-stream")
         .header("content-length", amount.to_string())
-        .header("connection", "keep-alive")
-        //.header("X-Amz-Content-Sha256", sha256_hash)
         .header("content-md5", md5_hash)
         .body(body)?;
 
