@@ -64,11 +64,8 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
                 let req_sem_clone = req_sem.clone();
                 let ui_channel = ui_tx.clone();
 
-                let _permit = file_sem_clone.acquire_owned().await.unwrap();
-
                 let handle = tokio::spawn(async move {
-                    let _permit = _permit;
-                    upload_file(&bucket, &client, hyper_client, file_info, req_sem_clone.clone(), ui_channel.clone()).await;
+                    upload_file(&bucket, &client, hyper_client, file_info, file_sem_clone, req_sem_clone, ui_channel).await;
                 });
                 handles.push(handle);
             }
@@ -209,15 +206,15 @@ fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: 
     (file_sem, req_sem)
 }
 
-async fn upload_file(bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo, req_sem: Arc<Semaphore>, sender: UnboundedSender<UiEvent>) {
+async fn upload_file(bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, sender: UnboundedSender<UiEvent>) {
     if file_info.file_size > constants::CHUNK_SIZE {
-        upload_with_multipart(&bucket, aws_client, &hyper_client, &file_info, req_sem, sender).await;
+        upload_with_multipart(&bucket, aws_client, &hyper_client, &file_info, file_sem, req_sem, sender).await;
     } else {
-        small_file_upload(bucket, &aws_client, hyper_client, file_info, req_sem, sender).await;
+        small_file_upload(bucket, &aws_client, hyper_client, file_info, file_sem, req_sem, sender).await;
     }
 }
 
-async fn upload_with_multipart(bucket: &&str, aws_client: &AWSClient, hyper_client: &PoolClient, file_info: &FileInfo, semaphore: Arc<Semaphore>, sender: UnboundedSender<UiEvent>) {
+async fn upload_with_multipart(bucket: &&str, aws_client: &AWSClient, hyper_client: &PoolClient, file_info: &FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, sender: UnboundedSender<UiEvent>) {
     let key = file_info.key.clone();
     let create_multipart_upload_output = aws_client.create_multipart_upload().bucket(bucket.clone()).key(key).send().await.unwrap();
     let upload_id = create_multipart_upload_output.upload_id().unwrap();
@@ -237,22 +234,21 @@ async fn upload_with_multipart(bucket: &&str, aws_client: &AWSClient, hyper_clie
         let hyper_client = hyper_client.clone();
         let file_path = file_info.file_path.clone();
         let presigned_uri = part_presigned.uri().to_string();
-        let semaphore = semaphore.clone();
+        let file_sem_clone = file_sem.clone();
+        let req_sem_clone = req_sem.clone();
         let completed_parts = completed_parts.clone();
         let sender_cloned = sender.clone();
 
         let handle = tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
-
             let etag = put_file_multipart(
                 hyper_client,
                 &presigned_uri,
                 file_path.to_str().unwrap(),
                 start_pos,
                 amount,
+                file_sem_clone,
+                req_sem_clone,
             ).await;
-            
-            drop(_permit);
 
             if let Some(etag) = etag {
                 let completed_part = CompletedPartAws::builder()
@@ -274,7 +270,7 @@ async fn upload_with_multipart(bucket: &&str, aws_client: &AWSClient, hyper_clie
     aws_layer::complete_multipart_upload(aws_client, bucket, &file_info.key, upload_id, completed_parts).await.unwrap();
 }
 
-async fn small_file_upload(bucket: &str, aws_client: &&AWSClient, hyper_client: PoolClient, file_info: FileInfo, req_sem: Arc<Semaphore>, sender: UnboundedSender<UiEvent>) {
+async fn small_file_upload(bucket: &str, aws_client: &&AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, sender: UnboundedSender<UiEvent>) {
     let presigned_request = aws_layer::presign_put(
         &aws_client,
         bucket,
@@ -283,22 +279,20 @@ async fn small_file_upload(bucket: &str, aws_client: &&AWSClient, hyper_client: 
     )
         .await;
 
-
-    let _permit = req_sem.acquire().await.unwrap(); //get lock
-
     put_file(
         hyper_client.clone(),
         presigned_request.uri(),
-        file_info.file_path.to_str().unwrap()
+        file_info.file_path.to_str().unwrap(),
+        file_sem,
+        req_sem,
     )
         .await;
 
-    drop(_permit);
     sender.send(UiEvent::Uploaded(file_info.file_size)).unwrap();
 }
 
-async fn put_file_multipart(hyper_client: PoolClient, presigned_url: &str, file_path: &str, start_pos: u64, amount: u64) -> Option<String> {
-    match http_layer::put_file_range(presigned_url, file_path, start_pos, amount, &hyper_client).await {
+async fn put_file_multipart(hyper_client: PoolClient, presigned_url: &str, file_path: &str, start_pos: u64, amount: u64, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) -> Option<String> {
+    match http_layer::put_file_range(presigned_url, file_path, start_pos, amount, &hyper_client, file_sem, req_sem).await {
         Ok(etag) => Some(etag?),
         Err(e) => {
             eprintln!("Error putting file chunk {} (start: {}, amount: {}): {}", file_path, start_pos, amount, e);
@@ -314,8 +308,8 @@ pub struct FileInfo {
     pub file_size: u64,
 }
 
-async fn put_file(hyper_client: PoolClient, url: &str, path: &str) {
-    if let Err(e) = http_layer::put_file(url, path, &hyper_client).await {
+async fn put_file(hyper_client: PoolClient, url: &str, path: &str, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) {
+    if let Err(e) = http_layer::put_file(url, path, &hyper_client, file_sem, req_sem).await {
         eprintln!("Error putting file {}: {}", path, e);
     }
 }

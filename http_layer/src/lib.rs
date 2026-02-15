@@ -1,6 +1,7 @@
 mod logging;
 
 use std::convert::Infallible;
+use std::sync::Arc;
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose;
@@ -18,7 +19,7 @@ use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use openssl::hash::{Hasher, MessageDigest};
-
+use tokio::sync::Semaphore;
 
 // Optimized buffer size for file reading (256 KB)
 const READ_BUFFER_SIZE: usize = 256 * 1024;
@@ -46,12 +47,16 @@ pub fn build_https_client() -> PoolClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(url: &str, path: &str, client: &PoolClient) -> Result<()> {
+pub async fn put_file(url: &str, path: &str, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) -> Result<()> {
     let uri: Uri = url.parse()?;
 
     //let req = create_streaming_body_put(len, uri, file).await?;
-    let req = create_in_memory_body_put_with_hashes(0, None, uri, path).await?;
-    let resp = client.request(req).await?; //send_with_logging(client, req).await?;
+    let req = create_in_memory_body_put_with_hashes(0, None, uri, path, file_sem).await?;
+
+    let permit = req_sem.acquire().await?;
+    let resp = client.request(req).await?;
+    drop(permit);
+
     let status = resp.status();
 
     //drain body so the connection can be returned to the pool.
@@ -63,14 +68,15 @@ pub async fn put_file(url: &str, path: &str, client: &PoolClient) -> Result<()> 
     Ok(())
 }
 
-pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, client: &PoolClient) -> Result<Option<String>> {
+pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) -> Result<Option<String>> {
     let uri: Uri = url.parse()?;
 
-
     //let req = create_streaming_body_put(amount, uri, file).await?;
-    let req = create_in_memory_body_put_with_hashes(from, Some(amount), uri, path).await?;
+    let req = create_in_memory_body_put_with_hashes(from, Some(amount), uri, path, file_sem).await?;
 
-    let resp = send_with_logging(client, req).await?;
+    let permit = req_sem.acquire().await?;
+    let resp = client.request(req).await?; //send_with_logging(client, req).await?;
+    drop(permit);
 
     let status = resp.status();
     let etag = resp
@@ -105,7 +111,8 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
         .body(body)
 }
 
-async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, uri: Uri, path: &str) -> Result<Request<StreamingBody>> {
+async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, uri: Uri, path: &str, file_sem: Arc<Semaphore>) -> Result<Request<StreamingBody>> {
+    let file_lock = file_sem.acquire().await?;
     let mut file = File::open(path).await?;
 
     let amount = match amount_option {
@@ -113,7 +120,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         None => file.metadata().await?.len(),
     };
 
-    if(start > 0) {
+    if start > 0 {
         file.seek(std::io::SeekFrom::Start(start)).await?;
     }
 
@@ -130,17 +137,16 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         file.read_exact(chunk).await?;
         total_read += to_read;
     }
+    drop(file);
+    drop(file_lock);
 
     let bytes = Bytes::from(buffer);        // moves Vec into Bytes (no data copy)
     let bytes_for_hash = bytes.clone();     // cheap clone (shared backing storage)
 
-    let md5_hash = tokio::task::spawn_blocking(move || -> Result<String> {
-        let mut hasher = Hasher::new(MessageDigest::md5())?;
-        hasher.update(&bytes_for_hash)?;
-        let digest = hasher.finish()?;
-        Ok(general_purpose::STANDARD.encode(digest))
-    })
-        .await??;
+    let mut hasher = Hasher::new(MessageDigest::md5())?;
+    hasher.update(&bytes_for_hash)?;
+    let digest = hasher.finish()?;
+    let md5_hash = general_purpose::STANDARD.encode(digest);
 
     let body: StreamingBody = Full::new(bytes)
         .map_err(|inf: Infallible| match inf {})
