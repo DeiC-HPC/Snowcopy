@@ -35,7 +35,7 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
 
     let pb = if !silent {
         let pb = ProgressBar::new(0);
-        pb.set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})  Status: {msg:25!} ")
+        pb.set_style(ProgressStyle::with_template("[{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})  Status: {msg:25!} ")
             .unwrap()
             .progress_chars("#>-"));
         pb.set_message("File discovery");
@@ -89,9 +89,8 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
         let _ = ui_handle.await;
     }
 }
-
 fn start_ui_task(mut ui_rx: UnboundedReceiver<UiEvent>, pb_ui: ProgressBar) -> JoinHandle<()> {
-    let ui_handle = tokio::spawn(async move {
+    let ui_handle = tokio::task::spawn_blocking(move || {
         let mut total_set = false;
         let mut total: u64 = 0;
         let mut last_update = Instant::now();
@@ -99,7 +98,7 @@ fn start_ui_task(mut ui_rx: UnboundedReceiver<UiEvent>, pb_ui: ProgressBar) -> J
         let mut accumulated_total: u64 = 0;
         let update_interval = Duration::from_millis(200);
 
-        while let Some(ev) = ui_rx.recv().await {
+        while let Some(ev) = ui_rx.blocking_recv() {
             match ev {
                 UiEvent::AddToTotal(delta) => {
                     total = total.saturating_add(delta);

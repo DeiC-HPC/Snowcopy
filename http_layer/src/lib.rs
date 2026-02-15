@@ -48,11 +48,9 @@ pub fn build_https_client() -> PoolClient {
 
 pub async fn put_file(url: &str, path: &str, client: &PoolClient) -> Result<()> {
     let uri: Uri = url.parse()?;
-    let file = File::open(path).await?;
-    let len = file.metadata().await?.len();
 
     //let req = create_streaming_body_put(len, uri, file).await?;
-    let req = create_in_memory_body_put_with_hashes(len, uri, file).await?;
+    let req = create_in_memory_body_put_with_hashes(0, None, uri, path).await?;
     let resp = client.request(req).await?; //send_with_logging(client, req).await?;
     let status = resp.status();
 
@@ -67,13 +65,10 @@ pub async fn put_file(url: &str, path: &str, client: &PoolClient) -> Result<()> 
 
 pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, client: &PoolClient) -> Result<Option<String>> {
     let uri: Uri = url.parse()?;
-    let mut file = File::open(path).await?;
 
-    // Seek to the starting position
-    file.seek(std::io::SeekFrom::Start(from)).await?;
 
     //let req = create_streaming_body_put(amount, uri, file).await?;
-    let req = create_in_memory_body_put_with_hashes(amount, uri, file).await?;
+    let req = create_in_memory_body_put_with_hashes(from, Some(amount), uri, path).await?;
 
     let resp = send_with_logging(client, req).await?;
 
@@ -110,9 +105,19 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
         .body(body)
 }
 
-async fn create_in_memory_body_put_with_hashes(amount: u64, uri: Uri, mut file: File) -> Result<Request<StreamingBody>> {
+async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, uri: Uri, path: &str) -> Result<Request<StreamingBody>> {
+    let mut file = File::open(path).await?;
+
+    let amount = match amount_option {
+        Some(v) => v,
+        None => file.metadata().await?.len(),
+    };
+
+    if(start > 0) {
+        file.seek(std::io::SeekFrom::Start(start)).await?;
+    }
+
     let mut buffer = vec![0u8; amount as usize];
-    let mut hasher = Hasher::new(MessageDigest::md5())?;
 
     let mut total_read = 0usize;
     let chunk_size = READ_BUFFER_SIZE.min(amount as usize);
@@ -123,17 +128,21 @@ async fn create_in_memory_body_put_with_hashes(amount: u64, uri: Uri, mut file: 
         let chunk = &mut buffer[total_read..total_read + to_read];
 
         file.read_exact(chunk).await?;
-        hasher.update(chunk)?;
         total_read += to_read;
     }
 
-    let md5_hash = {
-        let bytes_hash = hasher.finish()?;
-        general_purpose::STANDARD.encode(&bytes_hash)
-    };
+    let bytes = Bytes::from(buffer);        // moves Vec into Bytes (no data copy)
+    let bytes_for_hash = bytes.clone();     // cheap clone (shared backing storage)
 
-    // Build hyper body (convert Infallible -> std::io::Error to match StreamingBody)
-    let body: StreamingBody = Full::new(Bytes::from(buffer))
+    let md5_hash = tokio::task::spawn_blocking(move || -> Result<String> {
+        let mut hasher = Hasher::new(MessageDigest::md5())?;
+        hasher.update(&bytes_for_hash)?;
+        let digest = hasher.finish()?;
+        Ok(general_purpose::STANDARD.encode(digest))
+    })
+        .await??;
+
+    let body: StreamingBody = Full::new(bytes)
         .map_err(|inf: Infallible| match inf {})
         .boxed();
 
