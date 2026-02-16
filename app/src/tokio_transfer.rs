@@ -1,4 +1,4 @@
-use crate::{constants, create_config};
+use crate::{constants, read_config};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -7,6 +7,7 @@ use futures::future::join_all;
 use http_layer::{build_https_client, BufferPool, PoolClient};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex, Semaphore};
@@ -24,18 +25,23 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiEvent>();
     let mut file_discovery_channel = walk_directory(path.to_path_buf(), ui_tx.clone(), silent).await;
 
-    // Read config file
-    let config = create_config();
+    let config = read_config();
 
     let client = aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await;
-    aws_layer::create_bucket(&client, bucket).await.unwrap();
+
+    let bucket_creation_handle = {
+        let client = client.clone();
+        let bucket = bucket.to_string();
+        tokio::spawn(async move {
+            aws_layer::create_bucket(&client, &bucket).await.unwrap()
+        })
+    };
 
     let hyper_client = build_https_client();
     let (file_sem, req_sem) = auto_tune_semaphores(file_limit, req_limit, silent);
-
-    // Create 2 GiB buffer pool (2 GiB = 2048 MiB)
-    let buffer_pool = Arc::new(BufferPool::new(2048 * 1024 * 1024, constants::CHUNK_SIZE as usize));
-
+    let task_sem = Arc::new(Semaphore::new(500));
+    let buffer_pool = Arc::new(BufferPool::new(2 * 1024 * 1024 * 1024, constants::CHUNK_SIZE as usize));
+    
     let pb = if !silent {
         let pb = ProgressBar::new(0);
         pb.set_style(ProgressStyle::with_template("[{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})  Status: {msg:25!} ")
@@ -57,6 +63,8 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
 
     let mut handles = Vec::new();
 
+    bucket_creation_handle.await.unwrap();
+
     while let Some(result) = file_discovery_channel.recv().await {
         match result {
             Ok(file_info) => {
@@ -68,8 +76,10 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
                 let buffer_pool_clone = buffer_pool.clone();
                 let ui_channel = ui_tx.clone();
 
+                let permit = task_sem.clone().acquire_owned().await.unwrap();
                 let handle = tokio::spawn(async move {
                     upload_file(&bucket, &client, hyper_client, file_info, file_sem_clone, req_sem_clone, buffer_pool_clone, ui_channel).await;
+                    drop(permit);
                 });
                 handles.push(handle);
             }
@@ -107,25 +117,33 @@ fn start_ui_task(mut ui_rx: UnboundedReceiver<UiEvent>, pb_ui: ProgressBar) -> J
                 }
                 UiEvent::Uploaded(delta) => {
                     accumulated_bytes = accumulated_bytes.saturating_add(delta);
-                    let now = Instant::now();
-                    if now.duration_since(last_update) >= update_interval {
-                        // Flush accumulated total when updating uploaded bytes
-                        if accumulated_total > 0 {
-                            if !total_set {
-                                pb_ui.set_length(total);
-                                total_set = true;
-                            } else {
-                                pb_ui.inc_length(accumulated_total);
-                            }
-                            accumulated_total = 0;
-                        }
-
-                        pb_ui.inc(accumulated_bytes);
-                        accumulated_bytes = 0;
-                        last_update = now;
-                    }
                 }
-                UiEvent::Message(msg) => pb_ui.set_message(msg),
+                UiEvent::Message(msg) => {
+                    pb_ui.set_message(msg);
+                }
+            }
+
+            let now = Instant::now();
+            if now.duration_since(last_update) >= update_interval {
+                // Flush accumulated total
+                if accumulated_total > 0 {
+                    if !total_set {
+                        pb_ui.set_length(total);
+                        total_set = true;
+                    } else {
+                        pb_ui.inc_length(accumulated_total);
+                    }
+                    accumulated_total = 0;
+                    thread::sleep(Duration::from_millis(10)); //limit flickering
+                }
+
+                // Flush accumulated bytes
+                if accumulated_bytes > 0 {
+                    pb_ui.inc(accumulated_bytes);
+                    accumulated_bytes = 0;
+                }
+
+                last_update = now;
             }
         }
 
@@ -151,23 +169,23 @@ fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: 
     } else {
         #[cfg(target_os = "linux")]
         let limit = {
-            150
+            24
         };
 
         #[cfg(target_os = "windows")]
         let limit = {
-            80
+            24
         };
 
         #[cfg(target_os = "macos")]
         let limit = {
-            150
+            24
         };
 
         #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
         let limit = {
             println!("Detected platform: Other");
-            150
+            24
         };
 
         limit
@@ -220,7 +238,7 @@ async fn upload_file(bucket: &str, aws_client: &AWSClient, hyper_client: PoolCli
 
 async fn upload_with_multipart(bucket: &&str, aws_client: &AWSClient, hyper_client: &PoolClient, file_info: &FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
     let key = file_info.key.clone();
-    let create_multipart_upload_output = aws_client.create_multipart_upload().bucket(bucket.clone()).key(key).send().await.unwrap();
+    let create_multipart_upload_output = aws_client.create_multipart_upload().bucket(bucket.to_string()).key(key).send().await.unwrap();
     let upload_id = create_multipart_upload_output.upload_id().unwrap();
 
     let chunk_amount_u64 = (file_info.file_size + constants::CHUNK_SIZE - 1) / constants::CHUNK_SIZE;
@@ -304,7 +322,6 @@ async fn put_file_multipart(hyper_client: PoolClient, presigned_url: &str, file_
         Err(e) => {
             eprintln!("Error putting file chunk {} (start: {}, amount: {}): {}", file_path, start_pos, amount, e);
             panic!("Error putting file chunk {} (start: {}, amount: {}): {}", file_path, start_pos, amount, e);
-            None
         }
     }
 }
@@ -322,10 +339,10 @@ async fn put_file(hyper_client: PoolClient, url: &str, path: &str, file_sem: Arc
 }
 
 pub async fn walk_directory(base_path: PathBuf, ui_tx: UnboundedSender<UiEvent>, silent: bool) -> mpsc::Receiver<Result<FileInfo, io::Error>> {
-    let (tx, rx) = mpsc::channel(1000);
+    let (tx, rx) = mpsc::channel(5000);
 
     tokio::task::spawn_blocking(move || {
-        for entry in WalkDir::new(base_path) {
+        for entry in WalkDir::new(base_path).max_open(100) {
             match entry {
                 Ok(entry) => {
                     if entry.file_type().is_file() {

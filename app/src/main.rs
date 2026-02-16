@@ -70,7 +70,7 @@ struct Config {
     s3_url: String
 }
 
-fn create_config() -> Config {
+fn read_config() -> Config {
     let config: Config = serde_json::from_str(
         std::fs::read_to_string(&constants::CONFIG_PATH)
             .expect("Error: failed to read config file.")
