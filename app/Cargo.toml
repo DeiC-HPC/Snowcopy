@@ -15,3 +15,4 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 walkdir = "2.5.0"
 futures = "0.3.31"
 indicatif = "0.18.3"
+sysinfo = "0.38.2"

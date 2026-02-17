@@ -163,6 +163,7 @@ pub async fn create_bucket(
 /// * `bucket` - the bucket name that the object will be uploaded to. Must be present in the region the `client` is configured to use.
 /// * `filename` - a reference to a path that will be read and uploaded to S3.
 /// * `key` - the string key that the object will be uploaded as inside the bucket.
+#[allow(dead_code)]
 async fn list_bucket(
     client: &AWSClient,
     bucket: &str,

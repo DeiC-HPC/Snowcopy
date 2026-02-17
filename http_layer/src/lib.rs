@@ -134,7 +134,8 @@ pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, clien
     Ok(etag)
 }
 
-async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::http::Result<Request<StreamingBody>> {
+#[allow(dead_code)]
+async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::http::Result<Request<StreamingBody>> { //TODO Jon: use for trailer
     // Take only the bytes in the range [from, to]
     let limited_reader = file.take(amount);
 
