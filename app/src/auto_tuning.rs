@@ -1,9 +1,8 @@
+use crate::constants::CHUNK_SIZE;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::thread::available_parallelism;
 use sysinfo::{Disks, Networks, System};
 use tokio::sync::Semaphore;
-use crate::constants::CHUNK_SIZE;
 
 // Network speed detection is supported on Linux more easily than on Windows and MacOS. TODO: take a second look at this
 fn read_network_speed(_interface_name: &str) -> Option<u64> {
@@ -195,6 +194,6 @@ fn detect(path: &Path) -> (usize, Option<u64>, Option<sysinfo::DiskKind>, u64) {
             }
         }
     }
-    
+
     (cpu_cores, max_network_speed, disk_kind_for_path, available_memory)
 }
