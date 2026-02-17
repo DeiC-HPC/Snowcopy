@@ -163,7 +163,11 @@ fn canonicalize_for_compare(path: &Path) -> PathBuf {
 }
 
 fn detect(path: &Path) -> (usize, Option<u64>, Option<sysinfo::DiskKind>, u64) {
-    let cpu_cores = available_parallelism().unwrap().get();
+    let mut sys = System::new();
+    sys.refresh_cpu_all();
+    let cpu_cores = sys.cpus().len();
+    sys.refresh_memory();
+    let available_memory = sys.available_memory();
 
     let disks = Disks::new_with_refreshed_list();
     let canonical_path = canonicalize_for_compare(path);
@@ -191,11 +195,6 @@ fn detect(path: &Path) -> (usize, Option<u64>, Option<sysinfo::DiskKind>, u64) {
             }
         }
     }
-
-    let mut sys = System::new();
-    sys.refresh_memory();
-    let available_memory = sys.available_memory();
-
-
+    
     (cpu_cores, max_network_speed, disk_kind_for_path, available_memory)
 }
