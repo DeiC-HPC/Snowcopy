@@ -2,6 +2,7 @@ use crate::{auto_tuning, constants, read_config};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::ui::UiEvent;
 use aws_layer::{AWSClient, CompletedPartAws};
 use futures::future::join_all;
 use http_layer::{build_https_client, BufferPool, PoolClient};
@@ -10,7 +11,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use walkdir::WalkDir;
-use crate::ui::UiEvent;
 
 pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool) {
     let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiEvent>();
