@@ -1,7 +1,8 @@
 mod constants;
-mod tokio_transfer;
+mod upload;
 mod auto_tuning;
 mod ui;
+mod download;
 
 use serde;
 use serde::{Deserialize, Serialize};
@@ -39,7 +40,7 @@ async fn main() -> Result<()> {
 
     match method {
         TransferMethod::CephS3 => panic!("functionality removed"), //run_s3_ceph_compio(bucket, path).await,
-        TransferMethod::CephS3Tokio => tokio_transfer::run_s3_ceph_tokio(bucket, path, file_limit, req_limit, silent).await,
+        TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(bucket, path, file_limit, req_limit, silent).await,
     };
 
     let elapsed = start_time.elapsed();
