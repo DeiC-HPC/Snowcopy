@@ -3,31 +3,33 @@ use std::path::Path;
 pub fn path_to_s3_key(path: &str) -> String {
     use std::path::Component;
 
+    let path = Path::new(path);
+    let mut result = String::with_capacity(path.as_os_str().len());
     let mut components = Vec::new();
 
-    // Split into components and normalize
-    for component in Path::new(path).components() {
+    for component in path.components() {
         match component {
-            Component::Prefix(_prefix) => {
-                // Ignore drive letters and prefixes
-            }
-            Component::RootDir => {
-                // Ignore leading root directory (equivalent to removing leading "/")
-            }
-            Component::CurDir => {
-                // Ignore "."
-            }
+            Component::Prefix(_) | Component::RootDir | Component::CurDir => {}
             Component::ParentDir => {
-                // Pop the last component for ".."
                 components.pop();
             }
             Component::Normal(c) => {
-                components.push(c.to_string_lossy().to_string());
+                components.push(c);
             }
         }
     }
 
-    components.join("/")
+    for (i, component) in components.into_iter().enumerate() {
+        if i > 0 {
+            result.push('/');
+        }
+        if let Some(s) = component.to_str() {
+            result.push_str(s);
+        } else {
+            result.push_str(&component.to_string_lossy());
+        }
+    }
+    result
 }
 
 #[cfg(test)]
