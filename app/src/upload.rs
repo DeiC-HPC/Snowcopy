@@ -213,7 +213,7 @@ pub async fn walk_directory(base_path: PathBuf, ui_tx: UnboundedSender<UiEvent>,
                     if entry.file_type().is_file() {
                         let file_size = entry.metadata().unwrap().len();
                         let file_path = entry.path().to_path_buf();
-                        let key: String = util_layer::normalize_file_path(file_path.to_str().unwrap());
+                        let key: String = util_layer::path_to_s3_key(file_path.to_str().unwrap());
 
                         if !silent {
                             let add_to_total = UiEvent::AddToTotal(file_size);
