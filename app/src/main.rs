@@ -39,8 +39,7 @@ async fn main() -> Result<()> {
     let method = match_transfer_method(Some(transfer_method)).expect(format!("Transfer method {} unknown", transfer_method).as_str());
 
     match method {
-        TransferMethod::CephS3 => panic!("functionality removed"), //run_s3_ceph_compio(bucket, path).await,
-        TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(bucket, path, file_limit, req_limit, silent).await,
+        TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(bucket, path, file_limit, req_limit, silent).await
     };
 
     let elapsed = start_time.elapsed();
@@ -52,13 +51,11 @@ async fn main() -> Result<()> {
 }
 
 enum TransferMethod {
-    CephS3,
     CephS3Tokio,
 }
 
 fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
     match method {
-        Some("o1") => Some(TransferMethod::CephS3),
         Some("o2") => Some(TransferMethod::CephS3Tokio),
         _other => None,
     }
