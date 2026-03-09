@@ -1,3 +1,5 @@
+
+#[allow(dead_code)]
 pub async fn download(bucket: &str, prefix: &str, dest: &str, ) -> Result<(), Box<dyn std::error::Error>>{
 
     //start task to scan external storage
