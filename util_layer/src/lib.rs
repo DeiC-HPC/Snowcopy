@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn path_to_s3_key(path: &str) -> String {
     use std::path::Component;
@@ -30,6 +30,19 @@ pub fn path_to_s3_key(path: &str) -> String {
         }
     }
     result
+}
+
+pub fn s3_key_to_path(base_path: &Path, key: &str) -> PathBuf {
+    let mut path = PathBuf::from(base_path);
+
+    // Split S3 key by forward slashes and push each component to the path
+    for component in key.split('/') {
+        if !component.is_empty() {
+            path.push(component);
+        }
+    }
+
+    path.to_path_buf()
 }
 
 #[cfg(test)]
@@ -71,6 +84,29 @@ mod tests {
                 expected,
                 "Failed for input: {}",
                 input
+            );
+        }
+    }
+
+    #[test]
+    fn test_s3_key_to_path() {
+        let base_path = Path::new("testDataDownload");
+
+        let test_cases = vec![
+            ("testData1/RandomSizeSmallFile-998.bin", "testDataDownload/testData1/RandomSizeSmallFile-998.bin"),
+            ("testData1/someFolder/RandomSizeSmallFile-1.bin", "testDataDownload/testData1/someFolder/RandomSizeSmallFile-1.bin"),
+            ("simple.txt", "testDataDownload/simple.txt"),
+            ("folder/subfolder/file.bin", "testDataDownload/folder/subfolder/file.bin"),
+        ];
+
+        for (key, expected) in test_cases {
+            let result = s3_key_to_path(base_path, key);
+            let expected_path = Path::new(expected);
+            assert_eq!(
+                result.as_path(),
+                expected_path,
+                "Failed for key: {}",
+                key
             );
         }
     }

@@ -105,7 +105,7 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
                     limit = req_limit_by_buffer_size;
                 }
 
-                if(limit > MAX_REQUEST_AMOUNT){
+                if limit > MAX_REQUEST_AMOUNT {
                     limit = MAX_REQUEST_AMOUNT;
                 }
             } else {
