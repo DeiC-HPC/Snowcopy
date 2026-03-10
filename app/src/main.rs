@@ -16,6 +16,11 @@ use std::path::Path;
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
 
+// Avoid musl's default allocator due to lackluster performance on systems with many cores
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
