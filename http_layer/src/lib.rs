@@ -1,28 +1,34 @@
 mod logging;
+mod signer;
 
-use std::convert::Infallible;
-use std::sync::Arc;
+use crate::signer::{CredentialScope, S3Credentials};
 use anyhow::Result;
-use base64::Engine;
 use base64::engine::general_purpose;
+use base64::Engine;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, StreamBody, Full};
+use http_body_util::{BodyExt, Full, StreamBody};
 use hyper::body::Frame;
 use hyper::{Method, Request, Uri};
 use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::TokioExecutor,
 };
-use tokio::fs::File;
-use tokio_util::io::ReaderStream;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use openssl::hash::{Hasher, MessageDigest};
-use tokio::sync::{Semaphore, Mutex};
+use shared::{FileInfo, SnowContext};
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::sync::Arc;
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::{Mutex, Semaphore};
+use tokio_util::io::ReaderStream;
+use url::Url;
 
 // Optimized buffer size for file reading (256 KB)
 const READ_BUFFER_SIZE: usize = 256 * 1024;
+const AWS_ALGORITHM: &str = "AWS4-HMAC-SHA256";
 
 pub struct BufferPool {
     semaphore: Semaphore,
@@ -86,11 +92,11 @@ pub fn build_https_client() -> PoolClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(url: &str, path: &str, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) -> Result<()> {
-    let uri: Uri = url.parse()?;
+pub async fn put_file(ctx: &SnowContext, bucket: &str, file_info: FileInfo, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) -> Result<()> {
 
     //let req = create_streaming_body_put(len, uri, file).await?;
-    let req = create_in_memory_body_put_with_hashes(0, None, uri, path, file_sem, buffer_pool).await?;
+    let url = format!("{}/{}/{}", ctx.s3_url(), bucket, file_info.key).parse::<Url>()? ;
+    let req = create_in_memory_body_put_with_hashes(0, None, ctx, bucket, file_info.file_path.to_str().unwrap(), file_sem, buffer_pool, &url).await?;
 
     let permit = req_sem.acquire().await?;
     let resp = client.request(req).await?;
@@ -107,11 +113,10 @@ pub async fn put_file(url: &str, path: &str, client: &PoolClient, file_sem: Arc<
     Ok(())
 }
 
-pub async fn put_file_range(url: &str, path: &str, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) -> Result<Option<String>> {
-    let uri: Uri = url.parse()?;
-
+pub async fn put_file_range(ctx: &SnowContext, bucket: &str, path: &str, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url_str: String) -> Result<Option<String>> {
     //let req = create_streaming_body_put(amount, uri, file).await?;
-    let req = create_in_memory_body_put_with_hashes(from, Some(amount), uri, path, file_sem, buffer_pool).await?;
+    let url :Url = url_str.parse()?;
+    let req = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, bucket, path, file_sem, buffer_pool, &url).await?;
 
     let permit = req_sem.acquire().await?;
     let resp = client.request(req).await?; //send_with_logging(client, req).await?;
@@ -151,7 +156,7 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
         .body(body)
 }
 
-async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, uri: Uri, path: &str, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) -> Result<Request<StreamingBody>> {
+async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: &SnowContext, bucket: &str, path: &str, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: &Url) -> Result<Request<StreamingBody>> {
     let file_lock = file_sem.acquire().await?;
     let mut file = File::open(path).await?;
 
@@ -205,12 +210,49 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         .map_err(|inf: Infallible| match inf {})
         .boxed();
 
-    let req = Request::builder()
+    let credentials = S3Credentials {
+        s3_access_key: ctx.s3_access_key().to_string(),
+        s3_secret_key: ctx.s3_secret_key().to_string(),
+    };
+
+    let credential_scope = CredentialScope {
+        timestamp: chrono::Utc::now(),
+        region: "us-east-1".to_string(),
+        service: "s3".to_string(),
+    };
+
+    let mut signed_headers = HashMap::new();
+    signed_headers.insert("host".to_string(), url.host_str().unwrap_or("").to_string());
+    signed_headers.insert("content-type".to_string(), "application/octet-stream".to_string());
+    signed_headers.insert("content-length".to_string(), amount.to_string());
+    signed_headers.insert("content-md5".to_string(), md5_hash.clone());
+    signed_headers.insert("x-amz-date".to_string(), credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string());
+    signed_headers.insert(
+        signer::get_amz_content_header(AWS_ALGORITHM),
+        signer::sha256_hex(&bytes_for_hash),
+    );
+
+    let auth_header = signer::get_s3_auth_header(
+        Method::PUT.as_str(),
+        bucket,
+        &credentials,
+        &credential_scope,
+        path,
+        AWS_ALGORITHM,
+        &signed_headers,
+        &url,
+    );
+
+    let mut req_builder = Request::builder()
         .method(Method::PUT)
-        .uri(uri)
-        .header("content-type", "application/octet-stream")
-        .header("content-length", amount.to_string())
-        .header("content-md5", md5_hash)
+        .uri(url.as_str());
+
+    for (header_name, header_value) in &signed_headers {
+        req_builder = req_builder.header(header_name, header_value);
+    }
+
+    let req = req_builder
+        .header("authorization", auth_header)
         .body(body)?;
 
     Ok(req)

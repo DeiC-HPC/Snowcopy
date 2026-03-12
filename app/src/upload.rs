@@ -7,6 +7,7 @@ use aws_layer::{AWSClient, CompletedPartAws};
 use futures::future::join_all;
 use http_layer::{build_https_client, BufferPool, PoolClient};
 use indicatif::{ProgressBar, ProgressStyle};
+use shared::{build_context, FileInfo, SnowContext};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, Mutex, Semaphore};
@@ -59,6 +60,7 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
     while let Some(result) = file_discovery_channel.recv().await {
         match result {
             Ok(file_info) => {
+                let ctx = build_context(config.clone());
                 let bucket = bucket.to_string();
                 let client = client.clone();
                 let hyper_client = hyper_client.clone();
@@ -69,7 +71,7 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
 
                 let permit = task_sem.clone().acquire_owned().await.unwrap();
                 let handle = tokio::spawn(async move {
-                    upload_file(&bucket, &client, hyper_client, file_info, file_sem_clone, req_sem_clone, buffer_pool_clone, ui_channel).await;
+                    upload_file(&ctx, &bucket, &client, hyper_client, file_info, file_sem_clone, req_sem_clone, buffer_pool_clone, ui_channel).await;
                     drop(permit);
                 });
                 handles.push(handle);
@@ -92,18 +94,18 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
     }
 }
 
-
-async fn upload_file(bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
+async fn upload_file(ctx: &SnowContext, bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
     if file_info.file_size > constants::CHUNK_SIZE {
-        upload_with_multipart(&bucket, aws_client, &hyper_client, &file_info, file_sem, req_sem, buffer_pool, sender).await;
+        upload_with_multipart(ctx, &bucket, aws_client, &hyper_client, &file_info, file_sem, req_sem, buffer_pool, sender).await;
     } else {
-        small_file_upload(bucket, &aws_client, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender).await;
+        small_file_upload(ctx, bucket, &aws_client, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender).await;
     }
 }
 
-async fn upload_with_multipart(bucket: &&str, aws_client: &AWSClient, hyper_client: &PoolClient, file_info: &FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
+async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AWSClient, hyper_client: &PoolClient, file_info: &FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
     let key = file_info.key.clone();
-    let create_multipart_upload_output = aws_client.create_multipart_upload().bucket(bucket.to_string()).key(key).send().await.unwrap();
+    let bucket_local : &str = bucket;
+    let create_multipart_upload_output = aws_client.create_multipart_upload().bucket(bucket_local.to_string()).key(key).send().await.unwrap();
     let upload_id = create_multipart_upload_output.upload_id().unwrap();
 
     let chunk_amount_u64 = (file_info.file_size + constants::CHUNK_SIZE - 1) / constants::CHUNK_SIZE;
@@ -116,27 +118,31 @@ async fn upload_with_multipart(bucket: &&str, aws_client: &AWSClient, hyper_clie
         let amount = std::cmp::min(constants::CHUNK_SIZE, file_info.file_size - start_pos);
 
         let part_number = (i + 1) as i32;
-        let part_presigned = aws_layer::presign_upload_part(aws_client, &bucket, &file_info.key, upload_id, part_number, constants::PRESIGN_LIFETIME).await;
+        let url = format!("{}/{}/{}+?partNumber={}&uploadId={}", ctx.s3_url(), bucket_local, file_info.key, part_number, upload_id);
+        //let part_presigned = aws_layer::presign_upload_part(aws_client, &bucket, &file_info.key, upload_id, part_number, constants::PRESIGN_LIFETIME).await;
 
         let hyper_client = hyper_client.clone();
         let file_path = file_info.file_path.clone();
-        let presigned_uri = part_presigned.uri().to_string();
         let file_sem_clone = file_sem.clone();
         let req_sem_clone = req_sem.clone();
         let buffer_pool_clone = buffer_pool.clone();
         let completed_parts = completed_parts.clone();
         let sender_cloned = sender.clone();
 
+        let ctx_cloned = ctx.clone();
+        let bucket_cloned = bucket_local.to_string(); // Clone into owned data
         let handle = tokio::spawn(async move {
             let etag = put_file_multipart(
                 hyper_client,
-                &presigned_uri,
+                &ctx_cloned,
+                &bucket_cloned,
                 file_path.to_str().unwrap(),
                 start_pos,
                 amount,
                 file_sem_clone,
                 req_sem_clone,
                 buffer_pool_clone,
+                url,
             ).await;
 
             if let Some(etag) = etag {
@@ -159,19 +165,12 @@ async fn upload_with_multipart(bucket: &&str, aws_client: &AWSClient, hyper_clie
     aws_layer::complete_multipart_upload(aws_client, bucket, &file_info.key, upload_id, completed_parts).await.unwrap();
 }
 
-async fn small_file_upload(bucket: &str, aws_client: &&AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
-    let presigned_request = aws_layer::presign_put(
-        &aws_client,
-        bucket,
-        file_info.key.as_str(),
-        constants::PRESIGN_LIFETIME,
-    )
-        .await;
-
+async fn small_file_upload(ctx: &SnowContext, bucket: &str, aws_client: &&AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
     put_file(
         hyper_client.clone(),
-        presigned_request.uri(),
-        file_info.file_path.to_str().unwrap(),
+        ctx,
+        bucket.clone(),
+        file_info.clone(),
         file_sem,
         req_sem,
         buffer_pool,
@@ -181,8 +180,8 @@ async fn small_file_upload(bucket: &str, aws_client: &&AWSClient, hyper_client: 
     sender.send(UiEvent::Uploaded(file_info.file_size)).unwrap();
 }
 
-async fn put_file_multipart(hyper_client: PoolClient, presigned_url: &str, file_path: &str, start_pos: u64, amount: u64, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) -> Option<String> {
-    match http_layer::put_file_range(presigned_url, file_path, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool).await {
+async fn put_file_multipart(hyper_client: PoolClient, ctx: &SnowContext, bucket: &str, file_path: &str, start_pos: u64, amount: u64, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: String) -> Option<String> {
+    match http_layer::put_file_range(ctx, file_path, bucket, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, url).await {
         Ok(etag) => Some(etag?),
         Err(e) => {
             eprintln!("Error putting file chunk {} (start: {}, amount: {}): {}", file_path, start_pos, amount, e);
@@ -191,15 +190,10 @@ async fn put_file_multipart(hyper_client: PoolClient, presigned_url: &str, file_
     }
 }
 
-pub struct FileInfo {
-    pub file_path: PathBuf,
-    pub key: String,
-    pub file_size: u64,
-}
-
-async fn put_file(hyper_client: PoolClient, url: &str, path: &str, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) {
-    if let Err(e) = http_layer::put_file(url, path, &hyper_client, file_sem, req_sem, buffer_pool).await {
-        eprintln!("Error putting file {}: {}", path, e);
+async fn put_file(hyper_client: PoolClient, ctx: &SnowContext, bucket: &str, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) {
+    let path = file_info.file_path.to_str();
+    if let Err(e) = http_layer::put_file(ctx, bucket, file_info.clone(), &hyper_client, file_sem, req_sem, buffer_pool).await {
+        eprintln!("Error putting file {}: {}", path.unwrap(), e);
     }
 }
 

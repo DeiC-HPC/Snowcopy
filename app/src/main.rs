@@ -12,10 +12,10 @@ use std::time::Instant;
 
 use clap::{Arg, ArgMatches, Command};
 
+use shared::Config;
 use std::path::Path;
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -62,13 +62,6 @@ fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
         Some("o2") => Some(TransferMethod::CephS3Tokio),
         _other => None,
     }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Config {
-    s3_access_key: String,
-    s3_secret_key: String,
-    s3_url: String
 }
 
 fn read_config() -> Config {
