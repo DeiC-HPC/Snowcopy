@@ -3,7 +3,9 @@ use crate::constants::MAX_REQUEST_AMOUNT;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use sysinfo::{Disks, Networks, System};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Semaphore;
+use util_layer::ui::UiEvent;
 
 // Network speed detection is supported on Linux more easily than on Windows and MacOS. TODO: take a second look at this
 fn read_network_speed(_interface_name: &str) -> Option<u64> {
@@ -34,13 +36,13 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
     }
 }
 
-pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, silent: bool, path: &Path) -> (Arc<Semaphore>, Arc<Semaphore>, usize) {
+pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, silent: bool, path: &Path, ui_tx: Option<UnboundedSender<UiEvent>>) -> (Arc<Semaphore>, Arc<Semaphore>, usize) {
     let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, _filesystem) = detect(path);
 
     let buffer_pool_size: usize = {
         if available_memory > 16 * 1024 * 1024 * 1024  {
             4 * 1024 * 1024 * 1024
-        } else if available_memory > 6 * 1024 * 1024 * 1024 {
+        } else if available_memory > 4 * 1024 * 1024 * 1024 {
             2 * 1024 * 1024 * 1024 //TODO jon: This should have a relationship with req_limit
         } else {
             (available_memory / 2) as usize
@@ -124,10 +126,21 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
     let file_sem = Arc::new(Semaphore::new(file_limit));
     let req_sem = Arc::new(Semaphore::new(req_limit));
 
-    if !silent {
-        println!("<Hardware detected: CPU cores: {}, Disk type: {}, File system: {}, Available memory: {:.2} GiB, Network speed: {} Mbps>",
-                 cpu_cores, disk_type.map(|dt| format!("{:?}", dt)).unwrap_or_else(|| "N/A".to_string()), _filesystem, available_memory as f64 / (1024.0 * 1024.0 * 1024.0), max_network_speed.map(|s| format!("{}", s)).unwrap_or_else(|| "N/A".to_string()));
-        println!("<Init. tuning: file_limit: {}, req_limit: {}, buffer_pool_size: {:.2} GiB>", file_limit, req_limit, buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0));
+    if let Some(ui_tx) = ui_tx {
+        let _ = ui_tx.send(UiEvent::Println(format!(
+            "<Hardware detected: CPU cores: {}, Disk type: {}, File system: {}, Available memory: {:.2} GiB, Network speed: {} Mbps>",
+            cpu_cores,
+            disk_type.map(|dt| format!("{:?}", dt)).unwrap_or_else(|| "N/A".to_string()),
+            _filesystem,
+            available_memory as f64 / (1024.0 * 1024.0 * 1024.0),
+            max_network_speed.map(|s| format!("{}", s)).unwrap_or_else(|| "N/A".to_string())
+        )));
+        let _ = ui_tx.send(UiEvent::Println(format!(
+            "<Init. tuning: file_limit: {}, req_limit: {}, buffer_pool_size: {:.2} GiB>",
+            file_limit,
+            req_limit,
+            buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0)
+        )));
     }
 
     (file_sem, req_sem, buffer_pool_size)

@@ -2,6 +2,7 @@ mod upload;
 mod auto_tuning;
 mod ui;
 mod download;
+mod command_center;
 
 use serde_json::Result;
 

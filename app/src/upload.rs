@@ -2,11 +2,11 @@ use crate::{auto_tuning, read_config};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::ui::UiEvent;
+use util_layer::ui::UiEvent;
+use crate::ui::{Ui, ProgressBarUi};
 use aws_layer::{AWSClient, CompletedPartAws};
 use futures::future::join_all;
 use http_layer::{build_https_client, BufferPool, PoolClient};
-use indicatif::{ProgressBar, ProgressStyle};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, Mutex, Semaphore};
@@ -14,7 +14,14 @@ use util_layer::{build_context, constants, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
 pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool) {
-    let (ui_tx, ui_rx) = mpsc::unbounded_channel::<UiEvent>();
+    let (ui, ui_tx, ui_handle) = if silent {
+        (None, None, None)
+    } else {
+        let ui = ProgressBarUi::new();
+        let (tx, handle) = ui.start();
+        (Some(ui), Some(tx), Some(handle))
+    };
+
     let mut file_discovery_channel = walk_directory(path.to_path_buf(), ui_tx.clone(), silent).await;
 
     let config = read_config();
@@ -30,28 +37,9 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
     };
 
     let hyper_client = build_https_client();
-    let (file_sem, req_sem, buffer_pool) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, silent, path);
+    let (file_sem, req_sem, buffer_pool) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, silent, path, ui_tx.clone());
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool, constants::CHUNK_SIZE as usize));
-    
-    let pb = if !silent {
-        let pb = ProgressBar::new(0);
-        pb.set_style(ProgressStyle::with_template("[{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})  Status: {msg:25!} ")
-            .unwrap()
-            .progress_chars("#>-"));
-        pb.set_message("File discovery");
-        Some(pb)
-    } else {
-        None
-    };
-
-    // UI task
-    let ui_handle = if !silent {
-        let pb_ui = pb.as_ref().unwrap().clone();
-        Some(crate::ui::start_ui_task(ui_rx, pb_ui))
-    } else {
-        None
-    };
 
     let mut handles = Vec::new();
 
@@ -82,11 +70,11 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
         }
     }
 
-    drop(ui_tx); //This allows the UI task to exit gracefully when all files have been uploaded
-
     join_all(handles).await;
-    if let Some(ref pb) = pb {
-        pb.finish_with_message("Success");
+
+    if let Some(ui) = ui {
+        ui.finish("Finished");
+        drop(ui_tx); //This allows the UI task to exit gracefully when all files have been uploaded
     }
 
     if let Some(ui_handle) = ui_handle {
@@ -94,7 +82,7 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
     }
 }
 
-async fn upload_file(ctx: &SnowContext, bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
+async fn upload_file(ctx: &SnowContext,bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: Option<UnboundedSender<UiEvent>>) {
     if file_info.file_size > constants::CHUNK_SIZE {
         upload_with_multipart(ctx, &bucket, aws_client, &hyper_client, &file_info, file_sem, req_sem, buffer_pool, sender).await;
     } else {
@@ -102,7 +90,7 @@ async fn upload_file(ctx: &SnowContext, bucket: &str, aws_client: &AWSClient, hy
     }
 }
 
-async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AWSClient, hyper_client: &PoolClient, file_info: &FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
+async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AWSClient, hyper_client: &PoolClient, file_info: &FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: Option<UnboundedSender<UiEvent>>) {
     let key = file_info.key.clone();
     let bucket_local : &str = bucket;
     let create_multipart_upload_output = aws_client.create_multipart_upload().bucket(bucket_local.to_string()).key(key).send().await.unwrap();
@@ -152,7 +140,9 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
                 completed_parts.lock().await.push(completed_part);
             }
 
-            sender_cloned.send(UiEvent::Uploaded(amount)).unwrap();
+            if let Some(sender) = sender_cloned {
+                sender.send(UiEvent::Uploaded(amount)).unwrap();
+            }
         });
 
         handles.push(handle);
@@ -164,7 +154,7 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
     aws_layer::complete_multipart_upload(aws_client, bucket, &file_info.key, upload_id, completed_parts).await.unwrap();
 }
 
-async fn small_file_upload(ctx: &SnowContext, bucket: &str, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
+async fn small_file_upload(ctx: &SnowContext, bucket: &str, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: Option<UnboundedSender<UiEvent>>) {
     put_file(
         hyper_client.clone(),
         ctx,
@@ -176,7 +166,9 @@ async fn small_file_upload(ctx: &SnowContext, bucket: &str, hyper_client: PoolCl
     )
         .await;
 
-    sender.send(UiEvent::Uploaded(file_info.file_size)).unwrap();
+    if let Some(sender) = sender {
+        sender.send(UiEvent::Uploaded(file_info.file_size)).unwrap();
+    }
 }
 
 async fn put_file_multipart(hyper_client: PoolClient, ctx: &SnowContext, bucket: &str, file_path: &str, start_pos: u64, amount: u64, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: String) -> Option<String> {
@@ -196,7 +188,7 @@ async fn put_file(hyper_client: PoolClient, ctx: &SnowContext, bucket: &str, fil
     }
 }
 
-pub async fn walk_directory(base_path: PathBuf, ui_tx: UnboundedSender<UiEvent>, silent: bool) -> mpsc::Receiver<Result<FileInfo, io::Error>> {
+pub async fn walk_directory(base_path: PathBuf, ui_tx: Option<UnboundedSender<UiEvent>>, silent: bool) -> mpsc::Receiver<Result<FileInfo, io::Error>> {
     let (tx, rx) = mpsc::channel(5000);
 
     tokio::task::spawn_blocking(move || {
@@ -209,9 +201,11 @@ pub async fn walk_directory(base_path: PathBuf, ui_tx: UnboundedSender<UiEvent>,
                         let key: String = util_layer::path_to_s3_key(file_path.to_str().unwrap());
 
                         if !silent {
-                            let add_to_total = UiEvent::AddToTotal(file_size);
-                            if ui_tx.send(add_to_total).is_err() {
-                                break;
+                            if let Some(ref ui_tx) = ui_tx {
+                                let add_to_total = UiEvent::AddToTotal(file_size);
+                                if ui_tx.send(add_to_total).is_err() {
+                                    break;
+                                }
                             }
                         }
                         let file_info = FileInfo { file_path, key, file_size };
@@ -228,7 +222,9 @@ pub async fn walk_directory(base_path: PathBuf, ui_tx: UnboundedSender<UiEvent>,
                 }
             }
         }
-        ui_tx.send(UiEvent::Message("Uploading".to_string()))
+        if let Some(ui_tx) = ui_tx {
+            let _ = ui_tx.send(UiEvent::Message("Uploading".to_string()));
+        }
     });
 
     rx
