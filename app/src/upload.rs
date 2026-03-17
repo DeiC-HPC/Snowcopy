@@ -168,7 +168,7 @@ async fn small_file_upload(ctx: &SnowContext, bucket: &str, hyper_client: PoolCl
     put_file(
         hyper_client.clone(),
         ctx,
-        bucket.clone(),
+        bucket,
         file_info.clone(),
         file_sem,
         req_sem,

@@ -3,8 +3,6 @@ mod auto_tuning;
 mod ui;
 mod download;
 
-use serde;
-use serde::{Deserialize, Serialize};
 use serde_json::Result;
 
 use std::time::Instant;
