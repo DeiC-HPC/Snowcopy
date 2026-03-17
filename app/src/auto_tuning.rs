@@ -1,4 +1,5 @@
 use util_layer::constants::CHUNK_SIZE;
+use crate::constants::MAX_REQUEST_AMOUNT;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use sysinfo::{Disks, Networks, System};
@@ -34,7 +35,7 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
 }
 
 pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, silent: bool, path: &Path) -> (Arc<Semaphore>, Arc<Semaphore>, usize) {
-    let (cpu_cores, max_network_speed, disk_type, available_memory, _filesystem) = detect(path);
+    let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, _filesystem) = detect(path);
 
     let buffer_pool_size: usize = {
         if available_memory > 16 * 1024 * 1024 * 1024  {
@@ -95,9 +96,17 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
                     }
                 }
 
+                if(available_memory > 100 * 1024 * 1024 * 1024) { //big server
+                    limit = (limit as f32 * 1.2) as usize;
+                }
+
                 let req_limit_by_buffer_size = buffer_pool_size / CHUNK_SIZE as usize;
                 if limit > req_limit_by_buffer_size {
                     limit = req_limit_by_buffer_size;
+                }
+
+                if limit > MAX_REQUEST_AMOUNT {
+                    limit = MAX_REQUEST_AMOUNT;
                 }
             } else {
                 //we are likely not on a linux pc
@@ -169,12 +178,13 @@ fn canonicalize_for_compare(path: &Path) -> PathBuf {
     }
 }
 
-fn detect(path: &Path) -> (usize, Option<u64>, Option<sysinfo::DiskKind>, u64, String) {
+fn detect(path: &Path) -> (usize, Option<u64>, Option<sysinfo::DiskKind>, u64, u64, String) {
     let mut sys = System::new();
     sys.refresh_cpu_all();
     let cpu_cores = sys.cpus().len();
     sys.refresh_memory();
     let available_memory = sys.available_memory();
+    let total_memory = sys.total_memory();
 
     let disks = Disks::new_with_refreshed_list();
     let canonical_path = canonicalize_for_compare(path);
@@ -205,5 +215,5 @@ fn detect(path: &Path) -> (usize, Option<u64>, Option<sysinfo::DiskKind>, u64, S
         }
     }
 
-    (cpu_cores, max_network_speed, disk_kind_for_path, available_memory, fs_for_path)
+    (cpu_cores, max_network_speed, disk_kind_for_path, available_memory, total_memory, fs_for_path)
 }

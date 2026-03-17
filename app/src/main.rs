@@ -16,6 +16,12 @@ use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
 use util_layer::{constants, Config};
 
+// Avoid musl's default allocator due to lackluster performance on systems with many cores
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let start_time = Instant::now();
@@ -29,6 +35,7 @@ async fn main() -> Result<()> {
     let file_limit = matches.get_one::<usize>("file_limit").copied();
     let req_limit = matches.get_one::<usize>("req_limit").copied();
     let silent = matches.get_flag("silent");
+    let download = matches.get_flag("download");
 
 
     //println!("Bucket (-b): {}", bucket);
@@ -37,10 +44,13 @@ async fn main() -> Result<()> {
 
     let method = match_transfer_method(Some(transfer_method)).expect(format!("Transfer method {} unknown", transfer_method).as_str());
 
-    match method {
-        TransferMethod::CephS3 => panic!("functionality removed"), //run_s3_ceph_compio(bucket, path).await,
-        TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(bucket, path, file_limit, req_limit, silent).await,
-    };
+    if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
+        download::download(bucket, "", path, file_limit, req_limit, silent).await;
+    } else {
+        match method {
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(bucket, path, file_limit, req_limit, silent).await
+        };
+    }
 
     let elapsed = start_time.elapsed();
     if !silent {
@@ -51,13 +61,11 @@ async fn main() -> Result<()> {
 }
 
 enum TransferMethod {
-    CephS3,
     CephS3Tokio,
 }
 
 fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
     match method {
-        Some("o1") => Some(TransferMethod::CephS3),
         Some("o2") => Some(TransferMethod::CephS3Tokio),
         _other => None,
     }
@@ -125,6 +133,14 @@ fn parse_arguments() -> ArgMatches {
                 .short('s')
                 .long("silent")
                 .help("Suppress output messages")
+                .required(false)
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("download")
+                .short('d')
+                .long("download")
+                .help("Download mode")
                 .required(false)
                 .action(clap::ArgAction::SetTrue),
         )

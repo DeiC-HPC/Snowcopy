@@ -7,7 +7,9 @@ use aws_sdk_s3::operation::create_bucket::CreateBucketOutput;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
 use s3example_error::S3ExampleError;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::sync::mpsc;
 
 pub type AWSClient = Client;
 pub type CompletedPartAws = CompletedPart;
@@ -151,4 +153,61 @@ async fn list_bucket(
     }
 
     Ok(())
+}
+
+pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: AWSClient) ->  mpsc::Receiver<S3Object> {
+    // Create channel with buffer size of 5000
+    let (tx, rx) = mpsc::channel::<S3Object>(5000);
+
+    let bucket_clone = bucket.to_owned();
+    let prefix_clone = prefix.to_owned();
+    let dest_clone = dest.to_owned();
+
+    tokio::spawn(async move {
+        // List objects with pagination
+        let mut paginator = client
+            .list_objects_v2()
+            .bucket(bucket_clone)
+            .prefix(prefix_clone.clone())
+            .into_paginator()
+            .send();
+
+        while let Some(result) = paginator.next().await {
+            match result {
+                Ok(output) => {
+                    for object in output.contents() {
+                        if let (Some(key), Some(size)) = (object.key(), object.size) {
+                            // Map S3 key to local file path
+                            let local_path = util_layer::s3_key_to_path(dest_clone.as_path(), key);
+
+                            let s3_object = S3Object {
+                                key: key.to_string(),
+                                local_path,
+                                size,
+                            };
+
+                            // Send object through channel
+                            if tx.send(s3_object).await.is_err() {
+                                eprintln!("Receiver dropped, stopping scan");
+                                return;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error listing objects: {:?}", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    rx
+}
+
+#[derive(Debug, Clone)]
+pub struct S3Object {
+    pub key: String,
+    pub local_path: PathBuf,
+    pub size: i64,
 }
