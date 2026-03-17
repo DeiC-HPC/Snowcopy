@@ -72,14 +72,6 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
 
     join_all(handles).await;
 
-    if let Some(ui) = ui {
-        ui.finish("Finished");
-        drop(ui_tx); //This allows the UI task to exit gracefully when all files have been uploaded
-    }
-
-    if let Some(ui_handle) = ui_handle {
-        let _ = ui_handle.await;
-    }
 }
 
 async fn upload_file(ctx: &SnowContext,bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: Option<UnboundedSender<UiEvent>>) {
