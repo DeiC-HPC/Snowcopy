@@ -1,9 +1,9 @@
+use crate::command_center::{CC, CommandCenter, CommandCenterEvent, Status};
 use crate::{auto_tuning, read_config};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use util_layer::ui::UiEvent;
-use crate::ui::{Ui, ProgressBarUi};
+use crate::ui::Ui;
 use aws_layer::{AWSClient, CompletedPartAws};
 use futures::future::join_all;
 use http_layer::{build_https_client, BufferPool, PoolClient};
@@ -14,15 +14,10 @@ use util_layer::{build_context, constants, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
 pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool) {
-    let (ui, ui_tx, ui_handle) = if silent {
-        (None, None, None)
-    } else {
-        let ui = ProgressBarUi::new();
-        let (tx, handle) = ui.start();
-        (Some(ui), Some(tx), Some(handle))
-    };
+    let cc = CommandCenter::new(silent);
+    let (cc_tx, cc_handle) = cc.start();
 
-    let mut file_discovery_channel = walk_directory(path.to_path_buf(), ui_tx.clone(), silent).await;
+    let mut file_discovery_channel = walk_directory(path.to_path_buf(), Some(cc_tx.clone()), silent).await;
 
     let config = read_config();
 
@@ -37,7 +32,7 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
     };
 
     let hyper_client = build_https_client();
-    let (file_sem, req_sem, buffer_pool) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, silent, path, ui_tx.clone());
+    let (file_sem, req_sem, buffer_pool) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, silent, path, Some(cc_tx.clone()));
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool, constants::CHUNK_SIZE as usize));
 
@@ -55,11 +50,11 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
                 let file_sem_clone = file_sem.clone();
                 let req_sem_clone = req_sem.clone();
                 let buffer_pool_clone = buffer_pool.clone();
-                let ui_channel = ui_tx.clone();
+                let cc_tx_clone = cc_tx.clone();
 
                 let permit = task_sem.clone().acquire_owned().await.unwrap();
                 let handle = tokio::spawn(async move {
-                    upload_file(&ctx, &bucket, &client, hyper_client, file_info, file_sem_clone, req_sem_clone, buffer_pool_clone, ui_channel).await;
+                    upload_file(&ctx, &bucket, &client, hyper_client, file_info, file_sem_clone, req_sem_clone, buffer_pool_clone, Some(cc_tx_clone)).await;
                     drop(permit);
                 });
                 handles.push(handle);
@@ -71,10 +66,11 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
     }
 
     join_all(handles).await;
-
+    drop(cc_tx);
+    cc_handle.await.unwrap();
 }
 
-async fn upload_file(ctx: &SnowContext,bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: Option<UnboundedSender<UiEvent>>) {
+async fn upload_file(ctx: &SnowContext,bucket: &str, aws_client: &AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: Option<UnboundedSender<CommandCenterEvent>>) {
     if file_info.file_size > constants::CHUNK_SIZE {
         upload_with_multipart(ctx, &bucket, aws_client, &hyper_client, &file_info, file_sem, req_sem, buffer_pool, sender).await;
     } else {
@@ -82,7 +78,7 @@ async fn upload_file(ctx: &SnowContext,bucket: &str, aws_client: &AWSClient, hyp
     }
 }
 
-async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AWSClient, hyper_client: &PoolClient, file_info: &FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: Option<UnboundedSender<UiEvent>>) {
+async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AWSClient, hyper_client: &PoolClient, file_info: &FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: Option<UnboundedSender<CommandCenterEvent>>) {
     let key = file_info.key.clone();
     let bucket_local : &str = bucket;
     let create_multipart_upload_output = aws_client.create_multipart_upload().bucket(bucket_local.to_string()).key(key).send().await.unwrap();
@@ -133,7 +129,7 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
             }
 
             if let Some(sender) = sender_cloned {
-                sender.send(UiEvent::Uploaded(amount)).unwrap();
+                sender.send(CommandCenterEvent::FileTransferred(amount)).unwrap();
             }
         });
 
@@ -146,7 +142,7 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
     aws_layer::complete_multipart_upload(aws_client, bucket, &file_info.key, upload_id, completed_parts).await.unwrap();
 }
 
-async fn small_file_upload(ctx: &SnowContext, bucket: &str, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: Option<UnboundedSender<UiEvent>>) {
+async fn small_file_upload(ctx: &SnowContext, bucket: &str, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: Option<UnboundedSender<CommandCenterEvent>>) {
     put_file(
         hyper_client.clone(),
         ctx,
@@ -159,12 +155,12 @@ async fn small_file_upload(ctx: &SnowContext, bucket: &str, hyper_client: PoolCl
         .await;
 
     if let Some(sender) = sender {
-        sender.send(UiEvent::Uploaded(file_info.file_size)).unwrap();
+        sender.send(CommandCenterEvent::FileTransferred(file_info.file_size)).unwrap();
     }
 }
 
 async fn put_file_multipart(hyper_client: PoolClient, ctx: &SnowContext, bucket: &str, file_path: &str, start_pos: u64, amount: u64, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: String) -> Option<String> {
-    match http_layer::put_file_range(ctx, file_path, bucket, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, url).await {
+    match http_layer::put_file_range(ctx, bucket, file_path, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, url).await {
         Ok(etag) => Some(etag?),
         Err(e) => {
             eprintln!("Error putting file chunk {} (start: {}, amount: {}): {}", file_path, start_pos, amount, e);
@@ -180,7 +176,7 @@ async fn put_file(hyper_client: PoolClient, ctx: &SnowContext, bucket: &str, fil
     }
 }
 
-pub async fn walk_directory(base_path: PathBuf, ui_tx: Option<UnboundedSender<UiEvent>>, silent: bool) -> mpsc::Receiver<Result<FileInfo, io::Error>> {
+pub async fn walk_directory(base_path: PathBuf, cc_tx: Option<UnboundedSender<CommandCenterEvent>>, silent: bool) -> mpsc::Receiver<Result<FileInfo, io::Error>> {
     let (tx, rx) = mpsc::channel(5000);
 
     tokio::task::spawn_blocking(move || {
@@ -193,9 +189,9 @@ pub async fn walk_directory(base_path: PathBuf, ui_tx: Option<UnboundedSender<Ui
                         let key: String = util_layer::path_to_s3_key(file_path.to_str().unwrap());
 
                         if !silent {
-                            if let Some(ref ui_tx) = ui_tx {
-                                let add_to_total = UiEvent::AddToTotal(file_size);
-                                if ui_tx.send(add_to_total).is_err() {
+                            if let Some(ref cc_tx) = cc_tx {
+                                let add_to_total = CommandCenterEvent::FileDiscovered(file_size);
+                                if cc_tx.send(add_to_total).is_err() {
                                     break;
                                 }
                             }
@@ -214,8 +210,8 @@ pub async fn walk_directory(base_path: PathBuf, ui_tx: Option<UnboundedSender<Ui
                 }
             }
         }
-        if let Some(ui_tx) = ui_tx {
-            let _ = ui_tx.send(UiEvent::Message("Uploading".to_string()));
+        if let Some(cc_tx) = cc_tx {
+            let _ = cc_tx.send(CommandCenterEvent::StatusChanged(Status::Transferring));
         }
     });
 
