@@ -1,4 +1,4 @@
-use crate::constants::CHUNK_SIZE;
+use util_layer::constants::CHUNK_SIZE;
 use crate::constants::MAX_REQUEST_AMOUNT;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

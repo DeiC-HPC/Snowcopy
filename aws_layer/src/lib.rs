@@ -4,7 +4,6 @@ use aws_config::timeout::TimeoutConfig;
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3::config::{Builder, Credentials, RequestChecksumCalculation, ResponseChecksumValidation};
 use aws_sdk_s3::operation::create_bucket::CreateBucketOutput;
-use aws_sdk_s3::presigning::{PresignedRequest, PresigningConfig};
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
 use s3example_error::S3ExampleError;
@@ -14,47 +13,6 @@ use tokio::sync::mpsc;
 
 pub type AWSClient = Client;
 pub type CompletedPartAws = CompletedPart;
-
-pub async fn presign_upload_part(
-    client: &AWSClient,
-    bucket: &str,
-    key: &str,
-    upload_id: &str,
-    part_number: i32,
-    expires_in: u64,
-) -> PresignedRequest {
-    let expires_in = Duration::from_secs(expires_in);
-    let result = PresigningConfig::expires_in(expires_in).expect("Failed to create presigning config");
-    let presigned_request = client
-        .upload_part()
-        .bucket(bucket)
-        .key(key)
-        .upload_id(upload_id)
-        .part_number(part_number)
-        .presigned(result)
-        .await.unwrap();
-
-    presigned_request
-}
-
-/// Generate a URL for a presigned GET request.
-pub async fn presign_put(
-    client: &AWSClient,
-    bucket: &str,
-    key: &str,
-    expires_in: u64,
-) -> PresignedRequest {
-    let expires_in = Duration::from_secs(expires_in);
-    let result = PresigningConfig::expires_in(expires_in).expect("Failed to create presigning config");
-    let presigned_request = client
-        .put_object()
-        .bucket(bucket)
-        .key(key)
-        .presigned(result)
-        .await.unwrap();
-
-    presigned_request
-}
 
 /// Complete a multipart upload by providing all parts.
 pub async fn complete_multipart_upload(

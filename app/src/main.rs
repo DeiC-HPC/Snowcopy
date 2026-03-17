@@ -1,11 +1,8 @@
-mod constants;
 mod upload;
 mod auto_tuning;
 mod ui;
 mod download;
 
-use serde;
-use serde::{Deserialize, Serialize};
 use serde_json::Result;
 
 use std::time::Instant;
@@ -15,6 +12,7 @@ use clap::{Arg, ArgMatches, Command};
 use std::path::Path;
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
+use util_layer::{constants, Config};
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
 #[cfg(target_env = "musl")]
@@ -69,13 +67,6 @@ fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
         Some("o2") => Some(TransferMethod::CephS3Tokio),
         _other => None,
     }
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-struct Config {
-    s3_access_key: String,
-    s3_secret_key: String,
-    s3_url: String
 }
 
 fn read_config() -> Config {

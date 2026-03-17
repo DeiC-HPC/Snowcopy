@@ -7,3 +7,5 @@ pub const DOWNLOAD_MULTIPART_CHUNK_SIZE: u64 = 5 * 1024 * 1024;
 pub const PRESIGN_LIFETIME: u64 = 900;
 
 pub const MAX_REQUEST_AMOUNT: usize = 400;
+
+pub const AWS_ALGORITHM: &str = "AWS4-HMAC-SHA256";
