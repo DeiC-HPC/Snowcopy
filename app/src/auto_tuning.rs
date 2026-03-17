@@ -96,7 +96,7 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
                     }
                 }
 
-                if available_memory > 100 * 1024 * 1024 * 1024 { //big server
+                if total_memory > 100 * 1024 * 1024 * 1024 { //big server
                     limit = (limit as f32 * 1.1) as usize;
                 }
 
