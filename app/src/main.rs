@@ -1,4 +1,3 @@
-mod constants;
 mod upload;
 mod auto_tuning;
 mod ui;
@@ -12,10 +11,10 @@ use std::time::Instant;
 
 use clap::{Arg, ArgMatches, Command};
 
-use shared::Config;
 use std::path::Path;
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
+use util_layer::{constants, Config};
 
 #[tokio::main]
 async fn main() -> Result<()> {

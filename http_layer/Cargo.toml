@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-shared = { path = "../shared" }
+util_layer = { path = "../util_layer"}
 hyper = { version = "1", features = ["http1"] }
 hyper-util = { version = "0.1", features = ["client","client-legacy","http1","tokio"] }
 hyper-rustls = "0.27"
@@ -20,3 +20,5 @@ base64 = "0.22"
 chrono = "0.4.44"
 url = "2.5.8"
 hex = "0.4.3"
+hmac = "0.12.1"
+sha2 = "0.10.9"

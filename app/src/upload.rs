@@ -1,4 +1,4 @@
-use crate::{auto_tuning, constants, read_config};
+use crate::{auto_tuning, read_config};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -7,10 +7,10 @@ use aws_layer::{AWSClient, CompletedPartAws};
 use futures::future::join_all;
 use http_layer::{build_https_client, BufferPool, PoolClient};
 use indicatif::{ProgressBar, ProgressStyle};
-use shared::{build_context, FileInfo, SnowContext};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, Mutex, Semaphore};
+use util_layer::{build_context, constants, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
 pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool) {
@@ -98,7 +98,7 @@ async fn upload_file(ctx: &SnowContext, bucket: &str, aws_client: &AWSClient, hy
     if file_info.file_size > constants::CHUNK_SIZE {
         upload_with_multipart(ctx, &bucket, aws_client, &hyper_client, &file_info, file_sem, req_sem, buffer_pool, sender).await;
     } else {
-        small_file_upload(ctx, bucket, &aws_client, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender).await;
+        small_file_upload(ctx, bucket, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender).await;
     }
 }
 
@@ -118,8 +118,7 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
         let amount = std::cmp::min(constants::CHUNK_SIZE, file_info.file_size - start_pos);
 
         let part_number = (i + 1) as i32;
-        let url = format!("{}/{}/{}+?partNumber={}&uploadId={}", ctx.s3_url(), bucket_local, file_info.key, part_number, upload_id);
-        //let part_presigned = aws_layer::presign_upload_part(aws_client, &bucket, &file_info.key, upload_id, part_number, constants::PRESIGN_LIFETIME).await;
+        let url = format!("{}/{}/{}?partNumber={}&uploadId={}", ctx.s3_url(), bucket_local, file_info.key, part_number, upload_id);
 
         let hyper_client = hyper_client.clone();
         let file_path = file_info.file_path.clone();
@@ -165,7 +164,7 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
     aws_layer::complete_multipart_upload(aws_client, bucket, &file_info.key, upload_id, completed_parts).await.unwrap();
 }
 
-async fn small_file_upload(ctx: &SnowContext, bucket: &str, aws_client: &&AWSClient, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
+async fn small_file_upload(ctx: &SnowContext, bucket: &str, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<UiEvent>) {
     put_file(
         hyper_client.clone(),
         ctx,

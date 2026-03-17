@@ -16,7 +16,7 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use openssl::hash::{Hasher, MessageDigest};
-use shared::{FileInfo, SnowContext};
+use util_layer::{FileInfo, SnowContext};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -25,11 +25,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::io::ReaderStream;
 use url::Url;
+use util_layer::constants::AWS_ALGORITHM;
 
 // Optimized buffer size for file reading (256 KB)
 const READ_BUFFER_SIZE: usize = 256 * 1024;
-const AWS_ALGORITHM: &str = "AWS4-HMAC-SHA256";
-
 pub struct BufferPool {
     semaphore: Semaphore,
     buffers: Mutex<Vec<Vec<u8>>>,
@@ -94,9 +93,8 @@ pub fn build_https_client() -> PoolClient {
 
 pub async fn put_file(ctx: &SnowContext, bucket: &str, file_info: FileInfo, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) -> Result<()> {
 
-    //let req = create_streaming_body_put(len, uri, file).await?;
     let url = format!("{}/{}/{}", ctx.s3_url(), bucket, file_info.key).parse::<Url>()? ;
-    let req = create_in_memory_body_put_with_hashes(0, None, ctx, bucket, file_info.file_path.to_str().unwrap(), file_sem, buffer_pool, &url).await?;
+    let req = create_in_memory_body_put_with_hashes(0, None, ctx, bucket, file_info.key.as_str(), file_sem, buffer_pool, &url).await?;
 
     let permit = req_sem.acquire().await?;
     let resp = client.request(req).await?;
@@ -156,9 +154,9 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
         .body(body)
 }
 
-async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: &SnowContext, bucket: &str, path: &str, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: &Url) -> Result<Request<StreamingBody>> {
+async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: &SnowContext, bucket: &str, key: &str, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: &Url) -> Result<Request<StreamingBody>> {
     let file_lock = file_sem.acquire().await?;
-    let mut file = File::open(path).await?;
+    let mut file = File::open(key).await?;
 
     let amount = match amount_option {
         Some(v) => v,
@@ -237,7 +235,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         bucket,
         &credentials,
         &credential_scope,
-        path,
+        key,
         AWS_ALGORITHM,
         &signed_headers,
         &url,

@@ -59,7 +59,7 @@ pub fn get_s3_auth_header_and_signature(
         signed_headers_str,
         payload_sha256
     );
-    
+
     let credential_scope_str = s3_credential_scope_format(credential_scope);
     //eprintln!("Credential Scope: {}", credential_scope_str);
 
@@ -119,11 +119,20 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
     hex::encode(hash.finish())
 }
 
+// fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+//     let mut mac = Sha256::new();
+//     mac.update(key);
+//     mac.update(data);
+//     mac.finish().to_vec()
+// }
+use hmac::{Hmac, Mac};
+use sha2::Sha256 as Sha256_2;
+
+type HmacSha256 = Hmac<Sha256_2>;
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = Sha256::new();
-    mac.update(key);
+    let mut mac = HmacSha256::new_from_slice(key).expect("valid HMAC key");
     mac.update(data);
-    mac.finish().to_vec()
+    mac.finalize().into_bytes().to_vec()
 }
 
 fn s3_credential_scope_format(credential_scope: &CredentialScope) -> String {
