@@ -1,6 +1,7 @@
 use crate::read_config;
 use aws_layer::async_head_objects_from_bucket;
 use std::path::Path;
+use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 
 #[allow(dead_code)]
 pub async fn download(bucket: &str, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool) {
@@ -11,11 +12,19 @@ pub async fn download(bucket: &str, prefix: &str, dest: &Path, file_limit: Optio
 
     // Process objects from channel
     while let Some(object) = object_channel.recv().await {
+
         // TODO: for each object check size and determine parallel or simple download
         // TODO: create file and needed folders
         // TODO: truncate file to prepare for download
         // TODO: download
-        println!("Received object: {} -> {:?}", object.key, object.local_path);
+        println!("Size: {}. Received object: {} -> {:?}",object.size, object.key, object.local_path);
+
+        if(object.size > DOWNLOAD_MULTIPART_THRESHOLD){
+            //
+            //fancy pantsy multipart download...
+        } else {
+            //simple download
+        }
     }
 
     /*
@@ -24,6 +33,11 @@ pub async fn download(bucket: &str, prefix: &str, dest: &Path, file_limit: Optio
     32 network requests? I would assume not. The begs the question if one should fill some chunks in
     memory and then write those. This will have the cost of using memory and there is a performance
     penalty maintaining the buffers
+
+
+     I will implement multipart download, where I try to download ~1 MB slices of files into a buffer.
+     The would be interesting. In principle we should try the same strategy as we used in go as well.
+     It very hard to predict what will perform best. But it should be interesting.
      */
 
 
