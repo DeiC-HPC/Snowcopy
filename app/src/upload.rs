@@ -3,7 +3,6 @@ use crate::{auto_tuning, read_config};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::ui::Ui;
 use aws_layer::{AWSClient, CompletedPartAws};
 use futures::future::join_all;
 use http_layer::{build_https_client, BufferPool, PoolClient};
@@ -97,7 +96,7 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
         let url = format!("{}/{}/{}?partNumber={}&uploadId={}", ctx.s3_url(), bucket_local, file_info.key, part_number, upload_id);
 
         let hyper_client = hyper_client.clone();
-        let file_path = file_info.file_path.clone();
+        let file_info_clone = file_info.clone();
         let file_sem_clone = file_sem.clone();
         let req_sem_clone = req_sem.clone();
         let buffer_pool_clone = buffer_pool.clone();
@@ -111,7 +110,7 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
                 hyper_client,
                 &ctx_cloned,
                 &bucket_cloned,
-                file_path.to_str().unwrap(),
+                &file_info_clone,
                 start_pos,
                 amount,
                 file_sem_clone,
@@ -159,12 +158,12 @@ async fn small_file_upload(ctx: &SnowContext, bucket: &str, hyper_client: PoolCl
     }
 }
 
-async fn put_file_multipart(hyper_client: PoolClient, ctx: &SnowContext, bucket: &str, file_path: &str, start_pos: u64, amount: u64, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: String) -> Option<String> {
-    match http_layer::put_file_range(ctx, bucket, file_path, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, url).await {
+async fn put_file_multipart(hyper_client: PoolClient, ctx: &SnowContext, bucket: &str, file_info: &FileInfo, start_pos: u64, amount: u64, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: String) -> Option<String> {
+    match http_layer::put_file_range(ctx, bucket, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, url).await {
         Ok(etag) => Some(etag?),
         Err(e) => {
-            eprintln!("Error putting file chunk {} (start: {}, amount: {}): {}", file_path, start_pos, amount, e);
-            panic!("Error putting file chunk {} (start: {}, amount: {}): {}", file_path, start_pos, amount, e);
+            eprintln!("Error putting file chunk {} (start: {}, amount: {}): {}", file_info.file_path.to_str().unwrap(), start_pos, amount, e);
+            panic!("Error putting file chunk {} (start: {}, amount: {}): {}", file_info.file_path.to_str().unwrap(), start_pos, amount, e);
         }
     }
 }

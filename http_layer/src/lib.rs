@@ -111,10 +111,10 @@ pub async fn put_file(ctx: &SnowContext, bucket: &str, file_info: FileInfo, clie
     Ok(())
 }
 
-pub async fn put_file_range(ctx: &SnowContext, bucket: &str, path: &str, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url_str: String) -> Result<Option<String>> {
+pub async fn put_file_range(ctx: &SnowContext, bucket: &str, fileInfo: &FileInfo, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url_str: String) -> Result<Option<String>> {
     //let req = create_streaming_body_put(amount, uri, file).await?;
     let url :Url = url_str.parse()?;
-    let req = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, bucket, path, file_sem, buffer_pool, &url).await?;
+    let req = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, bucket, fileInfo.key.as_str(), file_sem, buffer_pool, &url).await?;
 
     let permit = req_sem.acquire().await?;
     let resp = client.request(req).await?; //send_with_logging(client, req).await?;
