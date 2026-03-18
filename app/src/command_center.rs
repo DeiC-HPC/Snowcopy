@@ -56,9 +56,12 @@ impl CC for CommandCenter {
         };
 
         let handle = tokio::task::spawn(async move {
+            let mut file_transferred_count = 0u64;
             while let Some(ev) = cc_rx.recv().await {
                 match ev {
                     CommandCenterEvent::FileTransferred(bytes) => { //TODO Jon: collect metrics
+                        file_transferred_count += 1;
+
                         if let Some(ref ui_tx) = ui_tx {
                             ui_tx.send(UiEvent::Uploaded(bytes)).unwrap();
                         }
@@ -81,13 +84,18 @@ impl CC for CommandCenter {
                 }
             }
 
-            if let Some(ui) = ui {
-                ui.finish("Finished");
-                drop(ui_tx); //This allows the UI task to exit gracefully when all files have been uploaded
+            if let Some(ref ui_tx) = ui_tx {
+                ui_tx.send(UiEvent::Println(format!("Total files/chunks transferred: {}", file_transferred_count))).unwrap();
             }
+
+            drop(ui_tx); //This allows the UI task to exit gracefully when all files have been uploaded
 
             if let Some(ui_handle) = ui_handle {
                 let _ = ui_handle.await;
+            }
+
+            if let Some(ui) = ui {
+                ui.finish("Finished"); //This must be done after the UI thread is done, as we experienced incorrect reporting due to race conditions otherwise
             }
         });
 

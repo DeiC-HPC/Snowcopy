@@ -6,7 +6,6 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 pub(crate) use util_layer::ui::UiEvent;
 
-
 pub trait Ui {
     fn start(&self) -> (UnboundedSender<UiEvent>, JoinHandle<()>);
 }
@@ -101,5 +100,30 @@ impl Ui for ProgressBarUi {
             }
         });
         (ui_tx, handle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_pb_ui_total() {
+        let ui = ProgressBarUi::new();
+        let (ui_tx, handle) = ui.start();
+        let message_content = "test".to_string();
+
+        ui_tx.send(UiEvent::Uploaded(10)).unwrap();
+        ui_tx.send(UiEvent::AddToTotal(1000)).unwrap();
+        ui_tx.send(UiEvent::Uploaded(1000)).unwrap();
+        ui_tx.send(UiEvent::AddToTotal(10)).unwrap();
+        ui_tx.send(UiEvent::Message(message_content.clone())).unwrap();
+
+        drop(ui_tx);
+        handle.await.unwrap();
+
+        assert_eq!(ui.pb.position(), 1010);
+        assert_eq!(ui.pb.length().unwrap(), 1010);
+        assert_eq!(ui.pb.message(), message_content);
     }
 }

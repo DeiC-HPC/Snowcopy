@@ -126,10 +126,12 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
                     .part_number(part_number)
                     .build();
                 completed_parts.lock().await.push(completed_part);
-            }
 
-            if let Some(sender) = sender_cloned {
-                sender.send(CommandCenterEvent::FileTransferred(amount)).unwrap();
+                if let Some(sender) = sender_cloned {
+                    sender.send(CommandCenterEvent::FileTransferred(amount)).unwrap();
+                }
+            } else {
+                eprintln!("Error uploading part {} of file {}", part_number, file_path.to_str().unwrap());
             }
         });
 
