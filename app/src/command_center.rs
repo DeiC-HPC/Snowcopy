@@ -3,6 +3,28 @@ use tokio::sync::mpsc::{UnboundedSender};
 use tokio::task::JoinHandle;
 use crate::ui::{ProgressBarUi, Ui, UiEvent};
 
+struct NoopUiSender;
+
+impl NoopUiSender {
+    fn send(&self, _event: UiEvent) -> Result<(), ()> {
+        Ok(())
+    }
+}
+
+enum UiSender {
+    Real(UnboundedSender<UiEvent>),
+    Noop(NoopUiSender),
+}
+
+impl UiSender {
+    fn send(&self, event: UiEvent) -> Result<(), ()> {
+        match self {
+            UiSender::Real(tx) => tx.send(event).map_err(|_| ()),
+            UiSender::Noop(noop) => noop.send(event),
+        }
+    }
+}
+
 pub enum CommandCenterEvent {
     FileTransferred(u64),
     FileDiscovered(u64),
@@ -49,11 +71,11 @@ impl CC for CommandCenter {
         let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel::<CommandCenterEvent>();
 
         let (ui, ui_tx, ui_handle) = if self.silent {
-            (None, None, None)
+            (None, UiSender::Noop(NoopUiSender), None)
         } else {
             let ui = ProgressBarUi::new();
             let (tx, handle) = ui.start();
-            (Some(ui), Some(tx), Some(handle))
+            (Some(ui), UiSender::Real(tx), Some(handle))
         };
 
         let handle = tokio::task::spawn(async move {
@@ -63,38 +85,26 @@ impl CC for CommandCenter {
                     CommandCenterEvent::FileTransferred(bytes) => { //TODO Jon: collect metrics
                         file_transferred_count += 1;
 
-                        if let Some(ref ui_tx) = ui_tx {
-                            ui_tx.send(UiEvent::Uploaded(bytes)).unwrap();
-                        }
+                        let _ = ui_tx.send(UiEvent::Uploaded(bytes));
                     }
                     CommandCenterEvent::FileDiscovered(bytes) => {
-                        if let Some(ref ui_tx) = ui_tx {
-                            ui_tx.send(UiEvent::AddToTotal(bytes)).unwrap();
-                        }
+                        let _ = ui_tx.send(UiEvent::AddToTotal(bytes));
                     }
                     CommandCenterEvent::StatusChanged(status) => {
-                        if let Some(ref ui_tx) = ui_tx {
-                            ui_tx.send(UiEvent::Message(status.to_string())).unwrap();
-                        }
+                        let _ = ui_tx.send(UiEvent::Message(status.to_string()));
                     }
                     CommandCenterEvent::Log(string) => {
-                        if let Some(ref ui_tx) = ui_tx {
-                            ui_tx.send(UiEvent::Println(string)).unwrap();
-                        }
+                        let _ = ui_tx.send(UiEvent::Println(string));
                     }
                 }
             }
 
-            if let Some(ref ui_tx) = ui_tx {
-                ui_tx.send(UiEvent::Println(format!("Total files/chunks transferred: {}", file_transferred_count))).unwrap();
-            }
+            let _ = ui_tx.send(UiEvent::Println(format!("Total files/chunks transferred: {}", file_transferred_count)));
 
             drop(ui_tx); //This allows the UI task to exit gracefully when all files have been uploaded
-
             if let Some(ui_handle) = ui_handle {
                 let _ = ui_handle.await;
             }
-
             if let Some(ui) = ui {
                 ui.finish("Finished"); //This must be done after the UI thread is done, as we experienced incorrect reporting due to race conditions otherwise
             }
