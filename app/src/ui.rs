@@ -1,7 +1,7 @@
+use indicatif::{ProgressBar, ProgressStyle};
 use std::thread;
 use std::time::Duration;
-use indicatif::{ProgressBar, ProgressStyle};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 pub(crate) use util_layer::ui::UiEvent;

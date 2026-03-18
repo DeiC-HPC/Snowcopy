@@ -1,5 +1,5 @@
 use std::fmt;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{UnboundedSender};
 use tokio::task::JoinHandle;
 use crate::ui::{ProgressBarUi, Ui, UiEvent};
 
@@ -10,6 +10,7 @@ pub enum CommandCenterEvent {
     Log(String),
 }
 
+#[allow(dead_code)] //TODO Jon: not all status are used currently
 pub enum Status {
     Idle,
     Transferring,

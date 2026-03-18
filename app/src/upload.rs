@@ -1,9 +1,8 @@
-use crate::command_center::{CC, CommandCenter, CommandCenterEvent, Status};
+use crate::command_center::{CommandCenter, CommandCenterEvent, Status, CC};
 use crate::{auto_tuning, read_config};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::ui::Ui;
 use aws_layer::{AWSClient, CompletedPartAws};
 use futures::future::join_all;
 use http_layer::{build_https_client, BufferPool, PoolClient};
@@ -32,7 +31,7 @@ pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usi
     };
 
     let hyper_client = build_https_client();
-    let (file_sem, req_sem, buffer_pool) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, silent, path, Some(cc_tx.clone()));
+    let (file_sem, req_sem, buffer_pool) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, path, Some(cc_tx.clone()));
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool, constants::CHUNK_SIZE as usize));
 

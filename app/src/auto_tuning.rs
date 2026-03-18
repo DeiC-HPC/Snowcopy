@@ -36,7 +36,7 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
     }
 }
 
-pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, silent: bool, path: &Path, cc_tx: Option<UnboundedSender<CommandCenterEvent>>) -> (Arc<Semaphore>, Arc<Semaphore>, usize) {
+pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, path: &Path, cc_tx: Option<UnboundedSender<CommandCenterEvent>>) -> (Arc<Semaphore>, Arc<Semaphore>, usize) {
     let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, _filesystem) = detect(path);
 
     let buffer_pool_size: usize = {
