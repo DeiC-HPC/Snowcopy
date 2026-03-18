@@ -1,4 +1,6 @@
 use indicatif::{ProgressBar, ProgressStyle};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -10,8 +12,14 @@ pub trait Ui {
     fn start(&self) -> (UnboundedSender<UiEvent>, JoinHandle<()>);
 }
 
-pub struct ProgressBarUi {
+struct ProgressBarUiInner {
     pb: ProgressBar,
+    started: AtomicBool,
+    completed: AtomicBool,
+}
+
+pub struct ProgressBarUi {
+    inner: Arc<ProgressBarUiInner>,
 }
 
 impl ProgressBarUi {
@@ -26,18 +34,29 @@ impl ProgressBarUi {
         );
         pb.set_message("Discovery");
 
-        Self { pb }
+        Self {
+            inner: Arc::new(ProgressBarUiInner {
+                pb,
+                started: AtomicBool::new(false),
+                completed: AtomicBool::new(false),
+            }),
+        }
     }
 
     pub fn finish(&self, msg: &str) {
-        self.pb.finish_with_message(msg.to_string());
+        if self.inner.started.load(Ordering::SeqCst) && !self.inner.completed.load(Ordering::SeqCst) {
+            eprintln!("Warning: finish() called before UI thread has completed. This may result in incorrect reporting of progress.");
+        }
+
+        self.inner.pb.finish_with_message(msg.to_string());
     }
 }
 
 impl Ui for ProgressBarUi {
     fn start(&self) -> (UnboundedSender<UiEvent>, JoinHandle<()>) {
         let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
-        let pb_ui = self.pb.clone();
+        let inner = self.inner.clone();
+        inner.started.store(true, Ordering::SeqCst);
         let handle = tokio::task::spawn_blocking(move || {
             let mut total_set = false;
             let mut total: u64 = 0;
@@ -56,10 +75,10 @@ impl Ui for ProgressBarUi {
                         accumulated_bytes = accumulated_bytes.saturating_add(delta);
                     }
                     UiEvent::Message(msg) => {
-                        pb_ui.set_message(msg);
+                        inner.pb.set_message(msg);
                     }
                     UiEvent::Println(msg) => {
-                        pb_ui.println(msg);
+                        inner.pb.println(msg);
                     }
                 }
 
@@ -68,10 +87,10 @@ impl Ui for ProgressBarUi {
                     // Flush accumulated total
                     if accumulated_total > 0 {
                         if !total_set {
-                            pb_ui.set_length(total);
+                            inner.pb.set_length(total);
                             total_set = true;
                         } else {
-                            pb_ui.inc_length(accumulated_total);
+                            inner.pb.inc_length(accumulated_total);
                         }
                         accumulated_total = 0;
                         thread::sleep(Duration::from_millis(10)); //limit flickering
@@ -79,7 +98,7 @@ impl Ui for ProgressBarUi {
 
                     // Flush accumulated bytes
                     if accumulated_bytes > 0 {
-                        pb_ui.inc(accumulated_bytes);
+                        inner.pb.inc(accumulated_bytes);
                         accumulated_bytes = 0;
                     }
 
@@ -90,14 +109,16 @@ impl Ui for ProgressBarUi {
             // Final update to ensure all bytes and total are accounted for
             if accumulated_total > 0 {
                 if !total_set {
-                    pb_ui.set_length(total);
+                    inner.pb.set_length(total);
                 } else {
-                    pb_ui.inc_length(accumulated_total);
+                    inner.pb.inc_length(accumulated_total);
                 }
             }
             if accumulated_bytes > 0 {
-                pb_ui.inc(accumulated_bytes);
+                inner.pb.inc(accumulated_bytes);
             }
+
+            inner.completed.store(true, Ordering::SeqCst);
         });
         (ui_tx, handle)
     }
@@ -122,8 +143,8 @@ mod tests {
         drop(ui_tx);
         handle.await.unwrap();
 
-        assert_eq!(ui.pb.position(), 1010);
-        assert_eq!(ui.pb.length().unwrap(), 1010);
-        assert_eq!(ui.pb.message(), message_content);
+        assert_eq!(ui.inner.pb.position(), 1010);
+        assert_eq!(ui.inner.pb.length().unwrap(), 1010);
+        assert_eq!(ui.inner.pb.message(), message_content);
     }
 }
