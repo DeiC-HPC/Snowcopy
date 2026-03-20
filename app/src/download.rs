@@ -5,9 +5,9 @@ use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 
 #[allow(dead_code)]
-pub async fn download(bucket: &str, prefix: &str, dest: &Path, _file_limit: Option<usize>, _req_limit: Option<usize>, silent: bool) {
+pub async fn download(bucket: &str, prefix: &str, dest: &Path, _file_limit: Option<usize>, _req_limit: Option<usize>, silent: bool, stats: bool) {
     let config = read_config();
-    let cc = CommandCenter::new(silent);
+    let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
     let client = aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await;

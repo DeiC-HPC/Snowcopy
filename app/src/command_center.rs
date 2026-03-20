@@ -1,6 +1,7 @@
 use std::fmt;
 use tokio::sync::mpsc::{UnboundedSender};
 use tokio::task::JoinHandle;
+use util_layer::cc::CcLoadAndTransfer;
 use crate::ui::{ProgressBarUi, Ui, UiEvent};
 
 struct NoopUiSender;
@@ -26,7 +27,7 @@ impl UiSender {
 }
 
 pub enum CommandCenterEvent {
-    FileTransferred(u64),
+    FileTransferred(CcLoadAndTransfer),
     FileDiscovered(u64),
     StatusChanged(Status),
     Log(String),
@@ -57,11 +58,12 @@ pub trait CC {
 
 pub struct CommandCenter {
     silent : bool,
+    stats: bool,
 }
 
 impl CommandCenter {
-    pub fn new(silent : bool) -> Self {
-        CommandCenter { silent }
+    pub fn new(silent : bool, stats: bool) -> Self {
+        CommandCenter { silent, stats }
     }
 
 }
@@ -78,14 +80,25 @@ impl CC for CommandCenter {
             (Some(ui), UiSender::Real(tx), Some(handle))
         };
 
+        let stats = self.stats;
         let handle = tokio::task::spawn(async move {
             let mut file_transferred_count = 0u64;
+            let mut total_file_permit_time = 0f64;
+            let mut total_req_permit_time = 0f64;
+            let mut total_file_work_time = 0f64;
+            let mut total_req_work_time = 0f64;
+
             while let Some(ev) = cc_rx.recv().await {
                 match ev {
-                    CommandCenterEvent::FileTransferred(bytes) => { //TODO Jon: collect metrics
+                    CommandCenterEvent::FileTransferred(metrics) => {
                         file_transferred_count += 1;
 
-                        let _ = ui_tx.send(UiEvent::Uploaded(bytes));
+                        total_file_permit_time += metrics.file_sem_acquire_time_secs;
+                        total_req_permit_time += metrics.req_sem_acquire_time_secs;
+                        total_file_work_time += metrics.file_sem_work_time_secs;
+                        total_req_work_time += metrics.req_sem_work_time_secs;
+
+                        let _ = ui_tx.send(UiEvent::Uploaded(metrics.amount));
                     }
                     CommandCenterEvent::FileDiscovered(bytes) => {
                         let _ = ui_tx.send(UiEvent::AddToTotal(bytes));
@@ -99,7 +112,13 @@ impl CC for CommandCenter {
                 }
             }
 
-            let _ = ui_tx.send(UiEvent::Println(format!("Total files/chunks transferred: {}", file_transferred_count)));
+            if stats {
+                let _ = ui_tx.send(UiEvent::Println(format!("Total files/chunks transferred: {}", file_transferred_count)));
+                let _ = ui_tx.send(UiEvent::Println(format!("Total time spent acquiring file permits: {:.2}s", total_file_permit_time))); //TODO Jon: Is this metric actually relevant?
+                let _ = ui_tx.send(UiEvent::Println(format!("Total time spent acquiring request permits: {:.2}s", total_req_permit_time)));
+                let _ = ui_tx.send(UiEvent::Println(format!("Total time spent working on disk I/O: {:.2}s", total_file_work_time)));
+                let _ = ui_tx.send(UiEvent::Println(format!("Total time spent working on request I/O: {:.2}s", total_req_work_time)));
+            }
 
             drop(ui_tx); //This allows the UI task to exit gracefully when all files have been uploaded
             if let Some(ui_handle) = ui_handle {

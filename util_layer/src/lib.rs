@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod constants;
+pub mod cc;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {

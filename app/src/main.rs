@@ -35,6 +35,7 @@ async fn main() -> Result<()> {
     let req_limit = matches.get_one::<usize>("req_limit").copied();
     let silent = matches.get_flag("silent");
     let download = matches.get_flag("download");
+    let stats = matches.get_flag("stats");
 
 
     //println!("Bucket (-b): {}", bucket);
@@ -44,10 +45,10 @@ async fn main() -> Result<()> {
     let method = match_transfer_method(Some(transfer_method)).expect(format!("Transfer method {} unknown", transfer_method).as_str());
 
     if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
-        download::download(bucket, "", path, file_limit, req_limit, silent).await;
+        download::download(bucket, "", path, file_limit, req_limit, silent, stats).await;
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(bucket, path, file_limit, req_limit, silent).await
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(bucket, path, file_limit, req_limit, silent, stats).await
         };
     }
 
@@ -129,7 +130,7 @@ fn parse_arguments() -> ArgMatches {
         )
         .arg(
             Arg::new("silent")
-                .short('s')
+                .short('q')
                 .long("silent")
                 .help("Suppress output messages")
                 .required(false)
@@ -140,6 +141,13 @@ fn parse_arguments() -> ArgMatches {
                 .short('d')
                 .long("download")
                 .help("Download mode")
+                .required(false)
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("stats")
+                .long("stats")
+                .help("Enable statistics output")
                 .required(false)
                 .action(clap::ArgAction::SetTrue),
         )

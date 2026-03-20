@@ -12,8 +12,8 @@ use tokio::sync::{mpsc, Mutex, Semaphore};
 use util_layer::{build_context, constants, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
-pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool) {
-    let cc = CommandCenter::new(silent);
+pub async fn run_s3_ceph_tokio(bucket: &str, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool) {
+    let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
     let mut file_discovery_channel = walk_directory(path.to_path_buf(), cc_tx.clone()).await;
@@ -106,30 +106,21 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
         let ctx_cloned = ctx.clone();
         let bucket_cloned = bucket_local.to_string(); // Clone into owned data
         let handle = tokio::spawn(async move {
-            let etag = put_file_multipart(
-                hyper_client,
-                &ctx_cloned,
-                &bucket_cloned,
-                &file_info_clone,
-                start_pos,
-                amount,
-                file_sem_clone,
-                req_sem_clone,
-                buffer_pool_clone,
-                url,
-            ).await;
+            let result = http_layer::put_file_range(&ctx_cloned, &bucket_cloned, &file_info_clone, start_pos, amount, &hyper_client, file_sem_clone, req_sem_clone, buffer_pool_clone, url).await;
+            match result {
+                Ok((etag, metrics)) => {
+                    let completed_part = CompletedPartAws::builder()
+                        .e_tag(etag)
+                        .part_number(part_number)
+                        .build();
+                    completed_parts.lock().await.push(completed_part);
 
-            if let Some(etag) = etag {
-                let completed_part = CompletedPartAws::builder()
-                    .e_tag(etag)
-                    .part_number(part_number)
-                    .build();
-                completed_parts.lock().await.push(completed_part);
-
-                sender_cloned.send(CommandCenterEvent::FileTransferred(amount)).unwrap();
-
-            } else {
-                eprintln!("Error uploading part {} of file {}", part_number, file_info_clone.file_path.to_str().unwrap());
+                    sender_cloned.send(CommandCenterEvent::FileTransferred(metrics)).unwrap();
+                }
+                Err(e) => {
+                    eprintln!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e);
+                    return; //TODO JON: handling
+                }
             }
         });
 
@@ -143,34 +134,10 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
 }
 
 async fn small_file_upload(ctx: &SnowContext, bucket: &str, hyper_client: PoolClient, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
-    put_file(
-        hyper_client.clone(),
-        ctx,
-        bucket,
-        file_info.clone(),
-        file_sem,
-        req_sem,
-        buffer_pool,
-    )
-        .await;
-
-    sender.send(CommandCenterEvent::FileTransferred(file_info.file_size)).unwrap();
-}
-
-async fn put_file_multipart(hyper_client: PoolClient, ctx: &SnowContext, bucket: &str, file_info: &FileInfo, start_pos: u64, amount: u64, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: String) -> Option<String> {
-    match http_layer::put_file_range(ctx, bucket, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, url).await {
-        Ok(etag) => Some(etag?),
-        Err(e) => {
-            eprintln!("Error putting file chunk {} (start: {}, amount: {}): {}", file_info.file_path.to_str().unwrap(), start_pos, amount, e);
-            panic!("Error putting file chunk {} (start: {}, amount: {}): {}", file_info.file_path.to_str().unwrap(), start_pos, amount, e);
-        }
-    }
-}
-
-async fn put_file(hyper_client: PoolClient, ctx: &SnowContext, bucket: &str, file_info: FileInfo, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) {
-    let path = file_info.file_path.to_str();
-    if let Err(e) = http_layer::put_file(ctx, bucket, file_info.clone(), &hyper_client, file_sem, req_sem, buffer_pool).await {
-        eprintln!("Error putting file {}: {}", path.unwrap(), e);
+    let result = http_layer::put_file(ctx, bucket, file_info.clone(), &hyper_client, file_sem, req_sem, buffer_pool).await;
+    match result {
+        Ok(command_center_event) => sender.send(CommandCenterEvent::FileTransferred(command_center_event)).unwrap(),
+        Err(e) => eprintln!("Error uploading file {}: {}", file_info.file_path.to_str().unwrap(), e), //TODO JON: send error to command_center
     }
 }
 
@@ -186,21 +153,20 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
                         let file_path = entry.path().to_path_buf();
                         let key: String = util_layer::path_to_s3_key(file_path.to_str().unwrap());
 
-                        let add_to_total = CommandCenterEvent::FileDiscovered(file_size);
-                        if cc_tx.send(add_to_total).is_err() {
-                            break;
+                        if cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).is_err() {
+                            //TODO JON: print error? it should never fail.
                         }
 
                         let file_info = FileInfo { file_path, key, file_size };
                         if tx.blocking_send(Ok(file_info)).is_err() {
-                            break;
+                            //TODO JON: print error? it should never fail.
                         }
                     }
                 }
                 Err(e) => {
                     let io_error = io::Error::new(io::ErrorKind::Other, e);
                     if tx.blocking_send(Err(io_error)).is_err() {
-                        break;
+                        //TODO JON: print error? it should never fail.
                     }
                 }
             }

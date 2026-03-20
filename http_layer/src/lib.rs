@@ -22,10 +22,12 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::time::Instant;
 use tokio::sync::{Mutex, Semaphore};
 use tokio_util::io::ReaderStream;
 use url::Url;
 use util_layer::constants::AWS_ALGORITHM;
+use util_layer::cc::CcLoadAndTransfer;
 
 // Optimized buffer size for file reading (256 KB)
 const READ_BUFFER_SIZE: usize = 256 * 1024;
@@ -91,13 +93,17 @@ pub fn build_https_client() -> PoolClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(ctx: &SnowContext, bucket: &str, file_info: FileInfo, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) -> Result<()> {
-
+pub async fn put_file(ctx: &SnowContext, bucket: &str, file_info: FileInfo, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) -> Result<CcLoadAndTransfer> {
     let url = format!("{}/{}/{}", ctx.s3_url(), bucket, file_info.key).parse::<Url>()? ;
-    let req = create_in_memory_body_put_with_hashes(0, None, ctx, bucket, file_info.key.as_str(), file_sem, buffer_pool, &url).await?;
+    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(0, None, ctx, bucket, file_info.key.as_str(), file_sem, buffer_pool, &url).await?;
 
+    let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
+    let req_permit_elapsed = req_permit_start.elapsed();
+
+    let req_work_start = Instant::now();
     let resp = client.request(req).await?;
+    let req_work_elapsed = req_work_start.elapsed();
     drop(permit);
 
     let status = resp.status();
@@ -108,16 +114,28 @@ pub async fn put_file(ctx: &SnowContext, bucket: &str, file_info: FileInfo, clie
     if !status.is_success() {
         anyhow::bail!("PUT failed: {}", status);
     }
-    Ok(())
+    
+    let transfer_metrics = CcLoadAndTransfer {
+        amount : file_info.file_size,
+        file_sem_work_time_secs: file_work_elapsed.as_secs_f64(),
+        file_sem_acquire_time_secs: file_permit_elapsed.as_secs_f64(),
+        req_sem_work_time_secs: req_work_elapsed.as_secs_f64(),
+        req_sem_acquire_time_secs: req_permit_elapsed.as_secs_f64(),
+    };
+    Ok(transfer_metrics)
 }
 
-pub async fn put_file_range(ctx: &SnowContext, bucket: &str, file_info: &FileInfo, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url_str: String) -> Result<Option<String>> {
+pub async fn put_file_range(ctx: &SnowContext, bucket: &str, file_info: &FileInfo, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url_str: String) -> Result<(String, CcLoadAndTransfer)> {
     //let req = create_streaming_body_put(amount, uri, file).await?;
     let url :Url = url_str.parse()?;
-    let req = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, bucket, file_info.key.as_str(), file_sem, buffer_pool, &url).await?;
+    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, bucket, file_info.key.as_str(), file_sem, buffer_pool, &url).await?;
 
+    let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
+    let req_permit_elapsed = req_permit_start.elapsed();
+    let req_work_start = Instant::now();
     let resp = client.request(req).await?; //send_with_logging(client, req).await?;
+    let req_work_elapsed = req_work_start.elapsed();
     drop(permit);
 
     let status = resp.status();
@@ -130,11 +148,19 @@ pub async fn put_file_range(ctx: &SnowContext, bucket: &str, file_info: &FileInf
     // Drain body so the connection can be returned to the pool.
     resp.into_body().collect().await?;
 
-    if !status.is_success() {
+    if !status.is_success() || etag.is_none() {
         anyhow::bail!("PUT range failed: {}", status);
     }
 
-    Ok(etag)
+    let transfer_metrics = CcLoadAndTransfer {
+        amount,
+        file_sem_work_time_secs: file_work_elapsed.as_secs_f64(),
+        file_sem_acquire_time_secs: file_permit_elapsed.as_secs_f64(),
+        req_sem_work_time_secs: req_work_elapsed.as_secs_f64(),
+        req_sem_acquire_time_secs: req_permit_elapsed.as_secs_f64(),
+    };
+
+    Ok((etag.unwrap(), transfer_metrics))
 }
 
 #[allow(dead_code)]
@@ -154,8 +180,12 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
         .body(body)
 }
 
-async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: &SnowContext, bucket: &str, key: &str, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: &Url) -> Result<Request<StreamingBody>> {
+async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: &SnowContext, bucket: &str, key: &str, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: &Url) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
+    let file_permit_start = Instant::now();
     let file_lock = file_sem.acquire().await?;
+    let file_permit_elapsed = file_permit_start.elapsed();
+    
+    let file_work_start = Instant::now();
     let mut file = File::open(key).await?;
 
     let amount = match amount_option {
@@ -186,6 +216,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         total_read += to_read;
     }
     drop(file);
+    let file_work_elapsed = file_work_start.elapsed();
     drop(file_lock);
 
     // We use a custom struct to return the buffer to the pool when dropped
@@ -253,7 +284,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         .header("authorization", auth_header)
         .body(body)?;
 
-    Ok(req)
+    Ok((req, file_work_elapsed, file_permit_elapsed))
 }
 
 struct PooledBuffer {
