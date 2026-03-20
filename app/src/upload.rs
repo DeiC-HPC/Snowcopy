@@ -102,11 +102,12 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
         let buffer_pool_clone = buffer_pool.clone();
         let completed_parts = completed_parts.clone();
         let sender_cloned = sender.clone();
+        let file_path = file_info_clone.file_path.clone();
 
         let ctx_cloned = ctx.clone();
         let bucket_cloned = bucket_local.to_string(); // Clone into owned data
         let handle = tokio::spawn(async move {
-            let result = http_layer::put_file_range(&ctx_cloned, &bucket_cloned, &file_info_clone, start_pos, amount, &hyper_client, file_sem_clone, req_sem_clone, buffer_pool_clone, url).await;
+            let result = http_layer::put_file_range(&ctx_cloned, &bucket_cloned, file_info_clone, start_pos, amount, &hyper_client, file_sem_clone, req_sem_clone, buffer_pool_clone, url).await;
             match result {
                 Ok((etag, metrics)) => {
                     let completed_part = CompletedPartAws::builder()
@@ -118,7 +119,7 @@ async fn upload_with_multipart(ctx: &SnowContext, bucket: &&str, aws_client: &AW
                     sender_cloned.send(CommandCenterEvent::FileTransferred(metrics)).unwrap();
                 }
                 Err(e) => {
-                    eprintln!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e);
+                    eprintln!("Error uploading part {} of file {}: {}", part_number, file_path.to_str().unwrap(), e);
                     return; //TODO JON: handling
                 }
             }

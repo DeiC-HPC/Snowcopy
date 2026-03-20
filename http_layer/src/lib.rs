@@ -95,7 +95,7 @@ pub fn build_https_client() -> PoolClient {
 
 pub async fn put_file(ctx: &SnowContext, bucket: &str, file_info: FileInfo, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) -> Result<CcLoadAndTransfer> {
     let url = format!("{}/{}/{}", ctx.s3_url(), bucket, file_info.key).parse::<Url>()? ;
-    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(0, None, ctx, bucket, file_info.key.as_str(), file_sem, buffer_pool, &url).await?;
+    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(0, None, ctx, bucket, file_info.clone(), file_sem, buffer_pool, &url).await?;
 
     let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
@@ -114,7 +114,7 @@ pub async fn put_file(ctx: &SnowContext, bucket: &str, file_info: FileInfo, clie
     if !status.is_success() {
         anyhow::bail!("PUT failed: {}", status);
     }
-    
+
     let transfer_metrics = CcLoadAndTransfer {
         amount : file_info.file_size,
         file_sem_work_time_secs: file_work_elapsed.as_secs_f64(),
@@ -125,10 +125,10 @@ pub async fn put_file(ctx: &SnowContext, bucket: &str, file_info: FileInfo, clie
     Ok(transfer_metrics)
 }
 
-pub async fn put_file_range(ctx: &SnowContext, bucket: &str, file_info: &FileInfo, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url_str: String) -> Result<(String, CcLoadAndTransfer)> {
+pub async fn put_file_range(ctx: &SnowContext, bucket: &str, file_info: FileInfo, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url_str: String) -> Result<(String, CcLoadAndTransfer)> {
     //let req = create_streaming_body_put(amount, uri, file).await?;
     let url :Url = url_str.parse()?;
-    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, bucket, file_info.key.as_str(), file_sem, buffer_pool, &url).await?;
+    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, bucket, file_info, file_sem, buffer_pool, &url).await?;
 
     let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
@@ -180,13 +180,13 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
         .body(body)
 }
 
-async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: &SnowContext, bucket: &str, key: &str, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: &Url) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
+async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: &SnowContext, bucket: &str, file_info: FileInfo, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: &Url) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
     let file_permit_start = Instant::now();
     let file_lock = file_sem.acquire().await?;
     let file_permit_elapsed = file_permit_start.elapsed();
-    
+
     let file_work_start = Instant::now();
-    let mut file = File::open(key).await?;
+    let mut file = File::open(file_info.file_path).await?;
 
     let amount = match amount_option {
         Some(v) => v,
@@ -266,7 +266,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         bucket,
         &credentials,
         &credential_scope,
-        key,
+        file_info.key.as_str(),
         AWS_ALGORITHM,
         &signed_headers,
         &url,
