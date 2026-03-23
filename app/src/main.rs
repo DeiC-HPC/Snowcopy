@@ -11,6 +11,7 @@ use std::time::Instant;
 use clap::{Arg, ArgMatches, Command};
 
 use std::path::Path;
+use std::sync::Arc;
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
 use util_layer::{constants, Config};
@@ -37,18 +38,18 @@ async fn main() -> Result<()> {
     let download = matches.get_flag("download");
     let stats = matches.get_flag("stats");
 
-
     //println!("Bucket (-b): {}", bucket);
     //println!("Path: {}", path_as_string);
     let path = Path::new(path_as_string);
+    let arc_bucket = Arc::new(bucket.to_string());
 
     let method = match_transfer_method(Some(transfer_method)).expect(format!("Transfer method {} unknown", transfer_method).as_str());
 
     if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
-        download::download(bucket, "", path, file_limit, req_limit, silent, stats).await;
+        download::download(arc_bucket, "", path, file_limit, req_limit, silent, stats).await;
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(bucket, path, file_limit, req_limit, silent, stats).await
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats).await
         };
     }
 

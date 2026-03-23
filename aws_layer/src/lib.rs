@@ -8,6 +8,7 @@ use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
 use s3example_error::S3ExampleError;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -86,11 +87,11 @@ pub async fn create_client(access_key: &str, secret_key: &str, url: &str) -> AWS
 
 pub async fn create_bucket(
     client: &AWSClient,
-    bucket_name: &str,
-) -> std::result::Result<Option<CreateBucketOutput>, S3ExampleError> {
+    bucket_name: Arc<String>,
+) -> Result<Option<CreateBucketOutput>, S3ExampleError> {
     let create = client
         .create_bucket()
-        .bucket(bucket_name)
+        .bucket(bucket_name.as_str())
         .send()
         .await;
 

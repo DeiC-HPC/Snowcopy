@@ -36,7 +36,7 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
     }
 }
 
-pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, path: &Path, cc_tx: Option<UnboundedSender<CommandCenterEvent>>) -> (Arc<Semaphore>, Arc<Semaphore>, usize) {
+pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, path: &Path, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Arc<Semaphore>, Arc<Semaphore>, usize) {
     let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, _filesystem) = detect(path);
 
     let buffer_pool_size: usize = {
@@ -126,22 +126,22 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
     let file_sem = Arc::new(Semaphore::new(file_limit));
     let req_sem = Arc::new(Semaphore::new(req_limit));
 
-    if let Some(cc_tx) = cc_tx {
-        let _ = cc_tx.send(CommandCenterEvent::Log(format!(
-            "<Hardware detected: CPU cores: {}, Disk type: {}, File system: {}, Available memory: {:.2} GiB, Network speed: {} Mbps>",
-            cpu_cores,
-            disk_type.map(|dt| format!("{:?}", dt)).unwrap_or_else(|| "N/A".to_string()),
-            _filesystem,
-            available_memory as f64 / (1024.0 * 1024.0 * 1024.0),
-            max_network_speed.map(|s| format!("{}", s)).unwrap_or_else(|| "N/A".to_string())
-        )));
-        let _ = cc_tx.send(CommandCenterEvent::Log(format!(
-            "<Init. tuning: file_limit: {}, req_limit: {}, buffer_pool_size: {:.2} GiB>",
-            file_limit,
-            req_limit,
-            buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0)
-        )));
-    }
+
+    let _ = cc_tx.send(CommandCenterEvent::Log(format!(
+        "<Hardware detected: CPU cores: {}, Disk type: {}, File system: {}, Available memory: {:.2} GiB, Network speed: {} Mbps>",
+        cpu_cores,
+        disk_type.map(|dt| format!("{:?}", dt)).unwrap_or_else(|| "N/A".to_string()),
+        _filesystem,
+        available_memory as f64 / (1024.0 * 1024.0 * 1024.0),
+        max_network_speed.map(|s| format!("{}", s)).unwrap_or_else(|| "N/A".to_string())
+    )));
+    let _ = cc_tx.send(CommandCenterEvent::Log(format!(
+        "<Init. tuning: file_limit: {}, req_limit: {}, buffer_pool_size: {:.2} GiB>",
+        file_limit,
+        req_limit,
+        buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0)
+    )));
+
 
     (file_sem, req_sem, buffer_pool_size)
 }

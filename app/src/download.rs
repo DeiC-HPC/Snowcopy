@@ -1,11 +1,12 @@
 use crate::read_config;
 use aws_layer::async_head_objects_from_bucket;
 use std::path::Path;
+use std::sync::Arc;
 use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 
 #[allow(dead_code)]
-pub async fn download(bucket: &str, prefix: &str, dest: &Path, _file_limit: Option<usize>, _req_limit: Option<usize>, silent: bool, stats: bool) {
+pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, _file_limit: Option<usize>, _req_limit: Option<usize>, silent: bool, stats: bool) {
     let config = read_config();
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
