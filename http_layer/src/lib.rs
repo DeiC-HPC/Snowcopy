@@ -93,9 +93,8 @@ pub fn build_https_client() -> PoolClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(ctx: Arc<SnowContext>, bucket: Arc<String>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>) -> Result<CcLoadAndTransfer> {
-    let url = format!("{}/{}/{}", ctx.s3_url(), bucket, file_info.key).parse::<Url>()? ;
-    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(0, None, ctx, bucket, file_info.clone(), file_sem, buffer_pool, &url).await?;
+pub async fn put_file(ctx: Arc<SnowContext>, bucket: Arc<String>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri : Arc<String>, query_uri : &String) -> Result<CcLoadAndTransfer> {
+    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(0, None, ctx, bucket, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
@@ -125,10 +124,8 @@ pub async fn put_file(ctx: Arc<SnowContext>, bucket: Arc<String>, file_info: Arc
     Ok(transfer_metrics)
 }
 
-pub async fn put_file_range(ctx: Arc<SnowContext>, bucket: Arc<String>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url_str: String) -> Result<(String, CcLoadAndTransfer)> {
-    //let req = create_streaming_body_put(amount, uri, file).await?;
-    let url :Url = url_str.parse()?;
-    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, bucket, file_info, file_sem, buffer_pool, &url).await?;
+pub async fn put_file_range(ctx: Arc<SnowContext>, bucket: Arc<String>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, cannonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {
+    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, bucket, file_info, file_sem, buffer_pool, cannonical_uri, query_uri).await?;
 
     let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
@@ -181,7 +178,7 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
         .body(body)
 }
 
-async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: Arc<SnowContext>, bucket: Arc<String>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, url: &Url) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
+async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: Arc<SnowContext>, bucket: Arc<String>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
     let file_permit_start = Instant::now();
     let file_lock = file_sem.acquire().await?;
     let file_permit_elapsed = file_permit_start.elapsed();
@@ -228,32 +225,31 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     };
 
     let bytes = Bytes::from_owner(body_buffer);
-    let bytes_for_hash = bytes.clone(); // cheap clone (shared backing storage)
 
-
-    let req = if amount >= constants::CHUNK_SIZE {
+    let req = if amount > constants::CHUNK_SIZE { //TODO Jon, should this be enabled?
         let ctx_clone = ctx.clone();
         let bucket_clone = bucket.clone();
         let file_info_clone = file_info.clone();
-        let url_clone = url.clone();
+        let canonical_uri_clone = canonical_uri.clone();
+        let query_uri_clone = query_uri.clone();
 
         tokio::task::spawn_blocking(move || {
-            create_and_sign_req(ctx_clone, &bucket_clone, file_info_clone, &url_clone, amount, bytes, &bytes_for_hash)
+            create_and_sign_req(ctx_clone, &bucket_clone, file_info_clone, canonical_uri_clone, &query_uri_clone, amount, &bytes)
         }).await??
     } else {
-        create_and_sign_req(ctx, &bucket, file_info, &url, amount, bytes, &bytes_for_hash)?
+        create_and_sign_req(ctx, &bucket, file_info, canonical_uri, query_uri, amount, &bytes)?
     };
 
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
 
-fn create_and_sign_req(ctx: Arc<SnowContext>, bucket: &Arc<String>, file_info: Arc<FileInfo>, url: &Url, amount: u64, bytes: Bytes, bytes_for_hash: &Bytes) -> Result<Request<StreamingBody>> {
+fn create_and_sign_req(ctx: Arc<SnowContext>, bucket: &Arc<String>, file_info: Arc<FileInfo>, canonical_uri: Arc<String>, query_uri: &String, amount: u64, bytes_for_hash: &Bytes) -> Result<Request<StreamingBody>> {
     let mut hasher = Hasher::new(MessageDigest::md5())?;
     hasher.update(&bytes_for_hash)?;
     let digest = hasher.finish()?;
     let md5_hash = general_purpose::STANDARD.encode(digest);
 
-    let body: StreamingBody = Full::new(bytes)
+    let body: StreamingBody = Full::new(bytes_for_hash.clone())
         .map_err(|inf: Infallible| match inf {})
         .boxed();
 
@@ -268,8 +264,10 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, bucket: &Arc<String>, file_info: A
         service: "s3".to_string(),
     };
 
+    let host = Url::parse(ctx.s3_url())?.host_str().unwrap().to_string();
+
     let mut signed_headers = HashMap::new();
-    signed_headers.insert("host".to_string(), url.host_str().unwrap_or("").to_string());
+    signed_headers.insert("host".to_string(), host.clone());
     signed_headers.insert("content-type".to_string(), "application/octet-stream".to_string());
     signed_headers.insert("content-length".to_string(), amount.to_string());
     signed_headers.insert("content-md5".to_string(), md5_hash.clone());
@@ -287,12 +285,14 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, bucket: &Arc<String>, file_info: A
         file_info.key.as_str(),
         AWS_ALGORITHM,
         &signed_headers,
-        &url,
+        canonical_uri.clone(),
+        &query_uri,
     );
 
+    let uri = format!("https://{}{}{}", host, canonical_uri, query_uri);
     let mut req_builder = Request::builder()
         .method(Method::PUT)
-        .uri(url.as_str());
+        .uri(uri);
 
     for (header_name, header_value) in &signed_headers {
         req_builder = req_builder.header(header_name, header_value);

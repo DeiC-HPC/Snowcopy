@@ -86,12 +86,14 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
     let completed_parts = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::new();
 
+    let canonical_uri = Arc::new(format!("/{}/{}", bucket, file_info.key));
+
     for i in 0..chunk_amount_u64 {
         let start_pos = i * constants::CHUNK_SIZE;
         let amount = std::cmp::min(constants::CHUNK_SIZE, file_info.file_size - start_pos);
 
         let part_number = (i + 1) as i32;
-        let url = format!("{}/{}/{}?partNumber={}&uploadId={}", ctx.s3_url(), bucket, file_info.key, part_number, upload_id);
+        let query_uri = format!("?partNumber={}&uploadId={}", part_number, upload_id);
 
         let hyper_client = hyper_client.clone();
         let file_info_clone = file_info.clone();
@@ -102,9 +104,10 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
         let sender_cloned = sender.clone();
 
         let ctx_cloned = ctx.clone();
-        let bucket_cloned = bucket.clone(); // Clone into owned data
+        let bucket_cloned = bucket.clone();
+        let canonical_uri_cloned = canonical_uri.clone();
         let handle = tokio::spawn(async move {
-            let result = http_layer::put_file_range(ctx_cloned, bucket_cloned, file_info_clone.clone(), start_pos, amount, &hyper_client, file_sem_clone, req_sem_clone, buffer_pool_clone, url).await;
+            let result = http_layer::put_file_range(ctx_cloned, bucket_cloned, file_info_clone.clone(), start_pos, amount, &hyper_client, file_sem_clone, req_sem_clone, buffer_pool_clone, canonical_uri_cloned, &query_uri).await;
             match result {
                 Ok((etag, metrics)) => {
                     let completed_part = CompletedPartAws::builder()
@@ -132,7 +135,10 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
 }
 
 async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
-    let result = http_layer::put_file(ctx, bucket, file_info.clone(), &hyper_client, file_sem, req_sem, buffer_pool).await;
+    let canonical_uri = Arc::new(format!("/{}/{}", bucket, file_info.key));
+    let query_uri = "".to_string();
+
+    let result = http_layer::put_file(ctx, bucket, file_info.clone(), &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await;
     match result {
         Ok(command_center_event) => sender.send(CommandCenterEvent::FileTransferred(command_center_event)).unwrap(),
         Err(e) => eprintln!("Error uploading file {}: {}", file_info.file_path.to_str().unwrap(), e), //TODO JON: send error to command_center

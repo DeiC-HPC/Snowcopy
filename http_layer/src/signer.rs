@@ -1,5 +1,6 @@
 use ring::{digest, hmac};
 use std::collections::HashMap;
+use std::sync::Arc;
 use url::Url;
 
 pub struct S3Credentials {
@@ -22,9 +23,10 @@ pub fn get_s3_auth_header_and_signature(
     credentials: &S3Credentials,
     credential_scope: &CredentialScope,
     key: &str,
-    algoritm: &str,
-    signed_headers: &HashMap<String, String>,
-    url: &Url,
+    algorithm: &str,
+    signed_headers_sorted: &HashMap<String, String>,
+    canonical_uri: Arc<String>,
+    query_url: &String,
 ) -> (String, String) {
     let mut canonical_uri = String::with_capacity(bucket.len() + key.len() + 2);
     canonical_uri.push('/');
@@ -32,10 +34,8 @@ pub fn get_s3_auth_header_and_signature(
     canonical_uri.push('/');
     canonical_uri.push_str(key);
 
-    let canonical_query_string = url.query().unwrap_or("").replace('+', "%20");
-
-    let mut headers: Vec<(&str, &str)> = Vec::with_capacity(signed_headers.len());
-    for (k, v) in signed_headers {
+    let mut headers: Vec<(&str, &str)> = Vec::with_capacity(signed_headers_sorted.len());
+    for (k, v) in signed_headers_sorted {
         headers.push((k, v));
     }
     headers.sort_unstable_by(|a, b| a.0.cmp(b.0));
@@ -55,15 +55,15 @@ pub fn get_s3_auth_header_and_signature(
         canonical_headers.push('\n');
     }
 
-    let payload_sha256 = signed_headers
-        .get(&get_amz_content_header(algoritm))
+    let payload_sha256 = signed_headers_sorted
+        .get(&get_amz_content_header(algorithm))
         .expect("x-amz-content-XXX header matching algorithm is required");
 
     let canonical_request = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         method,
         canonical_uri,
-        canonical_query_string,
+        query_url,
         canonical_headers,
         signed_headers_str,
         payload_sha256
@@ -82,7 +82,7 @@ pub fn get_s3_auth_header_and_signature(
     let timestamp_iso = credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string();
     let string_to_sign = format!(
         "{}\n{}\n{}\n{}",
-        algoritm,
+        algorithm,
         timestamp_iso,
         credential_scope_str,
         hex_sha256
@@ -93,7 +93,7 @@ pub fn get_s3_auth_header_and_signature(
 
     let auth_header = format!(
         "{} Credential={}/{}, SignedHeaders={}, Signature={}",
-        algoritm, credentials.s3_access_key, credential_scope_str, signed_headers_str, signature
+        algorithm, credentials.s3_access_key, credential_scope_str, signed_headers_str, signature
     );
 
     (auth_header, signature)
@@ -105,12 +105,13 @@ pub fn get_s3_auth_header(
     credentials: &S3Credentials,
     credential_scope: &CredentialScope,
     key: &str,
-    algoritm: &str,
+    algorithm: &str,
     signed_headers: &HashMap<String, String>,
-    url: &Url,
+    canonical_uri: Arc<String>,
+    query_uri: &String,
 ) -> String {
     let (auth, _) =
-        get_s3_auth_header_and_signature(method, bucket, credentials, credential_scope, key, algoritm, signed_headers, url);
+        get_s3_auth_header_and_signature(method, bucket, credentials, credential_scope, key, algorithm, signed_headers, canonical_uri, query_uri);
     auth
 }
 
