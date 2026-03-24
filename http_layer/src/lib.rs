@@ -16,18 +16,18 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use openssl::hash::{Hasher, MessageDigest};
-use util_layer::{constants, FileInfo, SnowContext};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::time::Instant;
 use tokio::sync::{Mutex, Semaphore};
+use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
 use url::Url;
-use util_layer::constants::AWS_ALGORITHM;
 use util_layer::cc::CcLoadAndTransfer;
+use util_layer::constants::AWS_ALGORITHM;
+use util_layer::{constants, FileInfo, SnowContext};
 
 // Optimized buffer size for file reading (256 KB)
 const READ_BUFFER_SIZE: usize = 256 * 1024;
@@ -93,8 +93,8 @@ pub fn build_https_client() -> PoolClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(ctx: Arc<SnowContext>, bucket: Arc<String>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri : Arc<String>, query_uri : &String) -> Result<CcLoadAndTransfer> {
-    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(0, None, ctx, bucket, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
+pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri : Arc<String>, query_uri : &String) -> Result<CcLoadAndTransfer> {
+    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(0, None, ctx, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
@@ -124,8 +124,8 @@ pub async fn put_file(ctx: Arc<SnowContext>, bucket: Arc<String>, file_info: Arc
     Ok(transfer_metrics)
 }
 
-pub async fn put_file_range(ctx: Arc<SnowContext>, bucket: Arc<String>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, cannonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {
-    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, bucket, file_info, file_sem, buffer_pool, cannonical_uri, query_uri).await?;
+pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, cannonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {
+    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, file_info, file_sem, buffer_pool, cannonical_uri, query_uri).await?;
 
     let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
@@ -178,7 +178,7 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
         .body(body)
 }
 
-async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: Arc<SnowContext>, bucket: Arc<String>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
+async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
     let file_permit_start = Instant::now();
     let file_lock = file_sem.acquire().await?;
     let file_permit_elapsed = file_permit_start.elapsed();
@@ -228,22 +228,20 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     let req = if amount > constants::CHUNK_SIZE { //TODO Jon, should this be enabled?
         let ctx_clone = ctx.clone();
-        let bucket_clone = bucket.clone();
-        let file_info_clone = file_info.clone();
         let canonical_uri_clone = canonical_uri.clone();
         let query_uri_clone = query_uri.clone();
 
         tokio::task::spawn_blocking(move || {
-            create_and_sign_req(ctx_clone, &bucket_clone, file_info_clone, canonical_uri_clone, &query_uri_clone, amount, &bytes)
+            create_and_sign_req(ctx_clone, canonical_uri_clone, &query_uri_clone, amount, &bytes)
         }).await??
     } else {
-        create_and_sign_req(ctx, &bucket, file_info, canonical_uri, query_uri, amount, &bytes)?
+        create_and_sign_req(ctx, canonical_uri, query_uri, amount, &bytes)?
     };
 
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
 
-fn create_and_sign_req(ctx: Arc<SnowContext>, bucket: &Arc<String>, file_info: Arc<FileInfo>, canonical_uri: Arc<String>, query_uri: &String, amount: u64, bytes_for_hash: &Bytes) -> Result<Request<StreamingBody>> {
+fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, amount: u64, bytes_for_hash: &Bytes) -> Result<Request<StreamingBody>> {
     let mut hasher = Hasher::new(MessageDigest::md5())?;
     hasher.update(&bytes_for_hash)?;
     let digest = hasher.finish()?;
@@ -279,17 +277,19 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, bucket: &Arc<String>, file_info: A
 
     let auth_header = signer::get_s3_auth_header(
         Method::PUT.as_str(),
-        &bucket,
         &credentials,
         &credential_scope,
-        file_info.key.as_str(),
         AWS_ALGORITHM,
         &signed_headers,
         canonical_uri.clone(),
         &query_uri,
     );
 
-    let uri = format!("https://{}{}{}", host, canonical_uri, query_uri);
+    let uri = if query_uri.is_empty() {
+        format!("https://{}{}", host, canonical_uri)
+    } else {
+        format!("https://{}{}?{}", host, canonical_uri, query_uri)
+    };
     let mut req_builder = Request::builder()
         .method(Method::PUT)
         .uri(uri);

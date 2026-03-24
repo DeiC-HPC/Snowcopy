@@ -1,7 +1,6 @@
 use ring::{digest, hmac};
 use std::collections::HashMap;
 use std::sync::Arc;
-use url::Url;
 
 pub struct S3Credentials {
     pub s3_secret_key: String,
@@ -19,21 +18,13 @@ const AMZ_CONTENT: &str = "x-amz-content-";
 /// signed_headers map MUST contain "host", "x-amz-content-sha256", "x-amz-date".
 pub fn get_s3_auth_header_and_signature(
     method: &str,
-    bucket: &str,
     credentials: &S3Credentials,
     credential_scope: &CredentialScope,
-    key: &str,
     algorithm: &str,
     signed_headers_sorted: &HashMap<String, String>,
     canonical_uri: Arc<String>,
     query_url: &String,
 ) -> (String, String) {
-    let mut canonical_uri = String::with_capacity(bucket.len() + key.len() + 2);
-    canonical_uri.push('/');
-    canonical_uri.push_str(bucket);
-    canonical_uri.push('/');
-    canonical_uri.push_str(key);
-
     let mut headers: Vec<(&str, &str)> = Vec::with_capacity(signed_headers_sorted.len());
     for (k, v) in signed_headers_sorted {
         headers.push((k, v));
@@ -101,17 +92,15 @@ pub fn get_s3_auth_header_and_signature(
 
 pub fn get_s3_auth_header(
     method: &str,
-    bucket: &str,
     credentials: &S3Credentials,
     credential_scope: &CredentialScope,
-    key: &str,
     algorithm: &str,
     signed_headers: &HashMap<String, String>,
     canonical_uri: Arc<String>,
     query_uri: &String,
 ) -> String {
     let (auth, _) =
-        get_s3_auth_header_and_signature(method, bucket, credentials, credential_scope, key, algorithm, signed_headers, canonical_uri, query_uri);
+        get_s3_auth_header_and_signature(method, credentials, credential_scope, algorithm, signed_headers, canonical_uri, query_uri);
     auth
 }
 
