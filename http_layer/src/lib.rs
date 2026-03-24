@@ -133,6 +133,7 @@ pub async fn put_file_range(ctx: Arc<SnowContext>, bucket: Arc<String>, file_inf
     let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
     let req_permit_elapsed = req_permit_start.elapsed();
+
     let req_work_start = Instant::now();
     let resp = client.request(req).await?; //send_with_logging(client, req).await?;
     let req_work_elapsed = req_work_start.elapsed();

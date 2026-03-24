@@ -142,6 +142,20 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
 pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCenterEvent>) -> mpsc::Receiver<Result<FileInfo, io::Error>> {
     let (tx, rx) = mpsc::channel(5000);
 
+    if base_path.is_file() {
+        let file_size = base_path.metadata().unwrap().len();
+
+        if cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).is_err() {
+            //TODO JON: print error? it should never fail.
+        }
+
+        let key = base_path.file_name().unwrap().to_str().unwrap().to_string();
+        let file_info = FileInfo { file_path : base_path, key, file_size };
+        tx.send(Ok(file_info)).await.unwrap();
+
+        return rx;
+    }
+
     let base_path_for_relative = base_path.clone();
     tokio::task::spawn_blocking(move || {
         for entry in WalkDir::new(base_path).max_open(100) {
@@ -153,6 +167,7 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
 
                         let relative_path = file_path.strip_prefix(&base_path_for_relative)
                             .expect("base_path_for_relative should be a prefix of file_path. This error should never occur.");
+
                         let key: String = util_layer::path_to_s3_key(relative_path.to_str().unwrap());
 
                         if cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).is_err() {

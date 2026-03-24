@@ -17,9 +17,12 @@ use tracing_subscriber::{fmt, EnvFilter};
 use util_layer::{constants, Config};
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
-#[cfg(target_env = "musl")]
+#[cfg(not(target_env = "msvc"))]
+use jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: Jemalloc = Jemalloc;
 
 
 #[tokio::main]
