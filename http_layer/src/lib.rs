@@ -16,7 +16,7 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use openssl::hash::{Hasher, MessageDigest};
-use util_layer::{FileInfo, SnowContext};
+use util_layer::{constants, FileInfo, SnowContext};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -228,9 +228,26 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     };
 
     let bytes = Bytes::from_owner(body_buffer);
+    let bytes_for_hash = bytes.clone(); // cheap clone (shared backing storage)
 
-    let bytes_for_hash = bytes.clone();     // cheap clone (shared backing storage)
 
+    let req = if amount >= constants::CHUNK_SIZE {
+        let ctx_clone = ctx.clone();
+        let bucket_clone = bucket.clone();
+        let file_info_clone = file_info.clone();
+        let url_clone = url.clone();
+
+        tokio::task::spawn_blocking(move || {
+            create_and_sign_req(ctx_clone, &bucket_clone, file_info_clone, &url_clone, amount, bytes, &bytes_for_hash)
+        }).await??
+    } else {
+        create_and_sign_req(ctx, &bucket, file_info, &url, amount, bytes, &bytes_for_hash)?
+    };
+
+    Ok((req, file_work_elapsed, file_permit_elapsed))
+}
+
+fn create_and_sign_req(ctx: Arc<SnowContext>, bucket: &Arc<String>, file_info: Arc<FileInfo>, url: &Url, amount: u64, bytes: Bytes, bytes_for_hash: &Bytes) -> Result<Request<StreamingBody>> {
     let mut hasher = Hasher::new(MessageDigest::md5())?;
     hasher.update(&bytes_for_hash)?;
     let digest = hasher.finish()?;
@@ -284,8 +301,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     let req = req_builder
         .header("authorization", auth_header)
         .body(body)?;
-
-    Ok((req, file_work_elapsed, file_permit_elapsed))
+    Ok(req)
 }
 
 struct PooledBuffer {
