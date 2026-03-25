@@ -2,6 +2,7 @@ pub mod ui;
 
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 pub mod constants;
 pub mod cc;
@@ -17,7 +18,7 @@ pub fn build_context(config: Config) -> SnowContext {
     let ctx = SnowContext {
         s3_access_key: config.s3_access_key,
         s3_secret_key: config.s3_secret_key,
-        s3_url: config.s3_url,
+        s3_host: Url::parse(config.s3_url.as_str()).unwrap().host_str().unwrap().to_string(),
     };
     ctx
 }
@@ -25,7 +26,7 @@ pub fn build_context(config: Config) -> SnowContext {
 pub struct SnowContext {
     s3_access_key: String,
     s3_secret_key: String,
-    s3_url: String,
+    s3_host: String,
 }
 
 impl SnowContext {
@@ -37,8 +38,8 @@ impl SnowContext {
         &self.s3_secret_key
     }
 
-    pub fn s3_url(&self) -> &str {
-        &self.s3_url
+    pub fn s3_host(&self) -> &str {
+        &self.s3_host
     }
 }
 

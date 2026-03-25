@@ -24,7 +24,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
-use url::Url;
 use util_layer::cc::CcLoadAndTransfer;
 use util_layer::constants::AWS_ALGORITHM;
 use util_layer::{constants, FileInfo, SnowContext};
@@ -124,8 +123,8 @@ pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
     Ok(transfer_metrics)
 }
 
-pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, cannonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {
-    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, file_info, file_sem, buffer_pool, cannonical_uri, query_uri).await?;
+pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {
+    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, file_info, file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
@@ -262,10 +261,9 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
         service: "s3".to_string(),
     };
 
-    let host = Url::parse(ctx.s3_url())?.host_str().unwrap().to_string();
 
-    let mut signed_headers = HashMap::new();
-    signed_headers.insert("host".to_string(), host.clone());
+    let mut signed_headers = HashMap::new(); //TODO Jon: usr &str here instead of strings.
+    signed_headers.insert("host".to_string(), ctx.s3_host().to_string());
     signed_headers.insert("content-type".to_string(), "application/octet-stream".to_string());
     signed_headers.insert("content-length".to_string(), amount.to_string());
     signed_headers.insert("content-md5".to_string(), md5_hash.clone());
@@ -286,9 +284,9 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
     );
 
     let uri = if query_uri.is_empty() {
-        format!("https://{}{}", host, canonical_uri)
+        format!("https://{}{}", ctx.s3_host(), canonical_uri)
     } else {
-        format!("https://{}{}?{}", host, canonical_uri, query_uri)
+        format!("https://{}{}?{}", ctx.s3_host(), canonical_uri, query_uri)
     };
     let mut req_builder = Request::builder()
         .method(Method::PUT)
@@ -315,13 +313,6 @@ impl AsRef<[u8]> for PooledBuffer {
         &self.buffer.as_ref().expect("buffer should be present until drop")[..self.len]
     }
 }
-
-// We need to implement AsRef<[u8]> for Arc<PooledBuffer> if we want to use it with Bytes::from_owner
-// But wait, Arc already implements AsRef<T>.
-// The error says: "the trait bound `Arc<PooledBuffer>: AsRef<[u8]>` is not satisfied"
-// Rust's blanket impl: impl<T: ?Sized, A: Allocator> AsRef<T> for Arc<T, A>
-// So Arc<PooledBuffer> implements AsRef<PooledBuffer>.
-// It does NOT automatically implement AsRef<[u8]> even if PooledBuffer implements AsRef<[u8]>.
 
 impl Drop for PooledBuffer {
     fn drop(&mut self) {
