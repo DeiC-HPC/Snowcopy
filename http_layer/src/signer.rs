@@ -1,4 +1,7 @@
-use ring::{digest, hmac};
+use openssl::hash::{Hasher, MessageDigest};
+use openssl::pkey::PKey;
+use openssl::sign::Signer;
+use openssl::sha::sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -13,6 +16,15 @@ pub struct CredentialScope {
     pub(crate) service: String,
 }
 const AMZ_CONTENT: &str = "x-amz-content-";
+
+pub fn create_sha256_hasher() -> Hasher {
+    Hasher::new(MessageDigest::sha256()).expect("Failed to create SHA256 hasher")
+}
+
+pub fn finish_sha256_hex(mut hasher: Hasher) -> String {
+    let digest = hasher.finish().expect("Failed to finish SHA256 hashing");
+    hex::encode(digest)
+}
 
 /// Builds SigV4 Authorization for S3 and also returns the computed signature.
 /// signed_headers map MUST contain "host", "x-amz-content-sha256", "x-amz-date".
@@ -115,15 +127,17 @@ pub(crate) fn get_amz_content_header(algorithm: &str) -> String {
 }
 
 pub(crate) fn sha256_hex(data: &[u8]) -> String {
-    let actual_hash = digest::digest(&digest::SHA256, data);
+    let actual_hash = sha256(data);
     hex::encode(actual_hash)
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let s_key = hmac::Key::new(hmac::HMAC_SHA256, key);
-    let signature = hmac::sign(&s_key, data);
+    let pkey = PKey::hmac(key).expect("Failed to create HMAC key");
+    let mut signer = Signer::new(MessageDigest::sha256(), &pkey).expect("Failed to create HMAC signer");
+    signer.update(data).expect("Failed to update HMAC signer");
+    let signature = signer.sign_to_vec().expect("Failed to sign HMAC");
     let mut res = [0u8; 32];
-    res.copy_from_slice(signature.as_ref());
+    res.copy_from_slice(&signature);
     res
 }
 

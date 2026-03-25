@@ -3,8 +3,6 @@ mod signer;
 
 use crate::signer::{CredentialScope, S3Credentials};
 use anyhow::Result;
-use base64::engine::general_purpose;
-use base64::Engine;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use http_body_util::combinators::BoxBody;
@@ -15,7 +13,6 @@ use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::TokioExecutor,
 };
-use openssl::hash::{Hasher, MessageDigest};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -204,17 +201,22 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     let mut total_read = 0usize;
     let chunk_size = READ_BUFFER_SIZE.min(amount as usize);
 
+    let mut hasher = signer::create_sha256_hasher();
+
     while total_read < amount as usize {
         let remaining = amount as usize - total_read;
         let to_read = remaining.min(chunk_size);
         let chunk = &mut buffer[total_read..total_read + to_read];
 
         file.read_exact(chunk).await?;
+        hasher.update(chunk).expect("Failed to update SHA256 hasher");
         total_read += to_read;
     }
     drop(file);
     let file_work_elapsed = file_work_start.elapsed();
     drop(file_lock);
+
+    let sha256_hex = signer::finish_sha256_hex(hasher);
 
     // We use a custom struct to return the buffer to the pool when dropped
     let body_buffer = PooledBuffer {
@@ -225,17 +227,22 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     let bytes = Bytes::from_owner(body_buffer);
 
-    let req = create_and_sign_req(ctx, canonical_uri, query_uri, amount, &bytes)?;
+    let req = create_and_sign_req(ctx, canonical_uri, query_uri, amount, &bytes, sha256_hex)?;
 
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
 
-fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, amount: u64, bytes_for_hash: &Bytes) -> Result<Request<StreamingBody>> {
+fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, amount: u64, bytes_for_hash: &Bytes, sha256_hex: String) -> Result<Request<StreamingBody>> {
+/*
+    I want to delete this. However, the problem is that if we want to make some checksum calculation of
+    the entire multipart file, then we need to provide md5, such that we can check that big file's
+    Etag is a md5 hash of all the part's md5 hashes
+
     let mut hasher = Hasher::new(MessageDigest::md5())?;
     hasher.update(&bytes_for_hash)?;
     let digest = hasher.finish()?;
     let md5_hash = general_purpose::STANDARD.encode(digest);
-
+*/
     let body: StreamingBody = Full::new(bytes_for_hash.clone())
         .map_err(|inf: Infallible| match inf {})
         .boxed();
@@ -256,11 +263,11 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
     signed_headers.insert("host".to_string(), ctx.s3_host().to_string());
     signed_headers.insert("content-type".to_string(), "application/octet-stream".to_string());
     signed_headers.insert("content-length".to_string(), amount.to_string());
-    signed_headers.insert("content-md5".to_string(), md5_hash.clone());
+    //signed_headers.insert("content-md5".to_string(), md5_hash.clone());
     signed_headers.insert("x-amz-date".to_string(), credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string());
     signed_headers.insert(
         signer::get_amz_content_header(AWS_ALGORITHM),
-        signer::sha256_hex(&bytes_for_hash),
+        sha256_hex,
     );
 
     let auth_header = signer::get_s3_auth_header(
