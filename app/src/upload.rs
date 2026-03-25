@@ -157,6 +157,7 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
         let key = base_path.file_name().unwrap().to_str().unwrap().to_string();
         let file_info = FileInfo { file_path : base_path, key, file_size };
         tx.send(Ok(file_info)).await.unwrap();
+        let _ = cc_tx.send(CommandCenterEvent::StatusChanged(Status::Transferring));
 
         return rx;
     }
