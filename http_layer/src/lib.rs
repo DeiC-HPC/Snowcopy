@@ -26,7 +26,7 @@ use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
 use util_layer::cc::CcLoadAndTransfer;
 use util_layer::constants::AWS_ALGORITHM;
-use util_layer::{constants, FileInfo, SnowContext};
+use util_layer::{FileInfo, SnowContext};
 
 // Optimized buffer size for file reading (256 KB)
 const READ_BUFFER_SIZE: usize = 256 * 1024;
@@ -225,17 +225,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     let bytes = Bytes::from_owner(body_buffer);
 
-    let req = if amount > constants::CHUNK_SIZE { //TODO Jon, should this be enabled?
-        let ctx_clone = ctx.clone();
-        let canonical_uri_clone = canonical_uri.clone();
-        let query_uri_clone = query_uri.clone();
-
-        tokio::task::spawn_blocking(move || {
-            create_and_sign_req(ctx_clone, canonical_uri_clone, &query_uri_clone, amount, &bytes)
-        }).await??
-    } else {
-        create_and_sign_req(ctx, canonical_uri, query_uri, amount, &bytes)?
-    };
+    let req = create_and_sign_req(ctx, canonical_uri, query_uri, amount, &bytes)?;
 
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
