@@ -1,4 +1,4 @@
-use crate::command_center::{CommandCenter, CommandCenterEvent, Status, CC};
+use crate::command_center::{CommandCenter, CC};
 use crate::{auto_tuning, read_config};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -11,6 +11,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use util_layer::{build_context, constants, FileInfo, SnowContext};
 use walkdir::WalkDir;
+use util_layer::cc::{CommandCenterEvent, Status};
 
 pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool) {
     let cc = CommandCenter::new(silent, stats);
@@ -54,7 +55,7 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
                 let permit = task_sem.clone().acquire_owned().await.unwrap();
                 let handle = tokio::spawn(async move {
                     upload_file(ctx, bucket, client, hyper_client, file_info_arc, file_sem_clone, req_sem_clone, buffer_pool_clone, cc_tx_clone).await;
-                    drop(permit);
+                        drop(permit);
                 });
                 handles.push(handle);
             }

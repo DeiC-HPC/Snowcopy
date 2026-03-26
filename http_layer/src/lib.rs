@@ -232,16 +232,19 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
 
-pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String) -> Result<()> {
+pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) -> Result<()> {
     let req = create_and_sign_get_req(ctx, canonical_uri, query_uri)?;
 
-    let resp = send_with_logging(client, req).await?;
+    let req_permit = req_sem.acquire().await?;
+    let resp = client.request(req).await?;
+
 
     let status = resp.status();
     if !status.is_success() {
         anyhow::bail!("GET failed: {}", status);
     }
 
+    let file_permit = file_sem.acquire().await?;
     let mut file = File::create(&file_info.file_path).await?;
     let mut body = resp.into_body();
 
@@ -251,6 +254,8 @@ pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
             tokio::io::copy(&mut &data[..], &mut file).await?;
         }
     }
+    drop(file_permit);
+    drop(req_permit);
 
     Ok(())
 }

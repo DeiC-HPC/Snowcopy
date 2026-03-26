@@ -1,4 +1,3 @@
-use crate::command_center::CommandCenterEvent;
 use util_layer::constants::CHUNK_SIZE;
 use crate::constants::MAX_REQUEST_AMOUNT;
 use std::path::{Path, PathBuf};
@@ -6,6 +5,7 @@ use std::sync::Arc;
 use sysinfo::{Disks, Networks, System};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Semaphore;
+use util_layer::cc::CommandCenterEvent;
 
 // Network speed detection is supported on Linux more easily than on Windows and MacOS. TODO: take a second look at this
 fn read_network_speed(_interface_name: &str) -> Option<u64> {

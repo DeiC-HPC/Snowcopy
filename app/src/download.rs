@@ -1,4 +1,4 @@
-use crate::{auto_tuning, read_config};
+use crate::read_config;
 use aws_layer::{async_head_objects_from_bucket, S3Object};
 use std::path::Path;
 use std::sync::Arc;
@@ -6,10 +6,14 @@ use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 use std::collections::HashSet;
 use std::fs;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Semaphore;
 use http_layer::{BufferPool, PoolClient};
 use util_layer::{FileInfo, build_context, constants, SnowContext};
 use crate::auto_tuning::auto_tune_semaphores;
+
+use tokio::task::JoinSet;
+use util_layer::cc::{CcLoadAndTransfer, CommandCenterEvent};
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.
@@ -35,24 +39,26 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     let (cc_tx, cc_handle) = cc.start();
 
     let client = Arc::new(aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await);
-    let mut object_channel = async_head_objects_from_bucket(&bucket, &prefix, &dest, client.clone()).await;
+    let mut object_channel = async_head_objects_from_bucket(&bucket, &prefix, &dest, client.clone(), cc_tx.clone()).await;
 
 
-    let pool_client = http_layer::build_https_client();
+    let pool_client = Arc::new(http_layer::build_https_client());
     let snow_context = Arc::new(build_context(config.clone()));
     let (file_sem, req_sem, buffer_pool_size) = auto_tune_semaphores(req_limit, file_limit, dest, cc_tx.clone());
     let task_sem = Arc::new(Semaphore::new(500));
-    let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, constants::CHUNK_SIZE as usize));
+    let _buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, constants::CHUNK_SIZE as usize));
 
 
     let mut created_dirs: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut join_set = JoinSet::new();
+
     // Process objects from channel
     while let Some(object) = object_channel.recv().await {
 
         // TODO: for each object check size and determine parallel or simple download
         // TODO: truncate file to prepare for download
         // TODO: download
-        println!("Size: {}. Received object: {} -> {:?}", object.size, object.key, object.local_path);
+        //println!("Size: {}. Received object: {} -> {:?}", object.size, object.key, object.local_path);
 
         // Ensure parent directories exist
         if let Err(e) = ensure_parent_dirs_exist(&object.local_path, &mut created_dirs) {
@@ -60,8 +66,22 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
             continue;
         }
 
-        download_object(&bucket, silent, &pool_client, snow_context.clone(), object, file_sem.clone(), req_sem.clone()).await;
+        let bucket = bucket.clone();
+        let pool_client = pool_client.clone();
+        let snow_context = snow_context.clone();
+        let file_sem = file_sem.clone();
+        let req_sem = req_sem.clone();
+        let task_sem = task_sem.clone();
+        let cc_tx_clone = cc_tx.clone();
+
+        let permit = task_sem.clone().acquire_owned().await.unwrap();
+        join_set.spawn(async move {
+            download_object(bucket, silent, pool_client, snow_context, object, file_sem, req_sem, cc_tx_clone).await;
+            drop(permit);
+        });
     }
+
+
 
     /*
     The question here if there are some benefits in parallel downloads where some chunks are kept
@@ -76,13 +96,13 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
      It very hard to predict what will perform best. But it should be interesting.
      */
 
-
+    while let Some(_) = join_set.join_next().await {}; //TODO Jon: Do I like this more than the join_all in upload?
     drop(cc_tx);
     cc_handle.await.unwrap();
 }
 
-async fn download_object(bucket: &Arc<String>, silent: bool, pool_client: &PoolClient, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) {
-    if object.size > DOWNLOAD_MULTIPART_THRESHOLD {
+async fn download_object(bucket: Arc<String>, silent: bool, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>) {
+    if object.size > DOWNLOAD_MULTIPART_THRESHOLD * 10000{
         //
         //fancy pantsy multipart download...
     } else {
@@ -96,14 +116,21 @@ async fn download_object(bucket: &Arc<String>, silent: bool, pool_client: &PoolC
         let canonical_uri = Arc::new(format!("/{}/{}", &bucket, object.key));
         let query_uri = String::new();
 
-        match http_layer::get_file(snow_context.clone(), file_info, &pool_client, canonical_uri, &query_uri).await {
+        match http_layer::get_file(snow_context.clone(), file_info, &pool_client, canonical_uri, &query_uri, file_sem, req_sem).await {
             Ok(_) => {
-                if !silent {
-                    println!("Successfully downloaded {}", object.key);
-                }
+                let transfer_metrics = CcLoadAndTransfer { //TODO Jon: I would like the metrics part to be more elegant
+                    amount : object.size as u64,
+                    file_sem_work_time_secs: 0.0,
+                    file_sem_acquire_time_secs: 0.0,
+                    req_sem_work_time_secs: 0.0,
+                    req_sem_acquire_time_secs: 0.0,
+                };
+
+                cc_sender.send(CommandCenterEvent::FileTransferred(transfer_metrics)).unwrap();
+                cc_sender.send(CommandCenterEvent::Log(format!("Successfully downloaded {}", object.key))).unwrap();
             }
             Err(e) => {
-                eprintln!("Failed to download {}: {}", object.key, e);
+                cc_sender.send(CommandCenterEvent::Log(format!("Failed to download {}: {}", object.key, e))).unwrap();
             }
         }
     }

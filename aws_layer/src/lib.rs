@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedSender;
+use util_layer::cc::{CommandCenterEvent, Status};
 
 pub type AWSClient = Client;
 pub type CompletedPartAws = CompletedPart;
@@ -156,7 +158,7 @@ async fn list_bucket(
     Ok(())
 }
 
-pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: Arc<AWSClient>) ->  mpsc::Receiver<S3Object> {
+pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: Arc<AWSClient>, sender: UnboundedSender<CommandCenterEvent>) ->  mpsc::Receiver<S3Object> {
     // Create channel with buffer size of 5000
     let (tx, rx) = mpsc::channel::<S3Object>(5000);
 
@@ -192,6 +194,8 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
                                 eprintln!("Receiver dropped, stopping scan");
                                 return;
                             }
+                            let _ = sender.send(CommandCenterEvent::FileDiscovered(size as u64));
+
                         }
                     }
                 }

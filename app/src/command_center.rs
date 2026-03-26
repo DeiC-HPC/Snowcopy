@@ -1,7 +1,7 @@
 use std::fmt;
 use tokio::sync::mpsc::{UnboundedSender};
 use tokio::task::JoinHandle;
-use util_layer::cc::CcLoadAndTransfer;
+use util_layer::cc::{CcLoadAndTransfer, CommandCenterEvent};
 use crate::ui::{ProgressBarUi, Ui, UiEvent};
 
 struct NoopUiSender;
@@ -26,31 +26,8 @@ impl UiSender {
     }
 }
 
-pub enum CommandCenterEvent {
-    FileTransferred(CcLoadAndTransfer),
-    FileDiscovered(u64),
-    StatusChanged(Status),
-    Log(String),
-}
 
-#[allow(dead_code)] //TODO Jon: not all status are used currently
-pub enum Status {
-    Idle,
-    Transferring,
-    Discovering,
-    Finished,
-}
 
-impl fmt::Display for Status {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Status::Idle => write!(f, "Idle"),
-            Status::Transferring => write!(f, "Transferring"),
-            Status::Discovering => write!(f, "Discovering"),
-            Status::Finished => write!(f, "Finished"),
-        }
-    }
-}
 
 pub trait CC {
     fn start(&self) -> (UnboundedSender<CommandCenterEvent>, JoinHandle<()>);
