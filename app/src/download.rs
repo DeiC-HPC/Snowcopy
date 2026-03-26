@@ -13,6 +13,7 @@ use util_layer::{FileInfo, build_context, constants, SnowContext};
 use crate::auto_tuning::auto_tune_semaphores;
 
 use tokio::task::JoinSet;
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use util_layer::cc::{CcLoadAndTransfer, CommandCenterEvent};
 
 /// Ensures that the parent directory of the given path exists.
@@ -46,7 +47,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     let snow_context = Arc::new(build_context(config.clone()));
     let (file_sem, req_sem, buffer_pool_size) = auto_tune_semaphores(req_limit, file_limit, dest, cc_tx.clone());
     let task_sem = Arc::new(Semaphore::new(500));
-    let _buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, constants::CHUNK_SIZE as usize));
+    let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, DOWNLOAD_MULTIPART_THRESHOLD as usize));
 
 
     let mut created_dirs: HashSet<std::path::PathBuf> = HashSet::new();
@@ -72,11 +73,12 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
         let file_sem = file_sem.clone();
         let req_sem = req_sem.clone();
         let task_sem = task_sem.clone();
-        let cc_tx_clone = cc_tx.clone();
+        let cc_tx = cc_tx.clone();
+        let buffer_pool = buffer_pool.clone();
 
         let permit = task_sem.clone().acquire_owned().await.unwrap();
         join_set.spawn(async move {
-            download_object(bucket, pool_client, snow_context, object, file_sem, req_sem, cc_tx_clone).await;
+            download_object(bucket, pool_client, snow_context, object, file_sem, req_sem, cc_tx, buffer_pool).await;
             drop(permit);
         });
     }
@@ -101,10 +103,78 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     cc_handle.await.unwrap();
 }
 
-async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>) {
-    if object.size > DOWNLOAD_MULTIPART_THRESHOLD * 10000{
-        //
-        //fancy pantsy multipart download...
+async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, buffer_pool: Arc<BufferPool>) {
+    if object.size > DOWNLOAD_MULTIPART_THRESHOLD {
+        // fancy pantsy multipart download...
+        let file_path = object.local_path.clone();
+        let bucket = bucket.clone();
+        let key = object.key.clone();
+        let total_size = object.size as u64;
+
+        // Truncate file and pre-allocate
+        if let Err(e) = tokio::fs::File::create(&file_path).await {
+             cc_sender.send(CommandCenterEvent::Log(format!("Failed to create file {:?}: {}", file_path, e))).unwrap();
+             return;
+        }
+
+        let chunk_size = DOWNLOAD_MULTIPART_THRESHOLD as u64;
+        let num_parts = (total_size + chunk_size - 1) / chunk_size;
+
+        let mut download_set = JoinSet::new();
+
+        for i in 0..num_parts {
+            let start = i * chunk_size;
+            let end = std::cmp::min(start + chunk_size - 1, total_size - 1);
+
+            let snow_context = snow_context.clone();
+            let pool_client = pool_client.clone();
+            let req_sem = req_sem.clone();
+            let file_sem = file_sem.clone();
+            let canonical_uri = Arc::new(format!("/{}/{}", &bucket, key));
+            let query_uri = String::new();
+            let file_path = file_path.clone();
+
+            let buffer_pool = buffer_pool.clone();
+
+            download_set.spawn(async move {
+                let data = match http_layer::get_file_range(snow_context, &pool_client, buffer_pool, canonical_uri, &query_uri, req_sem, start, end).await {
+                    Ok(d) => d,
+                    Err(e) => return Err(e),
+                };
+
+                let _file_permit = file_sem.acquire().await.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to acquire file semaphore: {}", e)))?;
+                let mut file = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&file_path)
+                    .await?;
+
+                file.seek(std::io::SeekFrom::Start(start)).await?;
+                file.write_all(data.as_ref()).await?;
+                Ok(data.len as u64)
+            });
+        }
+
+        while let Some(res) = download_set.join_next().await {
+            match res {
+                Ok(Ok(bytes)) => {
+                    let transfer_metrics = CcLoadAndTransfer { //TODO JON: cleaner metrics. Perhaps optional.
+                        amount: bytes,
+                        file_sem_work_time_secs: 0.0,
+                        file_sem_acquire_time_secs: 0.0,
+                        req_sem_work_time_secs: 0.0,
+                        req_sem_acquire_time_secs: 0.0,
+                    };
+                    cc_sender.send(CommandCenterEvent::FileTransferred(transfer_metrics)).unwrap();
+                },
+                Ok(Err(e)) => {//TODO JON: handle retry
+                    cc_sender.send(CommandCenterEvent::Log(format!("Part download failed for {}: {}", key, e))).unwrap();
+                }
+                Err(e) => {//TODO JON: should never happen
+                    cc_sender.send(CommandCenterEvent::Log(format!("Task join failed for {}: {}", key, e))).unwrap();
+                }
+            }
+        }
+
     } else {
         //simple download
         let file_info = Arc::new(FileInfo {

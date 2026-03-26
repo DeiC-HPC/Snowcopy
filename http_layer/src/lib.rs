@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
 use util_layer::cc::CcLoadAndTransfer;
@@ -232,7 +233,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 }
 
 pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) -> Result<()> {
-    let req = create_and_sign_get_req(ctx, canonical_uri, query_uri)?;
+    let req = create_and_sign_get_req(ctx, canonical_uri, query_uri, None)?;
 
     let req_permit = req_sem.acquire().await?;
     let resp = client.request(req).await?;
@@ -259,7 +260,66 @@ pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
     Ok(())
 }
 
-fn create_and_sign_get_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String) -> Result<Request<StreamingBody>> {
+pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, start: u64, end: u64) -> Result<PooledBuffer> {
+    let total_range_size = (end - start + 1) as usize;
+    let mut buffer = buffer_pool.get().await;
+
+    // Split into 5 sub-requests
+    let num_sub_parts = 5; //TODO Jon: configurable/change dynamically?
+    let sub_part_size = (total_range_size + num_sub_parts - 1) / num_sub_parts;
+
+    let mut join_set = JoinSet::new();
+
+    for i in 0..num_sub_parts {
+        let sub_start = start + (i * sub_part_size) as u64;
+        if sub_start > end {
+            break;
+        }
+        let sub_end = std::cmp::min(sub_start + sub_part_size as u64 - 1, end);
+        let sub_range = format!("bytes={}-{}", sub_start, sub_end);
+
+        let ctx = ctx.clone();
+        let client = client.clone();
+        let canonical_uri = canonical_uri.clone();
+        let query_uri = query_uri.clone();
+        let req_sem = req_sem.clone();
+
+        join_set.spawn(async move {
+            let req = create_and_sign_get_req(ctx, canonical_uri, &query_uri, Some(sub_range))?;
+            let _permit = req_sem.acquire().await?;
+            let resp = client.request(req).await?;
+
+            let status = resp.status();
+            if !status.is_success() && status != hyper::StatusCode::PARTIAL_CONTENT {
+                anyhow::bail!("GET sub-range failed: {}", status);
+            }
+
+            let mut body = resp.into_body();
+            let mut sub_data = Vec::new();
+            while let Some(frame) = body.frame().await {
+                let frame = frame.map_err(|e| anyhow::anyhow!("Body error: {}", e))?;
+                if let Some(data) = frame.data_ref() {
+                    sub_data.extend_from_slice(&data);
+                }
+            }
+            Ok((sub_start - start, sub_data))
+        });
+    }
+
+    while let Some(res) = join_set.join_next().await {
+        let (offset, sub_data) = res.map_err(|e| anyhow::anyhow!("Task join error: {}", e))?? as (u64, Vec<u8>);
+        let offset = offset as usize;
+        buffer[offset..offset + sub_data.len()].copy_from_slice(&sub_data);
+    }
+
+    Ok(PooledBuffer {
+        buffer: Some(buffer),
+        pool: buffer_pool,
+        len: total_range_size,
+    })
+}
+
+fn create_and_sign_get_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, range: Option<String>) -> Result<Request<StreamingBody>> {
     let credentials = S3Credentials {
         s3_access_key: ctx.s3_access_key().to_string(),
         s3_secret_key: ctx.s3_secret_key().to_string(),
@@ -280,6 +340,9 @@ fn create_and_sign_get_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, qu
         signer::get_amz_content_header(AWS_ALGORITHM),
         empty_payload_sha256,
     );
+    if let Some(ref r) = range {
+        signed_headers.insert("range".to_string(), r.clone());
+    }
 
     let auth_header = signer::get_s3_auth_header(
         Method::GET.as_str(),
@@ -383,10 +446,10 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
     Ok(req)
 }
 
-struct PooledBuffer {
-    buffer: Option<Vec<u8>>,
-    pool: Arc<BufferPool>,
-    len: usize,
+pub struct PooledBuffer {
+    pub buffer: Option<Vec<u8>>,
+    pub pool: Arc<BufferPool>,
+    pub len: usize,
 }
 
 impl AsRef<[u8]> for PooledBuffer {
