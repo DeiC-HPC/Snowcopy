@@ -232,6 +232,86 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
 
+pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String) -> Result<()> {
+    let req = create_and_sign_get_req(ctx, canonical_uri, query_uri)?;
+
+    let resp = send_with_logging(client, req).await?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("GET failed: {}", status);
+    }
+
+    let mut file = File::create(&file_info.file_path).await?;
+    let mut body = resp.into_body();
+
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| anyhow::anyhow!("Body error: {}", e))?;
+        if let Some(data) = frame.data_ref() {
+            tokio::io::copy(&mut &data[..], &mut file).await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn create_and_sign_get_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String) -> Result<Request<StreamingBody>> {
+    let credentials = S3Credentials {
+        s3_access_key: ctx.s3_access_key().to_string(),
+        s3_secret_key: ctx.s3_secret_key().to_string(),
+    };
+
+    let credential_scope = CredentialScope {
+        timestamp: chrono::Utc::now(),
+        region: "us-east-1".to_string(),
+        service: "s3".to_string(),
+    };
+
+    let empty_payload_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string();
+
+    let mut signed_headers = HashMap::new();
+    signed_headers.insert("host".to_string(), ctx.s3_host().to_string());
+    signed_headers.insert("x-amz-date".to_string(), credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string());
+    signed_headers.insert(
+        signer::get_amz_content_header(AWS_ALGORITHM),
+        empty_payload_sha256,
+    );
+
+    let auth_header = signer::get_s3_auth_header(
+        Method::GET.as_str(),
+        &credentials,
+        &credential_scope,
+        AWS_ALGORITHM,
+        &signed_headers,
+        canonical_uri.clone(),
+        &query_uri,
+    );
+
+    let uri = if query_uri.is_empty() {
+        format!("https://{}{}", ctx.s3_host(), canonical_uri)
+    } else {
+        format!("https://{}{}?{}", ctx.s3_host(), canonical_uri, query_uri)
+    };
+
+    let mut req_builder = Request::builder()
+        .method(Method::GET)
+        .uri(uri);
+
+    for (header_name, header_value) in &signed_headers {
+        req_builder = req_builder.header(header_name, header_value);
+    }
+
+    let body: StreamingBody = http_body_util::Empty::new()
+        .map_err(|inf: Infallible| match inf {})
+        .boxed();
+
+    let req = req_builder
+        .header("authorization", auth_header)
+        .body(body)?;
+
+    Ok(req)
+}
+
 fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, amount: u64, bytes_for_hash: &Bytes, sha256_hex: String) -> Result<Request<StreamingBody>> {
 /*
     I want to delete this. However, the problem is that if we want to make some checksum calculation of

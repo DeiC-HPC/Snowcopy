@@ -1,11 +1,15 @@
-use crate::read_config;
-use aws_layer::async_head_objects_from_bucket;
+use crate::{auto_tuning, read_config};
+use aws_layer::{async_head_objects_from_bucket, S3Object};
 use std::path::Path;
 use std::sync::Arc;
 use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 use std::collections::HashSet;
 use std::fs;
+use tokio::sync::Semaphore;
+use http_layer::{BufferPool, PoolClient};
+use util_layer::{FileInfo, build_context, constants, SnowContext};
+use crate::auto_tuning::auto_tune_semaphores;
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.
@@ -25,18 +29,23 @@ fn ensure_parent_dirs_exist(file_path: &Path, created_dirs: &mut HashSet<std::pa
 }
 
 #[allow(dead_code)]
-pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, _file_limit: Option<usize>, _req_limit: Option<usize>, silent: bool, stats: bool) {
+pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool) {
     let config = read_config();
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
-    let client = aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await;
+    let client = Arc::new(aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await);
+    let mut object_channel = async_head_objects_from_bucket(&bucket, &prefix, &dest, client.clone()).await;
 
-    let mut object_channel = async_head_objects_from_bucket(&bucket, &prefix, &dest, client).await;
 
-    // Cache for already created directories
+    let pool_client = http_layer::build_https_client();
+    let snow_context = Arc::new(build_context(config.clone()));
+    let (file_sem, req_sem, buffer_pool_size) = auto_tune_semaphores(req_limit, file_limit, dest, cc_tx.clone());
+    let task_sem = Arc::new(Semaphore::new(500));
+    let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, constants::CHUNK_SIZE as usize));
+
+
     let mut created_dirs: HashSet<std::path::PathBuf> = HashSet::new();
-
     // Process objects from channel
     while let Some(object) = object_channel.recv().await {
 
@@ -51,13 +60,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, _file_limi
             continue;
         }
 
-        if object.size > DOWNLOAD_MULTIPART_THRESHOLD {
-            //
-            //fancy pantsy multipart download...
-        } else {
-            
-            //simple download
-        }
+        download_object(&bucket, silent, &pool_client, snow_context.clone(), object, file_sem.clone(), req_sem.clone()).await;
     }
 
     /*
@@ -76,4 +79,32 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, _file_limi
 
     drop(cc_tx);
     cc_handle.await.unwrap();
+}
+
+async fn download_object(bucket: &Arc<String>, silent: bool, pool_client: &PoolClient, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) {
+    if object.size > DOWNLOAD_MULTIPART_THRESHOLD {
+        //
+        //fancy pantsy multipart download...
+    } else {
+        //simple download
+        let file_info = Arc::new(FileInfo {
+            file_path: object.local_path.clone(),
+            key: object.key.clone(),
+            file_size: object.size as u64,
+        });
+
+        let canonical_uri = Arc::new(format!("/{}/{}", &bucket, object.key));
+        let query_uri = String::new();
+
+        match http_layer::get_file(snow_context.clone(), file_info, &pool_client, canonical_uri, &query_uri).await {
+            Ok(_) => {
+                if !silent {
+                    println!("Successfully downloaded {}", object.key);
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to download {}: {}", object.key, e);
+            }
+        }
+    }
 }

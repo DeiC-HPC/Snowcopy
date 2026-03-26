@@ -156,7 +156,7 @@ async fn list_bucket(
     Ok(())
 }
 
-pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: AWSClient) ->  mpsc::Receiver<S3Object> {
+pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: Arc<AWSClient>) ->  mpsc::Receiver<S3Object> {
     // Create channel with buffer size of 5000
     let (tx, rx) = mpsc::channel::<S3Object>(5000);
 
