@@ -25,7 +25,6 @@ use util_layer::cc::CcLoadAndTransfer;
 use util_layer::constants::AWS_ALGORITHM;
 use util_layer::{FileInfo, SnowContext};
 
-// Optimized buffer size for file reading (256 KB)
 const READ_BUFFER_SIZE: usize = 256 * 1024;
 pub struct BufferPool {
     semaphore: Semaphore,

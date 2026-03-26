@@ -76,7 +76,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
 
         let permit = task_sem.clone().acquire_owned().await.unwrap();
         join_set.spawn(async move {
-            download_object(bucket, silent, pool_client, snow_context, object, file_sem, req_sem, cc_tx_clone).await;
+            download_object(bucket, pool_client, snow_context, object, file_sem, req_sem, cc_tx_clone).await;
             drop(permit);
         });
     }
@@ -101,7 +101,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     cc_handle.await.unwrap();
 }
 
-async fn download_object(bucket: Arc<String>, silent: bool, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>) {
+async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>) {
     if object.size > DOWNLOAD_MULTIPART_THRESHOLD * 10000{
         //
         //fancy pantsy multipart download...
