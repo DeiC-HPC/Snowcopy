@@ -1,7 +1,7 @@
 mod logging;
 mod signer;
 
-use crate::signer::{CredentialScope, S3Credentials};
+use crate::signer::CredentialScope;
 use anyhow::Result;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
@@ -333,12 +333,8 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
     })
 }
 
+//TODO Jon: this should be combined with create_and_sign_req to some extent. There is som code duplication.
 fn create_and_sign_get_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, range: Option<String>) -> Result<Request<StreamingBody>> {
-    let credentials = S3Credentials {
-        s3_access_key: ctx.s3_access_key().to_string(),
-        s3_secret_key: ctx.s3_secret_key().to_string(),
-    };
-
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
         region: "us-east-1".to_string(),
@@ -360,7 +356,7 @@ fn create_and_sign_get_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, qu
 
     let auth_header = signer::get_s3_auth_header(
         Method::GET.as_str(),
-        &credentials,
+        ctx.clone(),
         &credential_scope,
         AWS_ALGORITHM,
         &signed_headers,
@@ -397,7 +393,8 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
 /*
     I want to delete this. However, the problem is that if we want to make some checksum calculation of
     the entire multipart file, then we need to provide md5, such that we can check that big file's
-    Etag is a md5 hash of all the part's md5 hashes
+    Etag is a md5 hash of all the part's md5 hashes.
+    TODO Jon: This should be a parameter option. 
 
     let mut hasher = Hasher::new(MessageDigest::md5())?;
     hasher.update(&bytes_for_hash)?;
@@ -407,11 +404,6 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
     let body: StreamingBody = Full::new(bytes_for_hash.clone())
         .map_err(|inf: Infallible| match inf {})
         .boxed();
-
-    let credentials = S3Credentials {
-        s3_access_key: ctx.s3_access_key().to_string(),
-        s3_secret_key: ctx.s3_secret_key().to_string(),
-    };
 
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
@@ -433,7 +425,7 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
 
     let auth_header = signer::get_s3_auth_header(
         Method::PUT.as_str(),
-        &credentials,
+        ctx.clone(),
         &credential_scope,
         AWS_ALGORITHM,
         &signed_headers,

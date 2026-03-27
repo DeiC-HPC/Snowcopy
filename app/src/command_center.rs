@@ -1,8 +1,7 @@
-use std::fmt;
-use tokio::sync::mpsc::{UnboundedSender};
-use tokio::task::JoinHandle;
-use util_layer::cc::{CcLoadAndTransfer, CommandCenterEvent};
 use crate::ui::{ProgressBarUi, Ui, UiEvent};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::task::JoinHandle;
+use util_layer::cc::CommandCenterEvent;
 
 struct NoopUiSender;
 
@@ -25,9 +24,6 @@ impl UiSender {
         }
     }
 }
-
-
-
 
 pub trait CC {
     fn start(&self) -> (UnboundedSender<CommandCenterEvent>, JoinHandle<()>);

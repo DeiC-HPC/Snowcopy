@@ -12,8 +12,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
-use util_layer::cc::{CommandCenterEvent, Status};
 use util_layer::cc::Status::Transferring;
+use util_layer::cc::CommandCenterEvent;
 
 pub type AWSClient = Client;
 pub type CompletedPartAws = CompletedPart;

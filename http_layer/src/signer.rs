@@ -4,11 +4,7 @@ use openssl::sign::Signer;
 use openssl::sha::sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
-
-pub struct S3Credentials {
-    pub s3_secret_key: String,
-    pub s3_access_key: String,
-}
+use util_layer::SnowContext;
 
 pub struct CredentialScope {
     pub(crate) timestamp: chrono::DateTime<chrono::Utc>,
@@ -30,7 +26,7 @@ pub fn finish_sha256_hex(mut hasher: Hasher) -> String {
 /// signed_headers map MUST contain "host", "x-amz-content-sha256", "x-amz-date".
 pub fn get_s3_auth_header_and_signature(
     method: &str,
-    credentials: &S3Credentials,
+    credentials: Arc<SnowContext>,
     credential_scope: &CredentialScope,
     algorithm: &str,
     signed_headers_sorted: &HashMap<String, String>,
@@ -91,12 +87,12 @@ pub fn get_s3_auth_header_and_signature(
         hex_sha256
     );
 
-    let signing_key = s3_signing_key(&credentials.s3_secret_key, &date_y_m_d, credential_scope.region.as_str());
+    let signing_key = s3_signing_key(credentials.s3_secret_key(), &date_y_m_d, credential_scope.region.as_str());
     let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
     let auth_header = format!(
         "{} Credential={}/{}, SignedHeaders={}, Signature={}",
-        algorithm, credentials.s3_access_key, credential_scope_str, signed_headers_str, signature
+        algorithm, credentials.s3_access_key(), credential_scope_str, signed_headers_str, signature
     );
 
     (auth_header, signature)
@@ -104,7 +100,7 @@ pub fn get_s3_auth_header_and_signature(
 
 pub fn get_s3_auth_header(
     method: &str,
-    credentials: &S3Credentials,
+    credentials: Arc<SnowContext>,
     credential_scope: &CredentialScope,
     algorithm: &str,
     signed_headers: &HashMap<String, String>,
