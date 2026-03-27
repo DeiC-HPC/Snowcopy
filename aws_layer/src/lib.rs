@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use util_layer::cc::{CommandCenterEvent, Status};
+use util_layer::cc::Status::Transferring;
 
 pub type AWSClient = Client;
 pub type CompletedPartAws = CompletedPart;
@@ -205,6 +206,8 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
                 }
             }
         }
+
+        let _ = sender.send(CommandCenterEvent::StatusChanged(Transferring));
     });
 
     rx

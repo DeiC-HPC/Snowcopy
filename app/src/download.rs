@@ -1,19 +1,19 @@
-use crate::read_config;
-use aws_layer::{async_head_objects_from_bucket, S3Object};
-use std::path::Path;
-use std::sync::Arc;
+use crate::auto_tuning::auto_tune_semaphores;
 use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
+use crate::read_config;
+use aws_layer::{async_head_objects_from_bucket, S3Object};
+use http_layer::{BufferPool, PoolClient};
 use std::collections::HashSet;
 use std::fs;
+use std::path::Path;
+use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Semaphore;
-use http_layer::{BufferPool, PoolClient};
-use util_layer::{FileInfo, build_context, constants, SnowContext};
-use crate::auto_tuning::auto_tune_semaphores;
+use util_layer::{build_context, FileInfo, SnowContext};
 
-use tokio::task::JoinSet;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::task::JoinSet;
 use util_layer::cc::{CcLoadAndTransfer, CommandCenterEvent};
 
 /// Ensures that the parent directory of the given path exists.
@@ -33,7 +33,6 @@ fn ensure_parent_dirs_exist(file_path: &Path, created_dirs: &mut HashSet<std::pa
     Ok(())
 }
 
-#[allow(dead_code)]
 pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool) {
     let config = read_config();
     let cc = CommandCenter::new(silent, stats);
@@ -45,7 +44,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
 
     let pool_client = Arc::new(http_layer::build_https_client());
     let snow_context = Arc::new(build_context(config.clone()));
-    let (file_sem, req_sem, buffer_pool_size) = auto_tune_semaphores(req_limit, file_limit, dest, cc_tx.clone());
+    let (file_sem, req_sem, buffer_pool_size) = auto_tune_semaphores(file_limit, req_limit, dest, cc_tx.clone());
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, DOWNLOAD_MULTIPART_THRESHOLD as usize));
 
@@ -53,15 +52,9 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     let mut created_dirs: HashSet<std::path::PathBuf> = HashSet::new();
     let mut join_set = JoinSet::new();
 
-    // Process objects from channel
+    //Process objects from bucket
     while let Some(object) = object_channel.recv().await {
-
-        // TODO: for each object check size and determine parallel or simple download
-        // TODO: truncate file to prepare for download
-        // TODO: download
-        //println!("Size: {}. Received object: {} -> {:?}", object.size, object.key, object.local_path);
-
-        // Ensure parent directories exist
+        //Ensure parent directories exist
         if let Err(e) = ensure_parent_dirs_exist(&object.local_path, &mut created_dirs) {
             eprintln!("Failed to create directories for {:?}: {}", object.local_path, e);
             continue;
@@ -82,8 +75,6 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
             drop(permit);
         });
     }
-
-
 
     /*
     The question here if there are some benefits in parallel downloads where some chunks are kept
@@ -111,7 +102,8 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
         let key = object.key.clone();
         let total_size = object.size as u64;
 
-        // Truncate file and pre-allocate
+        //TODO Jon: Right now we rely on file::seek to extend the file. We should consider if we should not just preallocate the file here.
+        //TODO Jon: It works because the specific tokio implementation handles seeking outside the current file limit like we want it to.
         if let Err(e) = tokio::fs::File::create(&file_path).await {
              cc_sender.send(CommandCenterEvent::Log(format!("Failed to create file {:?}: {}", file_path, e))).unwrap();
              return;
@@ -197,7 +189,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                 };
 
                 cc_sender.send(CommandCenterEvent::FileTransferred(transfer_metrics)).unwrap();
-                cc_sender.send(CommandCenterEvent::Log(format!("Successfully downloaded {}", object.key))).unwrap();
+                //cc_sender.send(CommandCenterEvent::Log(format!("Successfully downloaded {}", object.key))).unwrap();
             }
             Err(e) => {
                 cc_sender.send(CommandCenterEvent::Log(format!("Failed to download {}: {}", object.key, e))).unwrap();

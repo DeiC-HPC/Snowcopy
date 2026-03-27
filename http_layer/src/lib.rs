@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -251,9 +251,10 @@ pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(|e| anyhow::anyhow!("Body error: {}", e))?;
         if let Some(data) = frame.data_ref() {
-            tokio::io::copy(&mut &data[..], &mut file).await?;
+            file.write_all(data).await?;
         }
     }
+    file.flush().await?;
     drop(file_permit);
     drop(req_permit);
 
@@ -263,9 +264,10 @@ pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
 pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, start: u64, end: u64) -> Result<PooledBuffer> {
     let total_range_size = (end - start + 1) as usize;
     let mut buffer = buffer_pool.get().await;
+    let buffer_ptr = buffer.as_mut_ptr() as usize;
 
-    // Split into 5 sub-requests
-    let num_sub_parts = 5; //TODO Jon: configurable/change dynamically?
+    // Split into 4 sub-requests
+    let num_sub_parts = 4; //TODO Jon: configurable/change dynamically?
     let sub_part_size = (total_range_size + num_sub_parts - 1) / num_sub_parts;
 
     let mut join_set = JoinSet::new();
@@ -295,21 +297,33 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
             }
 
             let mut body = resp.into_body();
-            let mut sub_data = Vec::new();
+            let mut sub_data_len = 0usize;
             while let Some(frame) = body.frame().await {
                 let frame = frame.map_err(|e| anyhow::anyhow!("Body error: {}", e))?;
                 if let Some(data) = frame.data_ref() {
-                    sub_data.extend_from_slice(&data);
+                    let offset = (sub_start - start) as usize + sub_data_len;
+                    // SAFETY: each spawn writes to a unique non-overlapping range in the buffer.
+                    //TODO JON: This is something we should consider carefully. But I think the functionality is nice
+                    //and I trust that it is very testable. Thus we should be confident that there are no memory leaks and that
+                    // we don't write into wrong memory.
+                    //Ideally we can rewrite the code in some way where there is no copying. Perhaps just do 1MB slices?
+                    //Dunno, having less writers running simultaneously, I think, is to our benefit. We are faster than the
+                    //golang implementation where each file is split up into 5MB chunks and a goroutine is assigned the transfer
+                    //and disk writing for each chunk. I like the idea here better, where one disk writer is supported by multiple
+                    //networking threads
+                    unsafe {
+                        let dst = (buffer_ptr as *mut u8).add(offset);
+                        std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
+                    }
+                    sub_data_len += data.len();
                 }
             }
-            Ok((sub_start - start, sub_data))
+            Ok(())
         });
     }
 
     while let Some(res) = join_set.join_next().await {
-        let (offset, sub_data) = res.map_err(|e| anyhow::anyhow!("Task join error: {}", e))?? as (u64, Vec<u8>);
-        let offset = offset as usize;
-        buffer[offset..offset + sub_data.len()].copy_from_slice(&sub_data);
+        res.map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
     }
 
     Ok(PooledBuffer {
