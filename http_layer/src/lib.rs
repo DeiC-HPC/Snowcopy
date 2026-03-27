@@ -23,7 +23,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
 use util_layer::cc::CcLoadAndTransfer;
-use util_layer::constants::AWS_ALGORITHM;
+use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
 use util_layer::{FileInfo, SnowContext};
 
 const READ_BUFFER_SIZE: usize = 256 * 1024;
@@ -341,14 +341,12 @@ fn create_and_sign_get_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, qu
         service: "s3".to_string(),
     };
 
-    let empty_payload_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string();
-
     let mut signed_headers = HashMap::new();
     signed_headers.insert("host".to_string(), ctx.s3_host().to_string());
     signed_headers.insert("x-amz-date".to_string(), credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string());
     signed_headers.insert(
         signer::get_amz_content_header(AWS_ALGORITHM),
-        empty_payload_sha256,
+        EMPTY_PAYLOAD_SHA256.to_string(),
     );
     if let Some(ref r) = range {
         signed_headers.insert("range".to_string(), r.clone());
@@ -394,7 +392,7 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
     I want to delete this. However, the problem is that if we want to make some checksum calculation of
     the entire multipart file, then we need to provide md5, such that we can check that big file's
     Etag is a md5 hash of all the part's md5 hashes.
-    TODO Jon: This should be a parameter option. 
+    TODO Jon: This should be a parameter option.
 
     let mut hasher = Hasher::new(MessageDigest::md5())?;
     hasher.update(&bytes_for_hash)?;

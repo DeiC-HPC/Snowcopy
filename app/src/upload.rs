@@ -55,7 +55,7 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
                 let permit = task_sem.clone().acquire_owned().await.unwrap();
                 let handle = tokio::spawn(async move {
                     upload_file(ctx, bucket, client, hyper_client, file_info_arc, file_sem_clone, req_sem_clone, buffer_pool_clone, cc_tx_clone).await;
-                        drop(permit);
+                    drop(permit);
                 });
                 handles.push(handle);
             }
