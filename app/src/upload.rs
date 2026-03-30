@@ -9,9 +9,9 @@ use http_layer::{build_https_client, BufferPool, PoolClient};
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::{mpsc, Mutex, Semaphore};
+use util_layer::cc::{CommandCenterEvent, Status};
 use util_layer::{build_context, constants, FileInfo, SnowContext};
 use walkdir::WalkDir;
-use util_layer::cc::{CommandCenterEvent, Status};
 
 pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool) {
     let cc = CommandCenter::new(silent, stats);
@@ -149,14 +149,16 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
     let (tx, rx) = mpsc::channel(5000);
 
     if base_path.is_file() {
-        let file_size = base_path.metadata().unwrap().len();
+        let metadata = base_path.metadata().unwrap();
+        let file_size = metadata.len();
+        let modified_time = metadata.modified().ok();
 
         if cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).is_err() {
             //TODO JON: print error? it should never fail.
         }
 
         let key = base_path.file_name().unwrap().to_str().unwrap().to_string();
-        let file_info = FileInfo { file_path : base_path, key, file_size };
+        let file_info = FileInfo { file_path : base_path, key, file_size, modified_time };
         tx.send(Ok(file_info)).await.unwrap();
         let _ = cc_tx.send(CommandCenterEvent::StatusChanged(Status::Transferring));
 
@@ -169,7 +171,9 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
             match entry {
                 Ok(entry) => {
                     if entry.file_type().is_file() {
-                        let file_size = entry.metadata().unwrap().len();
+                        let metadata = entry.metadata().unwrap();
+                        let file_size = metadata.len();
+                        let modified_time = metadata.modified().ok();
                         let file_path = entry.path().to_path_buf();
 
                         let relative_path = file_path.strip_prefix(&base_path_for_relative)
@@ -181,7 +185,7 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
                             //TODO JON: print error? it should never fail.
                         }
 
-                        let file_info = FileInfo { file_path, key, file_size };
+                        let file_info = FileInfo { file_path, key, file_size, modified_time };
                         if tx.blocking_send(Ok(file_info)).is_err() {
                             //TODO JON: print error? it should never fail.
                         }

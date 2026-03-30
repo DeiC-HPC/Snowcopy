@@ -2,13 +2,14 @@ use crate::auto_tuning::auto_tune_semaphores;
 use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 use crate::read_config;
-use aws_layer::{async_head_objects_from_bucket, S3Object};
+use aws_layer::{async_head_objects_from_bucket, get_s3_mtime, AWSClient, S3Object};
+use filetime::FileTime;
 use http_layer::{BufferPool, PoolClient};
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{self, Receiver, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Semaphore;
 use util_layer::{build_context, FileInfo, SnowContext};
 
@@ -39,8 +40,8 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     let (cc_tx, cc_handle) = cc.start();
 
     let client = Arc::new(aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await);
-    let mut object_channel = async_head_objects_from_bucket(&bucket, &prefix, &dest, client.clone(), cc_tx.clone()).await;
-
+    let object_channel = async_head_objects_from_bucket(&bucket, &prefix, &dest, client.clone(), cc_tx.clone()).await;
+    let mut download_rx = check_already_exists(&bucket, &cc_tx, client, object_channel);
 
     let pool_client = Arc::new(http_layer::build_https_client());
     let snow_context = Arc::new(build_context(config.clone()));
@@ -53,7 +54,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     let mut join_set = JoinSet::new();
 
     //Process objects from bucket
-    while let Some(object) = object_channel.recv().await {
+    while let Some(object) = download_rx.recv().await {
         //Ensure parent directories exist
         if let Err(e) = ensure_parent_dirs_exist(&object.local_path, &mut created_dirs) {
             eprintln!("Failed to create directories for {:?}: {}", object.local_path, e);
@@ -92,6 +93,71 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     while let Some(_) = join_set.join_next().await {}; //TODO Jon: Do I like this more than the join_all in upload?
     drop(cc_tx);
     cc_handle.await.unwrap();
+}
+
+fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut object_channel: Receiver<S3Object>) -> UnboundedReceiver<S3Object> {
+    let (download_tx, download_rx) = mpsc::unbounded_channel::<S3Object>();
+
+    let checker_client = client.clone();
+    let checker_bucket = bucket.clone();
+    let checker_task_sem = Arc::new(Semaphore::new(200));
+    let cc_tx_checker = cc_tx.clone();
+
+    tokio::spawn(async move {
+        let mut checker_set = JoinSet::new();
+        while let Some(object) = object_channel.recv().await {
+            let client = checker_client.clone();
+            let bucket = checker_bucket.clone();
+            let download_tx = download_tx.clone();
+            let permit = checker_task_sem.clone().acquire_owned().await.unwrap();
+            let cc_tx = cc_tx_checker.clone();
+
+            checker_set.spawn(async move {
+                let s3_mtime = get_s3_mtime(&client, &bucket, &object.key).await;
+                let mut object = object;
+                object.modified_time = s3_mtime;
+
+                let needs_download = if let Ok(metadata) = fs::metadata(&object.local_path) {
+                    if metadata.len() == object.size as u64 {
+                        if let Some(s3_mtime) = object.modified_time {
+                            if let Ok(local_mtime) = metadata.modified() {
+                                if local_mtime == s3_mtime {
+                                    false // Matches
+                                } else {
+                                    true
+                                }
+                            } else {
+                                true
+                            }
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                };
+
+                if needs_download {
+                    let _ = download_tx.send(object);
+                } else {
+                    // Already downloaded, just update progress for the UI
+                    let transfer_metrics = CcLoadAndTransfer {
+                        amount: object.size as u64,
+                        file_sem_work_time_secs: 0.0,
+                        file_sem_acquire_time_secs: 0.0,
+                        req_sem_work_time_secs: 0.0,
+                        req_sem_acquire_time_secs: 0.0,
+                    };
+                    let _ = cc_tx.send(CommandCenterEvent::FileTransferred(transfer_metrics));
+                }
+                drop(permit);
+            });
+        }
+        while let Some(_) = checker_set.join_next().await {}
+    });
+    download_rx
 }
 
 async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, buffer_pool: Arc<BufferPool>) {
@@ -161,11 +227,13 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                 Ok(Err(e)) => {//TODO JON: handle retry
                     cc_sender.send(CommandCenterEvent::Log(format!("Part download failed for {}: {}", key, e))).unwrap();
                 }
-                Err(e) => {//TODO JON: should never happen
+                Err(e) => {//Should never happen
                     cc_sender.send(CommandCenterEvent::Log(format!("Task join failed for {}: {}", key, e))).unwrap();
                 }
             }
         }
+
+        update_mod_time_on_file(&object, &cc_sender);
 
     } else {
         //simple download
@@ -173,6 +241,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
             file_path: object.local_path.clone(),
             key: object.key.clone(),
             file_size: object.size as u64,
+            modified_time: object.modified_time,
         });
 
         let canonical_uri = Arc::new(format!("/{}/{}", &bucket, object.key));
@@ -189,11 +258,22 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                 };
 
                 cc_sender.send(CommandCenterEvent::FileTransferred(transfer_metrics)).unwrap();
+                
+                update_mod_time_on_file(&object, &cc_sender);
                 //cc_sender.send(CommandCenterEvent::Log(format!("Successfully downloaded {}", object.key))).unwrap();
             }
             Err(e) => {
                 cc_sender.send(CommandCenterEvent::Log(format!("Failed to download {}: {}", object.key, e))).unwrap();
             }
+        }
+    }
+}
+
+fn update_mod_time_on_file(object: &S3Object, cc_sender: &UnboundedSender<CommandCenterEvent>) {
+    if let Some(mtime) = object.modified_time {
+        let ft = FileTime::from_system_time(mtime);
+        if let Err(e) = filetime::set_file_mtime(&object.local_path, ft) {
+            cc_sender.send(CommandCenterEvent::Log(format!("Failed to update mtime for {:?}: {}", object.local_path, e))).unwrap();
         }
     }
 }

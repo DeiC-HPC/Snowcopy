@@ -8,12 +8,14 @@ use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
 use s3example_error::S3ExampleError;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use util_layer::cc::Status::Transferring;
 use util_layer::cc::CommandCenterEvent;
+use util_layer::time::float_string_to_time;
 
 pub type AWSClient = Client;
 pub type CompletedPartAws = CompletedPart;
@@ -188,6 +190,7 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
                                 key: key.to_string(),
                                 local_path,
                                 size,
+                                modified_time : None
                             };
 
                             // Send object through channel
@@ -218,4 +221,23 @@ pub struct S3Object {
     pub key: String,
     pub local_path: PathBuf,
     pub size: i64,
+    pub modified_time: Option<SystemTime>,
+}
+
+pub async fn get_s3_mtime(client: &AWSClient, bucket: &str, key: &str) -> Option<SystemTime> {
+    match client.head_object().bucket(bucket).key(key).send().await {
+        Ok(resp) => {
+            if let Some(mtime_str) = resp.metadata().and_then(|m| m.get("mtime")) {
+                if let Ok(st) = float_string_to_time(mtime_str) {
+                    return Some(st);
+                }
+            }
+            resp.last_modified().and_then(|dt| {
+                let seconds = dt.secs();
+                let nanoseconds = dt.subsec_nanos();
+                SystemTime::UNIX_EPOCH.checked_add(Duration::new(seconds as u64, nanoseconds))
+            })
+        }
+        Err(_) => None,
+    }
 }
