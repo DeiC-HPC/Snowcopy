@@ -11,7 +11,7 @@ use std::time::SystemTime;
 use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
-use util_layer::cc::{CcLoadAndTransfer, CommandCenterEvent, Status};
+use util_layer::cc_util::{CommandCenterEvent, Status};
 use util_layer::{build_context, constants, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
@@ -147,7 +147,7 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
                         .build();
                     completed_parts.lock().await.push(completed_part);
 
-                    sender_cloned.send(CommandCenterEvent::FileTransferred(metrics)).unwrap();
+                    sender_cloned.send(CommandCenterEvent::PartTransferred(metrics)).unwrap();
                 }
                 Err(e) => {
                     eprintln!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e);
@@ -163,6 +163,7 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
 
     let completed_parts = Arc::try_unwrap(completed_parts).unwrap().into_inner();
     aws_layer::complete_multipart_upload(&aws_client, &bucket, &*file_info.key, upload_id, completed_parts).await.unwrap();
+    let _ = sender.send(CommandCenterEvent::FileTransferred(file_info.file_size));
 }
 
 async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
@@ -171,7 +172,11 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
 
     let result = http_layer::put_file(ctx, file_info.clone(), &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await;
     match result {
-        Ok(command_center_event) => sender.send(CommandCenterEvent::FileTransferred(command_center_event)).unwrap(),
+        Ok(metrics) => {
+            let file_size = file_info.file_size;
+            sender.send(CommandCenterEvent::PartTransferred(metrics)).unwrap();
+            sender.send(CommandCenterEvent::FileTransferred(file_size)).unwrap();
+        },
         Err(e) => eprintln!("Error uploading file {}: {}", file_info.file_path.to_str().unwrap(), e), //TODO JON: send error to command_center
     }
 }
@@ -199,17 +204,13 @@ fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCen
                         let s3_mtime = get_s3_mtime(&client, &bucket, &file_info.key).await;
 
                         if should_upload(&file_info, client, bucket, s3_mtime).await {
+                            let _ = cc_tx.send(CommandCenterEvent::Log(format!("Uploading file: {}", file_info.key)));
+                            let _ = cc_tx.send(CommandCenterEvent::Log(format!("File size: {}", file_info.file_size)));
+                            let _ = cc_tx.send(CommandCenterEvent::FileNeedsTransfer(file_info.file_size));
                             let _ = upload_tx.send(Ok(file_info));
                         } else {
                             // Already uploaded, just update progress for the UI
-                            let transfer_metrics = CcLoadAndTransfer {
-                                amount: file_info.file_size,
-                                file_sem_work_time_secs: 0.0,
-                                file_sem_acquire_time_secs: 0.0,
-                                req_sem_work_time_secs: 0.0,
-                                req_sem_acquire_time_secs: 0.0,
-                            };
-                            let _ = cc_tx.send(CommandCenterEvent::FileTransferred(transfer_metrics));
+                            let _ = cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(file_info.file_size));
                         }
                         drop(permit);
                     });

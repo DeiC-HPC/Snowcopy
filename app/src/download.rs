@@ -14,7 +14,7 @@ use util_layer::{build_context, constants, FileInfo, SnowContext};
 
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::task::JoinSet;
-use util_layer::cc::{CcLoadAndTransfer, CommandCenterEvent};
+use util_layer::cc_util::{CcLoadAndTransfer, CommandCenterEvent};
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.
@@ -116,19 +116,13 @@ async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String
                 object.modified_time = s3_mtime;
 
                 if should_download_object(&mut object) {
+                    let _ = cc_tx.send(CommandCenterEvent::FileNeedsTransfer(object.size as u64));
                     if let Err(e) = download_tx.send(object).await {
                         let _ = cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to download queue: {}", e)));
                     }
                 } else {
                     // Already downloaded, just update progress for the UI
-                    let transfer_metrics = CcLoadAndTransfer {
-                        amount: object.size as u64,
-                        file_sem_work_time_secs: 0.0,
-                        file_sem_acquire_time_secs: 0.0,
-                        req_sem_work_time_secs: 0.0,
-                        req_sem_acquire_time_secs: 0.0,
-                    };
-                    let _ = cc_tx.send(CommandCenterEvent::FileTransferred(transfer_metrics));
+                    let _ = cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(object.size as u64));
                 }
                 drop(permit);
             });
@@ -229,7 +223,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                         req_sem_work_time_secs: 0.0,
                         req_sem_acquire_time_secs: 0.0,
                     };
-                    cc_sender.send(CommandCenterEvent::FileTransferred(transfer_metrics)).unwrap();
+                    cc_sender.send(CommandCenterEvent::PartTransferred(transfer_metrics)).unwrap();
                 },
                 Ok(Err(e)) => {//TODO JON: handle retry
                     cc_sender.send(CommandCenterEvent::Log(format!("Part download failed for {}: {}", key, e))).unwrap();
@@ -240,6 +234,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
             }
         }
 
+        cc_sender.send(CommandCenterEvent::FileTransferred(total_size)).unwrap();
         update_mod_time_on_file(&object, &cc_sender);
 
     } else {
@@ -264,7 +259,8 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                     req_sem_acquire_time_secs: 0.0,
                 };
 
-                cc_sender.send(CommandCenterEvent::FileTransferred(transfer_metrics)).unwrap();
+                cc_sender.send(CommandCenterEvent::PartTransferred(transfer_metrics)).unwrap();
+                cc_sender.send(CommandCenterEvent::FileTransferred(object.size as u64)).unwrap();
 
                 update_mod_time_on_file(&object, &cc_sender);
                 //cc_sender.send(CommandCenterEvent::Log(format!("Successfully downloaded {}", object.key))).unwrap();

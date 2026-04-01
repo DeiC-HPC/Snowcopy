@@ -13,8 +13,8 @@ use std::time::Duration;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
-use util_layer::cc::CommandCenterEvent;
-use util_layer::cc::Status::Transferring;
+use util_layer::cc_util::CommandCenterEvent;
+use util_layer::cc_util::Status::Transferring;
 use util_layer::constants;
 use util_layer::time::float_string_to_time;
 
@@ -194,12 +194,12 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
                                 modified_time : None //No fallback value. Either we have the one from s3 metadata or we dont care
                             };
 
+                            let _ = sender.send(CommandCenterEvent::FileDiscovered(size as u64));
                             // Send object through channel
                             if tx.send(s3_object).await.is_err() {
                                 eprintln!("Receiver dropped, stopping scan");
                                 return;
                             }
-                            let _ = sender.send(CommandCenterEvent::FileDiscovered(size as u64));
 
                         }
                     }

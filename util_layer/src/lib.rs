@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 pub mod constants;
-pub mod cc;
+pub mod cc_util;
 pub mod time;
 
 #[derive(Clone, Serialize, Deserialize)]
