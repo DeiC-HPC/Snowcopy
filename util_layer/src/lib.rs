@@ -1,11 +1,13 @@
 pub mod ui;
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
 pub mod constants;
-pub mod cc;
+pub mod cc_util;
+pub mod time;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -48,6 +50,7 @@ pub struct FileInfo {
     pub file_path: PathBuf,
     pub key: String,
     pub file_size: u64,
+    pub modified_time: Option<SystemTime>,
 }
 
 pub fn path_to_s3_key(path: &str) -> String {

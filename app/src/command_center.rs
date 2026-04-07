@@ -1,7 +1,7 @@
 use crate::ui::{ProgressBarUi, Ui, UiEvent};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
-use util_layer::cc::CommandCenterEvent;
+use util_layer::cc_util::{CommandCenterEvent, Status};
 
 struct NoopUiSender;
 
@@ -61,11 +61,11 @@ impl CC for CommandCenter {
             let mut total_file_work_time = 0f64;
             let mut total_req_work_time = 0f64;
 
+            let _ = ui_tx.send(UiEvent::Message(Status::Discovering.to_string()));
+
             while let Some(ev) = cc_rx.recv().await {
                 match ev {
-                    CommandCenterEvent::FileTransferred(metrics) => {
-                        file_transferred_count += 1;
-
+                    CommandCenterEvent::PartTransferred(metrics) => {
                         total_file_permit_time += metrics.file_sem_acquire_time_secs;
                         total_req_permit_time += metrics.req_sem_acquire_time_secs;
                         total_file_work_time += metrics.file_sem_work_time_secs;
@@ -73,10 +73,25 @@ impl CC for CommandCenter {
 
                         let _ = ui_tx.send(UiEvent::Uploaded(metrics.amount));
                     }
+                    CommandCenterEvent::FileTransferred(bytes) => {
+                        file_transferred_count += 1;
+                        let _ = ui_tx.send(UiEvent::FileTransferred(bytes));
+                    }
                     CommandCenterEvent::FileDiscovered(bytes) => {
-                        let _ = ui_tx.send(UiEvent::AddToTotal(bytes));
+                        let _ = ui_tx.send(UiEvent::FileDiscovered(bytes));
+                    }
+                    CommandCenterEvent::FileAlreadyAtTarget(bytes) => {
+                        let _ = ui_tx.send(UiEvent::FileAlreadyAtTarget(bytes));
+                    }
+                    CommandCenterEvent::FileNeedsTransfer(bytes) => {
+                        let _ = ui_tx.send(UiEvent::AddToTotalTransfer(bytes));
                     }
                     CommandCenterEvent::StatusChanged(status) => {
+                        if let Status::Transferring = status { //TODO JON: Who should be responsible of this knowledge? CC should now, but its the discovery threads, that knows, whom sends the message.
+                            // When we switch to transferring, we know that all discovered files
+                            // are either already at target or will be transferred.
+                            let _ = ui_tx.send(UiEvent::DiscoveryFinished);
+                        }
                         let _ = ui_tx.send(UiEvent::Message(status.to_string()));
                     }
                     CommandCenterEvent::Log(string) => {
@@ -86,7 +101,7 @@ impl CC for CommandCenter {
             }
 
             if stats {
-                let _ = ui_tx.send(UiEvent::Println(format!("Total files/chunks transferred: {}", file_transferred_count)));
+                let _ = ui_tx.send(UiEvent::Println(format!("Total files completed: {}", file_transferred_count)));
                 let _ = ui_tx.send(UiEvent::Println(format!("Total time spent acquiring file permits: {:.2}s", total_file_permit_time))); //TODO Jon: Is this metric actually relevant?
                 let _ = ui_tx.send(UiEvent::Println(format!("Total time spent acquiring request permits: {:.2}s", total_req_permit_time)));
                 let _ = ui_tx.send(UiEvent::Println(format!("Total time spent working on disk I/O: {:.2}s", total_file_work_time)));
@@ -98,7 +113,7 @@ impl CC for CommandCenter {
                 let _ = ui_handle.await;
             }
             if let Some(ui) = ui {
-                ui.finish("Finished"); //This must be done after the UI thread is done, as we experienced incorrect reporting due to race conditions otherwise
+                ui.finish(&Status::Finished.to_string()); //This must be done after the UI thread is done, as we experienced incorrect reporting due to race conditions otherwise
             }
         });
 

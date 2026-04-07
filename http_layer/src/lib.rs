@@ -22,7 +22,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
-use util_layer::cc::CcLoadAndTransfer;
+use util_layer::cc_util::CcLoadAndTransfer;
 use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
 use util_layer::{FileInfo, SnowContext};
 
@@ -218,6 +218,8 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     let sha256_hex = signer::finish_sha256_hex(hasher);
 
+    let mtime_str = file_info.modified_time.map(util_layer::time::time_to_float_string);
+
     // We use a custom struct to return the buffer to the pool when dropped
     let body_buffer = PooledBuffer {
         buffer: Some(buffer),
@@ -227,7 +229,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     let bytes = Bytes::from_owner(body_buffer);
 
-    let req = create_and_sign_req(ctx, canonical_uri, query_uri, amount, &bytes, sha256_hex)?;
+    let req = create_and_sign_req(ctx, canonical_uri, query_uri, amount, &bytes, sha256_hex, mtime_str)?;
 
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
@@ -387,7 +389,7 @@ fn create_and_sign_get_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, qu
     Ok(req)
 }
 
-fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, amount: u64, bytes_for_hash: &Bytes, sha256_hex: String) -> Result<Request<StreamingBody>> {
+fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, amount: u64, bytes_for_hash: &Bytes, sha256_hex: String, mtime: Option<String>) -> Result<Request<StreamingBody>> {
 /*
     I want to delete this. However, the problem is that if we want to make some checksum calculation of
     the entire multipart file, then we need to provide md5, such that we can check that big file's
@@ -420,6 +422,10 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
         signer::get_amz_content_header(AWS_ALGORITHM),
         sha256_hex,
     );
+
+    if let Some(mtime_str) = mtime {
+        signed_headers.insert("x-amz-meta-mtime".to_string(), mtime_str);
+    }
 
     let auth_header = signer::get_s3_auth_header(
         Method::PUT.as_str(),

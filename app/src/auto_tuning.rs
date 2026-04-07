@@ -5,7 +5,7 @@ use std::sync::Arc;
 use sysinfo::{Disks, Networks, System};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Semaphore;
-use util_layer::cc::CommandCenterEvent;
+use util_layer::cc_util::CommandCenterEvent;
 
 // Network speed detection is supported on Linux more easily than on Windows and MacOS. TODO: take a second look at this
 fn read_network_speed(_interface_name: &str) -> Option<u64> {

@@ -10,10 +10,13 @@ use s3example_error::S3ExampleError;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
-use util_layer::cc::Status::Transferring;
-use util_layer::cc::CommandCenterEvent;
+use util_layer::cc_util::CommandCenterEvent;
+use util_layer::cc_util::Status::Transferring;
+use util_layer::constants;
+use util_layer::time::float_string_to_time;
 
 pub type AWSClient = Client;
 pub type CompletedPartAws = CompletedPart;
@@ -92,24 +95,25 @@ pub async fn create_bucket(
     client: &AWSClient,
     bucket_name: Arc<String>,
 ) -> Result<Option<CreateBucketOutput>, S3ExampleError> {
-    let create = client
-        .create_bucket()
-        .bucket(bucket_name.as_str())
-        .send()
-        .await;
-
-    // BucketAlreadyExists and BucketAlreadyOwnedByYou are not problems for this task.
-    create.map(Some).or_else(|err| {
-        if err
-            .as_service_error()
-            .map(|se| se.is_bucket_already_exists() || se.is_bucket_already_owned_by_you())
-            == Some(true)
-        {
+    match client.head_bucket().bucket(bucket_name.as_str()).send().await {
+        Ok(_) => {
             Ok(None)
-        } else {
-            Err(S3ExampleError::from(err))
         }
-    })
+        Err(err) => {
+            let service_err = err.into_service_error();
+            if service_err.is_not_found() {
+                let create = client
+                    .create_bucket()
+                    .bucket(bucket_name.as_str())
+                    .send()
+                    .await;
+
+                create.map(Some).map_err(S3ExampleError::from)
+            } else {
+                Err(S3ExampleError::from(service_err))
+            }
+        }
+    }
 }
 
 
@@ -160,8 +164,7 @@ async fn list_bucket(
 }
 
 pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: Arc<AWSClient>, sender: UnboundedSender<CommandCenterEvent>) ->  mpsc::Receiver<S3Object> {
-    // Create channel with buffer size of 5000
-    let (tx, rx) = mpsc::channel::<S3Object>(5000);
+    let (tx, rx) = mpsc::channel::<S3Object>(constants::DISCOVERY_LIMIT_DOWNLOAD as usize);
 
     let bucket_clone = bucket.to_owned();
     let prefix_clone = prefix.to_owned();
@@ -188,14 +191,15 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
                                 key: key.to_string(),
                                 local_path,
                                 size,
+                                modified_time : None //No fallback value. Either we have the one from s3 metadata or we dont care
                             };
 
+                            let _ = sender.send(CommandCenterEvent::FileDiscovered(size as u64));
                             // Send object through channel
                             if tx.send(s3_object).await.is_err() {
                                 eprintln!("Receiver dropped, stopping scan");
                                 return;
                             }
-                            let _ = sender.send(CommandCenterEvent::FileDiscovered(size as u64));
 
                         }
                     }
@@ -218,4 +222,19 @@ pub struct S3Object {
     pub key: String,
     pub local_path: PathBuf,
     pub size: i64,
+    pub modified_time: Option<SystemTime>,
+}
+
+pub async fn get_s3_mtime(client: &AWSClient, bucket: &str, key: &str) -> Option<SystemTime> {
+    match client.head_object().bucket(bucket).key(key).send().await {
+        Ok(resp) => {
+            if let Some(mtime_str) = resp.metadata().and_then(|m| m.get("mtime")) {
+                if let Ok(st) = float_string_to_time(mtime_str) {
+                    return Some(st);
+                }
+            }
+            None
+        }
+        Err(_) => None,
+    }
 }
