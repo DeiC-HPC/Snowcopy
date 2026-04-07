@@ -37,7 +37,7 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
 
     if !bucket_created {
         //We did not create the bucket, so check for already uploaded files
-        files_to_upload_channel = check_already_exists(&bucket, &cc_tx, client.clone(), files_to_upload_channel);
+        files_to_upload_channel = check_already_exists(&bucket, &cc_tx, client.clone(), files_to_upload_channel, req_sem.clone());
     }
     while let Some(result) = files_to_upload_channel.recv().await {
         upload_file_async_and_add_to_handles(result, context_arc.clone(), bucket.clone(), client.clone(), hyper_client.clone(), file_sem.clone(), req_sem.clone(), task_sem.clone(), buffer_pool.clone(), cc_tx.clone(), &mut handles).await;
@@ -81,6 +81,7 @@ async fn upload_file_async_and_add_to_handles(
 ) {
     match result {
         Ok(file_info) => {
+            let _ = cc_tx.send(CommandCenterEvent::FileNeedsTransfer(file_info.file_size));
             let file_info_arc = Arc::new(file_info);
             let permit = task_sem.acquire_owned().await.unwrap();
             let handle = tokio::spawn(async move {
@@ -181,12 +182,12 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
     }
 }
 
-fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>) -> Receiver<Result<FileInfo, io::Error>> {
+fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, _req_sem: Arc<Semaphore>) -> Receiver<Result<FileInfo, io::Error>> {
     let (upload_tx, upload_rx) = mpsc::channel::<Result<FileInfo, io::Error>>(constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_UPLOAD as usize);
 
     let checker_client = client.clone();
     let checker_bucket = bucket.clone();
-    let checker_task_sem = Arc::new(Semaphore::new(200));
+    let checker_task_sem = Arc::new(Semaphore::new(200)); //TODO Jon: we want this to be very fast, but there is also an issue of too many connections and exceeding ulimit. I'm unsure how this should be handled. Furthermore, how can the users understand? Is it really a problem with many connections? _req_sem was very slow on my local pc.
     let cc_tx_checker = cc_tx.clone();
 
     tokio::spawn(async move {
@@ -204,12 +205,12 @@ fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCen
                         let s3_mtime = get_s3_mtime(&client, &bucket, &file_info.key).await;
 
                         if should_upload(&file_info, client, bucket, s3_mtime).await {
-                            let _ = cc_tx.send(CommandCenterEvent::Log(format!("Uploading file: {}", file_info.key)));
-                            let _ = cc_tx.send(CommandCenterEvent::Log(format!("File size: {}", file_info.file_size)));
-                            let _ = cc_tx.send(CommandCenterEvent::FileNeedsTransfer(file_info.file_size));
-                            let _ = upload_tx.send(Ok(file_info));
+                            //Ui will be updated later.
+                            if let Err(e) = upload_tx.send(Ok(file_info)).await {
+                                let _ = cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to upload queue: {}", e))); //TODO Jon should be error logging?
+                            }
                         } else {
-                            // Already uploaded, just update progress for the UI
+                            // Already uploaded, just let CC and ui know. We are done with the file
                             let _ = cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(file_info.file_size));
                         }
                         drop(permit);

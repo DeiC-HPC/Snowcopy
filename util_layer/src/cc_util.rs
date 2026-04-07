@@ -30,9 +30,9 @@ impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Status::Idle => write!(f, "Idle"),
-            Status::Transferring => write!(f, "Transferring files"),
+            Status::Transferring => write!(f, "Transferred"),
             Status::Discovering => write!(f, "Discovering files"),
-            Status::Finished => write!(f, "Finished transfer"),
+            Status::Finished => write!(f, "Finished"),
         }
     }
 }

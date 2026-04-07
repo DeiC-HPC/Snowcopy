@@ -61,9 +61,6 @@ impl CC for CommandCenter {
             let mut total_file_work_time = 0f64;
             let mut total_req_work_time = 0f64;
 
-            let mut total_files_discovered = 0u64;
-            let mut total_data_discovered = 0u64;
-
             let _ = ui_tx.send(UiEvent::Message(Status::Discovering.to_string()));
 
             while let Some(ev) = cc_rx.recv().await {
@@ -81,15 +78,13 @@ impl CC for CommandCenter {
                         let _ = ui_tx.send(UiEvent::FileTransferred(bytes));
                     }
                     CommandCenterEvent::FileDiscovered(bytes) => {
-                        total_files_discovered += 1;
-                        total_data_discovered += bytes;
-                        let _ = ui_tx.send(UiEvent::TotalDiscovered(total_files_discovered, total_data_discovered));
+                        let _ = ui_tx.send(UiEvent::FileDiscovered(bytes));
                     }
                     CommandCenterEvent::FileAlreadyAtTarget(bytes) => {
                         let _ = ui_tx.send(UiEvent::FileAlreadyAtTarget(bytes));
                     }
                     CommandCenterEvent::FileNeedsTransfer(bytes) => {
-                        let _ = ui_tx.send(UiEvent::AddToTotal(bytes));
+                        let _ = ui_tx.send(UiEvent::AddToTotalTransfer(bytes));
                     }
                     CommandCenterEvent::StatusChanged(status) => {
                         if let Status::Transferring = status { //TODO JON: Who should be responsible of this knowledge? CC should now, but its the discovery threads, that knows, whom sends the message.
