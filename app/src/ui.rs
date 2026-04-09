@@ -32,7 +32,7 @@ impl ProgressBarUi {
 
         destination_checker_pb.set_style(
             ProgressStyle::with_template(
-                "[{elapsed_precise}] {msg}  {wide_bar:.green/blue} {percent}%",
+                "[{elapsed_precise}] Total:    {bar:30.green/blue.} {percent}% {msg}",
             )
             .unwrap()
             .progress_chars("#>-"),
@@ -41,7 +41,7 @@ impl ProgressBarUi {
 
         transfer_pb.set_style(
             ProgressStyle::with_template(
-                "[{elapsed_precise}] {prefix}: {msg} {wide_bar:.cyan/blue} {percent}%",
+                "[{elapsed_precise}] Transfer: {bar:30.cyan/blue.} {percent}% {prefix}: {msg}",
             )
             .unwrap()
             .progress_chars("#>-"),
@@ -72,7 +72,7 @@ impl ProgressBarUi {
 
     fn format_overall_pb_message(files_preexisting: u64, data_preexisting: u64, total_files_discovered: u64, total_data_discovered: u64, files_at_target: u64, data_at_target: u64) -> String {
         format!(
-            "Total: {}/{} ({}/{} files) | Existing {} files, {}",
+            "At target: {}/{} ({}/{} files) | Existing {} files, {}",
             indicatif::BinaryBytes(data_at_target),
             indicatif::BinaryBytes(total_data_discovered),
             files_at_target, total_files_discovered,
