@@ -107,9 +107,7 @@ impl Ui for ProgressBarUi {
         let handle = tokio::task::spawn_blocking(move || {
             let mut last_update = Instant::now();
             let mut accumulated_bytes: u64 = 0;
-            let mut total_bytes_to_transfer: u64 = 0;
             let mut current_bytes_transferred: u64 = 0;
-            let mut files_to_transfer: u64 = 0;
             let mut files_transferred: u64 = 0;
 
             let mut files_preexisting: u64 = 0;
@@ -122,11 +120,7 @@ impl Ui for ProgressBarUi {
 
             while let Some(ev) = ui_rx.blocking_recv() {
                 match ev {
-                    UiEvent::AddToTotalTransfer(delta) => {
-                        total_bytes_to_transfer += delta;
-                        files_to_transfer += 1;
-                    }
-                    UiEvent::Uploaded(delta) => {
+                    UiEvent::TransferredData(delta) => {
                         accumulated_bytes = accumulated_bytes.saturating_add(delta);
                         current_bytes_transferred = current_bytes_transferred.saturating_add(delta);
                     }
@@ -155,6 +149,9 @@ impl Ui for ProgressBarUi {
 
                 let now = Instant::now();
                 if now.duration_since(last_update) >= update_interval {
+                    let files_to_transfer = total_files_discovered - files_preexisting;
+                    let total_bytes_to_transfer = total_data_discovered - data_preexisting;
+
                     inner.transfer_pb.set_length(total_bytes_to_transfer);
                     // Update transfer progress bar
                     if accumulated_bytes > 0 {
@@ -178,6 +175,8 @@ impl Ui for ProgressBarUi {
             // Final update
             let files_at_target = files_preexisting + files_transferred;
             let data_at_target = data_preexisting + current_bytes_transferred;
+            let files_to_transfer = total_files_discovered - files_preexisting;
+            let total_bytes_to_transfer = total_data_discovered - data_preexisting;
 
             inner.destination_checker_pb.set_position(data_at_target);
             inner.destination_checker_pb.set_message(Self::format_overall_pb_message(files_preexisting, data_preexisting, total_files_discovered, total_data_discovered, files_at_target, data_at_target));
@@ -206,7 +205,7 @@ mod tests {
         assert!(!ui.inner.destination_checker_visible.load(Ordering::SeqCst));
 
         // After some uploads, still hidden
-        ui_tx.send(UiEvent::Uploaded(100)).unwrap();
+        ui_tx.send(UiEvent::TransferredData(100)).unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!ui.inner.destination_checker_visible.load(Ordering::SeqCst));
 

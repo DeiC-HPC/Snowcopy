@@ -71,7 +71,7 @@ impl CC for CommandCenter {
                         total_file_work_time += metrics.file_sem_work_time_secs;
                         total_req_work_time += metrics.req_sem_work_time_secs;
 
-                        let _ = ui_tx.send(UiEvent::Uploaded(metrics.amount));
+                        let _ = ui_tx.send(UiEvent::TransferredData(metrics.amount));
                     }
                     CommandCenterEvent::FileTransferred(bytes) => {
                         file_transferred_count += 1;
@@ -82,9 +82,6 @@ impl CC for CommandCenter {
                     }
                     CommandCenterEvent::FileAlreadyAtTarget(bytes) => {
                         let _ = ui_tx.send(UiEvent::FileAlreadyAtTarget(bytes));
-                    }
-                    CommandCenterEvent::FileNeedsTransfer(bytes) => {
-                        let _ = ui_tx.send(UiEvent::AddToTotalTransfer(bytes));
                     }
                     CommandCenterEvent::StatusChanged(status) => {
                         if let Status::Transferring = status { //TODO JON: Who should be responsible of this knowledge? CC should now, but its the discovery threads, that knows, whom sends the message.

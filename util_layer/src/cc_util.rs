@@ -13,7 +13,6 @@ pub enum CommandCenterEvent {
     FileTransferred(u64),
     FileDiscovered(u64),
     FileAlreadyAtTarget(u64),
-    FileNeedsTransfer(u64),
     StatusChanged(Status),
     Log(String),
 }
