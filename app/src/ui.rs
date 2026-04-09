@@ -32,7 +32,7 @@ impl ProgressBarUi {
 
         destination_checker_pb.set_style(
             ProgressStyle::with_template(
-                "[{elapsed_precise}] {msg}  {wide_bar:.green/blue} {percent}% ",
+                "[{elapsed_precise}] Total:    {bar:30.green/blue.} {percent}% {msg}",
             )
             .unwrap()
             .progress_chars("#>-"),
@@ -41,7 +41,7 @@ impl ProgressBarUi {
 
         transfer_pb.set_style(
             ProgressStyle::with_template(
-                "[{elapsed_precise}] {prefix}: {msg} {wide_bar:.cyan/blue} {percent}%",
+                "[{elapsed_precise}] Transfer: {bar:30.cyan/blue.} {percent}% {prefix}: {msg}",
             )
             .unwrap()
             .progress_chars("#>-"),
@@ -72,7 +72,7 @@ impl ProgressBarUi {
 
     fn format_overall_pb_message(files_preexisting: u64, data_preexisting: u64, total_files_discovered: u64, total_data_discovered: u64, files_at_target: u64, data_at_target: u64) -> String {
         format!(
-            "Total: {}/{} ({}/{} files) | Existing {} files, {}",
+            "At target: {}/{} ({}/{} files) | Existing {} files, {}",
             indicatif::BinaryBytes(data_at_target),
             indicatif::BinaryBytes(total_data_discovered),
             files_at_target, total_files_discovered,
@@ -107,9 +107,7 @@ impl Ui for ProgressBarUi {
         let handle = tokio::task::spawn_blocking(move || {
             let mut last_update = Instant::now();
             let mut accumulated_bytes: u64 = 0;
-            let mut total_bytes_to_transfer: u64 = 0;
             let mut current_bytes_transferred: u64 = 0;
-            let mut files_to_transfer: u64 = 0;
             let mut files_transferred: u64 = 0;
 
             let mut files_preexisting: u64 = 0;
@@ -117,16 +115,19 @@ impl Ui for ProgressBarUi {
             let mut total_files_discovered: u64 = 0;
             let mut total_data_discovered: u64 = 0;
             let mut _discovery_finished = false;
+            
+            //Save last values so we know if we need to render something new.
+            let mut last_destination_checker_msg = String::new();
+            let mut last_transfer_msg = String::new();
+            let mut last_destination_checker_position: u64 = 0;
+            let mut last_destination_checker_length: u64 = 0;
+            let mut last_transfer_length: u64 = 0;
 
-            let update_interval = Duration::from_millis(200);
+            let update_interval = Duration::from_millis(250);
 
             while let Some(ev) = ui_rx.blocking_recv() {
                 match ev {
-                    UiEvent::AddToTotalTransfer(delta) => {
-                        total_bytes_to_transfer += delta;
-                        files_to_transfer += 1;
-                    }
-                    UiEvent::Uploaded(delta) => {
+                    UiEvent::TransferredData(delta) => {
                         accumulated_bytes = accumulated_bytes.saturating_add(delta);
                         current_bytes_transferred = current_bytes_transferred.saturating_add(delta);
                     }
@@ -155,21 +156,41 @@ impl Ui for ProgressBarUi {
 
                 let now = Instant::now();
                 if now.duration_since(last_update) >= update_interval {
-                    inner.transfer_pb.set_length(total_bytes_to_transfer);
-                    // Update transfer progress bar
-                    if accumulated_bytes > 0 {
-                        inner.transfer_pb.inc(accumulated_bytes);
-                        accumulated_bytes = 0;
-                    }
-                    inner.transfer_pb.set_message(Self::format_transfer_message(&inner, total_bytes_to_transfer, current_bytes_transferred, files_to_transfer, files_transferred));
+                    let files_to_transfer = total_files_discovered - files_preexisting;
+                    let total_bytes_to_transfer = total_data_discovered - data_preexisting;
 
                     // Update destination checker progress bar
                     let files_at_target = files_preexisting + files_transferred;
                     let data_at_target = data_preexisting + current_bytes_transferred;
 
-                    inner.destination_checker_pb.set_position(data_at_target);
-                    inner.destination_checker_pb.set_message(Self::format_overall_pb_message(files_preexisting, data_preexisting, total_files_discovered, total_data_discovered, files_at_target, data_at_target));
-                    inner.destination_checker_pb.set_length(total_data_discovered);
+                    if data_at_target != last_destination_checker_position {
+                        inner.destination_checker_pb.set_position(data_at_target);
+                        last_destination_checker_position = data_at_target;
+                    }
+                    let new_destination_msg = Self::format_overall_pb_message(files_preexisting, data_preexisting, total_files_discovered, total_data_discovered, files_at_target, data_at_target);
+                    if last_destination_checker_msg != new_destination_msg {
+                        inner.destination_checker_pb.set_message(new_destination_msg.clone());
+                        last_destination_checker_msg = new_destination_msg;
+                    }
+                    if total_data_discovered != last_destination_checker_length {
+                        inner.destination_checker_pb.set_length(total_data_discovered);
+                        last_destination_checker_length = total_data_discovered;
+                    }
+
+                    if total_bytes_to_transfer != last_transfer_length {
+                        inner.transfer_pb.set_length(total_bytes_to_transfer);
+                        last_transfer_length = total_bytes_to_transfer;
+                    }
+                    // Update transfer progress bar
+                    if accumulated_bytes > 0 {
+                        inner.transfer_pb.inc(accumulated_bytes);
+                        accumulated_bytes = 0;
+                    }
+                    let new_transfer_msg = Self::format_transfer_message(&inner, total_bytes_to_transfer, current_bytes_transferred, files_to_transfer, files_transferred);
+                    if last_transfer_msg != new_transfer_msg {
+                        inner.transfer_pb.set_message(new_transfer_msg.clone());
+                        last_transfer_msg = new_transfer_msg;
+                    }
 
                     last_update = now;
                 }
@@ -178,15 +199,27 @@ impl Ui for ProgressBarUi {
             // Final update
             let files_at_target = files_preexisting + files_transferred;
             let data_at_target = data_preexisting + current_bytes_transferred;
+            let files_to_transfer = total_files_discovered - files_preexisting;
+            let total_bytes_to_transfer = total_data_discovered - data_preexisting;
 
-            inner.destination_checker_pb.set_position(data_at_target);
-            inner.destination_checker_pb.set_message(Self::format_overall_pb_message(files_preexisting, data_preexisting, total_files_discovered, total_data_discovered, files_at_target, data_at_target));
-            inner.destination_checker_pb.set_length(total_data_discovered);
+            if data_at_target != last_destination_checker_position {
+                inner.destination_checker_pb.set_position(data_at_target);
+            }
+            let new_destination_msg = Self::format_overall_pb_message(files_preexisting, data_preexisting, total_files_discovered, total_data_discovered, files_at_target, data_at_target);
+            if last_destination_checker_msg != new_destination_msg {
+                inner.destination_checker_pb.set_message(new_destination_msg);
+            }
+            if total_data_discovered != last_destination_checker_length {
+                inner.destination_checker_pb.set_length(total_data_discovered);
+            }
 
             if accumulated_bytes > 0 {
                 inner.transfer_pb.inc(accumulated_bytes);
             }
-            inner.transfer_pb.set_message(Self::format_transfer_message(&inner, total_bytes_to_transfer, current_bytes_transferred, files_to_transfer, files_transferred));
+            let new_transfer_msg = Self::format_transfer_message(&inner, total_bytes_to_transfer, current_bytes_transferred, files_to_transfer, files_transferred);
+            if last_transfer_msg != new_transfer_msg {
+                inner.transfer_pb.set_message(new_transfer_msg);
+            }
 
             inner.completed.store(true, Ordering::SeqCst);
         });
@@ -206,7 +239,7 @@ mod tests {
         assert!(!ui.inner.destination_checker_visible.load(Ordering::SeqCst));
 
         // After some uploads, still hidden
-        ui_tx.send(UiEvent::Uploaded(100)).unwrap();
+        ui_tx.send(UiEvent::TransferredData(100)).unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!ui.inner.destination_checker_visible.load(Ordering::SeqCst));
 

@@ -81,7 +81,6 @@ async fn upload_file_async_and_add_to_handles(
 ) {
     match result {
         Ok(file_info) => {
-            let _ = cc_tx.send(CommandCenterEvent::FileNeedsTransfer(file_info.file_size));
             let file_info_arc = Arc::new(file_info);
             let permit = task_sem.acquire_owned().await.unwrap();
             let handle = tokio::spawn(async move {

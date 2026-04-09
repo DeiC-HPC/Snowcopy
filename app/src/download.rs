@@ -116,7 +116,6 @@ async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String
                 object.modified_time = s3_mtime;
 
                 if should_download_object(&mut object) {
-                    let _ = cc_tx.send(CommandCenterEvent::FileNeedsTransfer(object.size as u64));
                     if let Err(e) = download_tx.send(object).await {
                         let _ = cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to download queue: {}", e)));
                     }
