@@ -208,6 +208,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
 
                 file.seek(std::io::SeekFrom::Start(start)).await?;
                 file.write_all(data.as_ref()).await?;
+                file.flush().await?; //We must flush to ensure our mtime update is not overwritten after its been set.
                 Ok(data.len as u64)
             });
         }
@@ -275,11 +276,6 @@ fn update_mod_time_on_file(object: &S3Object, cc_sender: &UnboundedSender<Comman
     if let Some(mtime) = object.modified_time {
         match fs::OpenOptions::new().write(true).open(&object.local_path) { //TODO JON: is it faster if we get the reference used when writing the file? Could easily be improved in simple download
             Ok(file) => {
-                if let Err(e) = file.sync_all() { //We need to flush before updating mtime, otherwise mtime update may be lost
-                    cc_sender.send(CommandCenterEvent::Log(format!("Failed to flush file before updating mtime for {:?}: {}", object.local_path, e))).unwrap();
-                    return;
-                }
-
                 if let Err(e) = file.set_modified(mtime) {
                     cc_sender.send(CommandCenterEvent::Log(format!("Failed to update mtime for {:?}: {}", object.local_path, e))).unwrap();
                 }
