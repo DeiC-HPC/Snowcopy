@@ -274,10 +274,12 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
 
     let base_path_for_relative = base_path.clone();
     tokio::task::spawn_blocking(move || {
-        for entry in WalkDir::new(base_path).max_open(100) {
+        for entry in WalkDir::new(base_path).follow_links(false).max_open(100) {
             match entry {
                 Ok(entry) => {
-                    if entry.file_type().is_file() {
+                    if entry.path_is_symlink() {
+                        let _ = cc_tx.send(CommandCenterEvent::Log(format!("SKIPPING symbolic link: {}", entry.path().display())));
+                    } else if entry.file_type().is_file() {
                         let metadata = entry.metadata().unwrap();
                         let file_size = metadata.len();
                         let modified_time = metadata.modified().ok();
