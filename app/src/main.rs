@@ -48,11 +48,14 @@ async fn main() -> Result<()> {
 
     let method = match_transfer_method(Some(transfer_method)).expect(format!("Transfer method {} unknown", transfer_method).as_str());
 
+    let config = gather_credentials().await;
+
+
     if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
-        download::download(arc_bucket, "", path, file_limit, req_limit, silent, stats).await;
+        download::download(arc_bucket, "", path, file_limit, req_limit, silent, stats, &config).await;
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats).await
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config).await
         };
     }
 
@@ -64,6 +67,29 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn gather_credentials() -> Config {
+    // Attempt to read existing config file first
+    if let Ok(contents) = std::fs::read_to_string(&constants::CONFIG_PATH) {
+        if let Ok(mut cfg) = serde_json::from_str::<Config>(&contents) {
+            if cfg.s3_region.is_empty() {
+                cfg.s3_region = "us-east-1".to_string();
+            }
+            return cfg;
+        }
+    }
+
+    // Fallback: build config from AWS SDK defaults/environment
+    println!("No config file found. Building config from AWS SDK defaults/environment.");
+    let (credentials, region, endpoint) = aws_layer::load_aws_config_parts().await;
+
+    Config {
+        s3_access_key: credentials.access_key_id().to_string(),
+        s3_secret_key: credentials.secret_access_key().to_string(),
+        s3_url: endpoint.unwrap_or_default(),
+        s3_region: region.to_string(),
+    }
+}
+
 enum TransferMethod {
     CephS3Tokio,
 }
@@ -73,15 +99,6 @@ fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
         Some("o2") => Some(TransferMethod::CephS3Tokio),
         _other => None,
     }
-}
-
-fn read_config() -> Config {
-    let config: Config = serde_json::from_str(
-        std::fs::read_to_string(&constants::CONFIG_PATH)
-            .expect("Error: failed to read config file.")
-            .as_str()
-    ).expect("Error: failed to deserialize config file.");
-    config
 }
 
 fn parse_arguments() -> ArgMatches {

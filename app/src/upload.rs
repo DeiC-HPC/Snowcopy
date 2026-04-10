@@ -1,5 +1,5 @@
 use crate::command_center::{CommandCenter, CC};
-use crate::{auto_tuning, read_config};
+use crate::{auto_tuning};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -12,18 +12,16 @@ use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use util_layer::cc_util::{CommandCenterEvent, Status};
-use util_layer::{build_context, constants, FileInfo, SnowContext};
+use util_layer::{build_context, constants, Config, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
-pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool) {
+pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool, config: &Config) {
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
     let mut files_to_upload_channel = walk_directory(path.to_path_buf(), cc_tx.clone()).await;
-
-    let config = read_config();
-
-    let client = Arc::new(aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await);
+    
+    let client = Arc::new(aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str(), config.s3_region.as_str()).await);
     let bucket_creation_handle = create_bucket_if_not_exist(&bucket, &client);
 
     let hyper_client = Arc::new(build_https_client());
