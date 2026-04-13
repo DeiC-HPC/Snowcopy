@@ -339,7 +339,7 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
 fn create_and_sign_get_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, range: Option<String>) -> Result<Request<StreamingBody>> {
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
-        region: "us-east-1".to_string(),
+        region: ctx.s3_region().to_string(),
         service: "s3".to_string(),
     };
 
@@ -407,7 +407,7 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
 
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
-        region: "us-east-1".to_string(),
+        region: ctx.s3_region().to_string(),
         service: "s3".to_string(),
     };
 

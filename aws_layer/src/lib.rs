@@ -2,7 +2,7 @@ mod s3example_error;
 
 use aws_config::timeout::TimeoutConfig;
 use aws_config::{BehaviorVersion, Region};
-use aws_sdk_s3::config::{Builder, Credentials, RequestChecksumCalculation, ResponseChecksumValidation};
+use aws_sdk_s3::config::{Builder, Credentials, ProvideCredentials, RequestChecksumCalculation, ResponseChecksumValidation};
 use aws_sdk_s3::operation::create_bucket::CreateBucketOutput;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
+use aws_config::meta::region::RegionProviderChain;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use util_layer::cc_util::CommandCenterEvent;
@@ -55,8 +56,8 @@ pub async fn complete_multipart_upload(
 }
 
 
-pub async fn create_client(access_key: &str, secret_key: &str, url: &str) -> AWSClient {
-    let region = Region::new("us-east-1"); //TODO should constants be in some lov level crate everyone can reference?
+pub async fn create_client(access_key: &str, secret_key: &str, url: &str, region: &str) -> AWSClient {
+    let region = Region::new(region.to_string());
 
     let creds = Credentials::new(
         access_key,
@@ -242,4 +243,23 @@ pub async fn get_s3_mtime(client: &AWSClient, bucket: &str, key: &str) -> (bool,
         }
         Err(_) => (false, None, None),
     }
+}
+
+pub async fn load_aws_config_parts() -> (Credentials, Region, Option<String>) {
+    let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+        .region(RegionProviderChain::default_provider().or_else("us-east-1"))
+        .load()
+        .await;
+
+    let credentials = sdk_config
+        .credentials_provider()
+        .expect("No credentials provider found")
+        .provide_credentials()
+        .await
+        .expect("Failed to load AWS credentials");
+
+    let region = sdk_config.region().expect("Never fails.").clone(); //This has a fallback to some metadata server called IMDS, which wastes time but cannot easily be disabled. We should consider how to handle it when we do the real config. Perhaps just reading the environment ourselves.
+    let endpoint = sdk_config.endpoint_url().map(|s| s.to_string());
+
+    (credentials, region, endpoint)
 }
