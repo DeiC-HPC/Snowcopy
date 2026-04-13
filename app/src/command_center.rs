@@ -61,6 +61,8 @@ impl CC for CommandCenter {
             let mut total_file_work_time = 0f64;
             let mut total_req_work_time = 0f64;
 
+            let mut total_non_destructive_skips = 0u64;
+
             let _ = ui_tx.send(UiEvent::Message(Status::Discovering.to_string()));
 
             while let Some(ev) = cc_rx.recv().await {
@@ -94,6 +96,10 @@ impl CC for CommandCenter {
                     CommandCenterEvent::Log(string) => {
                         let _ = ui_tx.send(UiEvent::Println(string));
                     }
+                    CommandCenterEvent::NonDestructiveMode(string) => {
+                        let _ = ui_tx.send(UiEvent::Println(string));
+                        total_non_destructive_skips += 1;
+                    }
                 }
             }
 
@@ -112,6 +118,11 @@ impl CC for CommandCenter {
             if let Some(ui) = ui {
                 ui.finish(&Status::Finished.to_string()); //This must be done after the UI thread is done, as we experienced incorrect reporting due to race conditions otherwise
             }
+            if total_non_destructive_skips > 0 {
+                println!();
+                println!("Non-destructive mode: Skipped {} files. Rerun program with --destructive to overwrite them", total_non_destructive_skips);
+            }
+
         });
 
 

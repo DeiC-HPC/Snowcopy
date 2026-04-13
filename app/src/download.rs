@@ -33,14 +33,14 @@ fn ensure_parent_dirs_exist(file_path: &Path, created_dirs: &mut HashSet<std::pa
     Ok(())
 }
 
-pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool) {
+pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool, destructive: bool) {
     let config = read_config();
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
     let client = Arc::new(aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str()).await);
     let object_channel = async_head_objects_from_bucket(&bucket, &prefix, &dest, client.clone(), cc_tx.clone()).await;
-    let mut download_rx = fetch_object_metadata_and_filter_already_downloaded(&bucket, &cc_tx, client, object_channel).await;
+    let mut download_rx = fetch_object_metadata_and_filter_already_downloaded(&bucket, &cc_tx, client, object_channel, destructive).await;
 
     let pool_client = Arc::new(http_layer::build_https_client());
     let snow_context = Arc::new(build_context(config.clone()));
@@ -93,7 +93,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     cc_handle.await.unwrap();
 }
 
-async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut object_channel: Receiver<S3Object>) -> mpsc::Receiver<S3Object> {
+async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut object_channel: Receiver<S3Object>, destructive: bool) -> mpsc::Receiver<S3Object> {
     let (download_tx, download_rx) = mpsc::channel::<S3Object>(constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD as usize);
 
     let checker_client = client.clone();
@@ -111,11 +111,15 @@ async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String
             let cc_tx = cc_tx_checker.clone();
 
             checker_set.spawn(async move {
-                let s3_mtime = get_s3_mtime(&client, &bucket, &object.key).await;
+                let (_, _, mtime) = get_s3_mtime(&client, &bucket, &object.key).await;
                 let mut object = object;
-                object.modified_time = s3_mtime;
+                object.modified_time = mtime;
 
-                if should_download_object(&mut object) {
+                let (should_download, non_destructive_skip) = should_download_object(&mut object, destructive);
+
+                if should_download && non_destructive_skip {
+                    let _ = cc_tx.send(CommandCenterEvent::NonDestructiveMode(format!("Skipping download of already existing file {:?}", object.local_path)));
+                } else if should_download {
                     if let Err(e) = download_tx.send(object).await {
                         let _ = cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to download queue: {}", e)));
                     }
@@ -131,12 +135,15 @@ async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String
     download_rx
 }
 
-fn should_download_object(object: &mut S3Object) -> bool {
-    if object.modified_time.is_none() {
-        return true;
+fn should_download_object(object: &mut S3Object, destructive: bool) -> (bool, bool) {
+    if destructive && object.modified_time.is_none() {
+        return (true, false);
     }
 
-    let needs_download = if let Ok(metadata) = fs::metadata(&object.local_path) {
+    let result = fs::metadata(&object.local_path);
+
+    let already_exists_but_non_destructive = !destructive && result.is_ok();
+    let needs_download = if let Ok(metadata) = result {
         if metadata.len() == object.size as u64 {
             if let Some(s3_mtime) = object.modified_time {
                 if let Ok(local_mtime) = metadata.modified() {
@@ -157,7 +164,8 @@ fn should_download_object(object: &mut S3Object) -> bool {
     } else {
         true
     };
-    needs_download
+    let should_skip : bool = needs_download && already_exists_but_non_destructive;
+    (needs_download, should_skip)
 }
 
 async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, buffer_pool: Arc<BufferPool>) {

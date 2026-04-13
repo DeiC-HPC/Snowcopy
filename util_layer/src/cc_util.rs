@@ -15,6 +15,7 @@ pub enum CommandCenterEvent {
     FileAlreadyAtTarget(u64),
     StatusChanged(Status),
     Log(String),
+    NonDestructiveMode(String),
 }
 
 #[allow(dead_code)] //TODO Jon: not all status are used currently

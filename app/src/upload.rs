@@ -15,7 +15,7 @@ use util_layer::cc_util::{CommandCenterEvent, Status};
 use util_layer::{build_context, constants, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
-pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool) {
+pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool, destructive: bool) {
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
@@ -37,7 +37,7 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
 
     if !bucket_created {
         //We did not create the bucket, so check for already uploaded files
-        files_to_upload_channel = check_already_exists(&bucket, &cc_tx, client.clone(), files_to_upload_channel, req_sem.clone());
+        files_to_upload_channel = check_already_exists(&bucket, &cc_tx, client.clone(), files_to_upload_channel, req_sem.clone(), destructive);
     }
     while let Some(result) = files_to_upload_channel.recv().await {
         upload_file_async_and_add_to_handles(result, context_arc.clone(), bucket.clone(), client.clone(), hyper_client.clone(), file_sem.clone(), req_sem.clone(), task_sem.clone(), buffer_pool.clone(), cc_tx.clone(), &mut handles).await;
@@ -181,7 +181,7 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
     }
 }
 
-fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, _req_sem: Arc<Semaphore>) -> Receiver<Result<FileInfo, io::Error>> {
+fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, _req_sem: Arc<Semaphore>, destructive: bool) -> Receiver<Result<FileInfo, io::Error>> {
     let (upload_tx, upload_rx) = mpsc::channel::<Result<FileInfo, io::Error>>(constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_UPLOAD as usize);
 
     let checker_client = client.clone();
@@ -201,12 +201,15 @@ fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCen
                     let cc_tx = cc_tx_checker.clone();
 
                     checker_set.spawn(async move {
-                        let s3_mtime = get_s3_mtime(&client, &bucket, &file_info.key).await;
+                        let (exists_at_target, size, s3_mtime) = get_s3_mtime(&client, &bucket, &file_info.key).await;
 
-                        if should_upload(&file_info, client, bucket, s3_mtime).await {
-                            //Ui will be updated later.
-                            if let Err(e) = upload_tx.send(Ok(file_info)).await {
-                                let _ = cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to upload queue: {}", e))); //TODO Jon should be error logging?
+                        if should_upload(&file_info, size, s3_mtime).await {
+                            if exists_at_target && !destructive {
+                                let _ = cc_tx.send(CommandCenterEvent::NonDestructiveMode(format!("Skipping upload of already existing file {:?}", file_info.file_path)));
+                            } else {
+                                if let Err(e) = upload_tx.send(Ok(file_info)).await { //Ui will be updated later.
+                                    let _ = cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to upload queue: {}", e))); //TODO Jon should be error logging?
+                                }
                             }
                         } else {
                             // Already uploaded, just let CC and ui know. We are done with the file
@@ -225,26 +228,13 @@ fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCen
     upload_rx
 }
 
-async fn should_upload(file_info: &FileInfo, client: Arc<AWSClient>, bucket: Arc<String>, s3_mtime: Option<SystemTime>) -> bool {
+async fn should_upload(file_info: &FileInfo,  size: Option<i64>, s3_mtime: Option<SystemTime>) -> bool {
     let needs_upload = if let Some(s3_mtime) = s3_mtime {
-        // Fetch object metadata to get the size and mtime
-        match client.head_object().bucket(bucket.as_str()).key(&file_info.key).send().await {
-            Ok(resp) => {
-                if resp.content_length() == Some(file_info.file_size as i64) {
-                    if let Some(local_mtime) = file_info.modified_time {
-                        if local_mtime == s3_mtime {
-                            false // Matches
-                        } else {
-                            true
-                        }
-                    } else {
-                        true
-                    }
-                } else {
-                    true
-                }
-            }
-            Err(_) => true,
+        if let Some(size) = size {
+            //Same size and mtime -> its the same file.
+            !(size as u64 == file_info.file_size && s3_mtime.duration_since(file_info.modified_time.unwrap()).unwrap().as_secs() == 0)
+        } else {
+            true
         }
     } else {
         true

@@ -40,6 +40,7 @@ async fn main() -> Result<()> {
     let silent = matches.get_flag("silent");
     let download = matches.get_flag("download");
     let stats = matches.get_flag("stats");
+    let destructive = matches.get_flag("destructive_mode");
 
     //println!("Bucket (-b): {}", bucket);
     //println!("Path: {}", path_as_string);
@@ -49,10 +50,10 @@ async fn main() -> Result<()> {
     let method = match_transfer_method(Some(transfer_method)).expect(format!("Transfer method {} unknown", transfer_method).as_str());
 
     if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
-        download::download(arc_bucket, "", path, file_limit, req_limit, silent, stats).await;
+        download::download(arc_bucket, "", path, file_limit, req_limit, silent, stats, destructive).await;
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats).await
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, destructive).await
         };
     }
 
@@ -154,6 +155,22 @@ fn parse_arguments() -> ArgMatches {
                 .help("Enable statistics output")
                 .required(false)
                 .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("destructive")
+                .long("non-destructive")
+                .help("Non-destructive mode (do not override files already present in the destination directory, default if no other mode is specified)")
+                .required(false)
+                .action(clap::ArgAction::SetTrue)
+                .conflicts_with("destructive_mode"),
+        )
+        .arg(
+            Arg::new("destructive_mode")
+                .long("destructive")
+                .help("Destructive mode (override files already present in the destination directory)")
+                .required(false)
+                .action(clap::ArgAction::SetTrue)
+                .conflicts_with("destructive"),
         )
         .after_help("Example:\n  snowplowRust -b jon-test testData2")
         .get_matches();

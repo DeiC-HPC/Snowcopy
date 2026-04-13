@@ -225,16 +225,21 @@ pub struct S3Object {
     pub modified_time: Option<SystemTime>,
 }
 
-pub async fn get_s3_mtime(client: &AWSClient, bucket: &str, key: &str) -> Option<SystemTime> {
+pub async fn get_s3_mtime(client: &AWSClient, bucket: &str, key: &str) -> (bool, Option<i64>, Option<SystemTime>) {
     match client.head_object().bucket(bucket).key(key).send().await {
         Ok(resp) => {
-            if let Some(mtime_str) = resp.metadata().and_then(|m| m.get("mtime")) {
+            let size = resp.content_length();
+            let mtime = if let Some(mtime_str) = resp.metadata().and_then(|m| m.get("mtime")) {
                 if let Ok(st) = float_string_to_time(mtime_str) {
-                    return Some(st);
+                    Some(st)
+                } else {
+                    None
                 }
-            }
-            None
+            } else {
+                None
+            };
+            (true, size, mtime)
         }
-        Err(_) => None,
+        Err(_) => (false, None, None),
     }
 }
