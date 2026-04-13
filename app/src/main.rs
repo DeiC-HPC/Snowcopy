@@ -40,10 +40,8 @@ async fn main() -> Result<()> {
     let silent = matches.get_flag("silent");
     let download = matches.get_flag("download");
     let stats = matches.get_flag("stats");
-    let destructive = matches.get_flag("destructive_mode");
+    let destructive = matches.get_flag("destructive");
 
-    //println!("Bucket (-b): {}", bucket);
-    //println!("Path: {}", path_as_string);
     let path = Path::new(path_as_string);
     let arc_bucket = Arc::new(bucket.to_string());
 
@@ -111,7 +109,7 @@ fn parse_arguments() -> ArgMatches {
                 .short('b')                 // allows -b
                 .long("bucket")             // also allows --bucket
                 .value_name("NAME")
-                .help("Bucket (e.g., 'jon-test')")
+                .help("Bucket (e.g., 'some-bucket-name')")
                 .required(true)
                 .num_args(1),
         )
@@ -174,22 +172,22 @@ fn parse_arguments() -> ArgMatches {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::new("destructive")
+            Arg::new("non-destructive") //TODO Jon: this exists because we might want to be able to change a configured --destructive mode to a --non-destructive mode in the future.
                 .long("non-destructive")
                 .help("Non-destructive mode (do not override files already present in the destination directory, default if no other mode is specified)")
                 .required(false)
                 .action(clap::ArgAction::SetTrue)
-                .conflicts_with("destructive_mode"),
+                .conflicts_with("destructive"),
         )
         .arg(
-            Arg::new("destructive_mode")
+            Arg::new("destructive")
                 .long("destructive")
                 .help("Destructive mode (override files already present in the destination directory)")
                 .required(false)
                 .action(clap::ArgAction::SetTrue)
-                .conflicts_with("destructive"),
+                .conflicts_with("non-destructive"),
         )
-        .after_help("Example:\n  snowplowRust -b jon-test testData2")
+        .after_help("Upload example:\n  snowplowRust -b bucket-name path/to/source")
         .get_matches();
     matches
 }
