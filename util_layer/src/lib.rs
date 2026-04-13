@@ -9,11 +9,15 @@ pub mod constants;
 pub mod cc_util;
 pub mod time;
 
+fn default_region() -> String { "us-east-1".to_string() }
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Config {
     pub s3_access_key: String,
     pub s3_secret_key: String,
-    pub s3_url: String
+    pub s3_url: String,
+    #[serde(default = "default_region")]
+    pub s3_region: String,
 }
 
 pub fn build_context(config: Config) -> SnowContext {
@@ -21,6 +25,7 @@ pub fn build_context(config: Config) -> SnowContext {
         s3_access_key: config.s3_access_key,
         s3_secret_key: config.s3_secret_key,
         s3_host: Url::parse(config.s3_url.as_str()).unwrap().host_str().unwrap().to_string(),
+        s3_region: config.s3_region,
     };
     ctx
 }
@@ -29,6 +34,7 @@ pub struct SnowContext {
     s3_access_key: String,
     s3_secret_key: String,
     s3_host: String,
+    s3_region: String,
 }
 
 impl SnowContext {
@@ -42,6 +48,10 @@ impl SnowContext {
 
     pub fn s3_host(&self) -> &str {
         &self.s3_host
+    }
+
+    pub fn s3_region(&self) -> &str {
+        &self.s3_region
     }
 }
 
