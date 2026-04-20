@@ -113,19 +113,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_normalize_path() {
+    #[cfg(target_os = "windows")]
+    fn test_normalize_path_windows() {
         let test_cases = vec![
-            ("./path/to/file", "path/to/file"),
-            ("../path/to/file", "path/to/file"),
-            ("/path/to/file", "path/to/file"),
-            ("path/to/file", "path/to/file"),
-            ("./path/../to/file", "to/file"),
-            ("./../path/to/file", "path/to/file"),
-            ("///path/to/file", "path/to/file"),
-            ("./././path", "path"),
-            ("./path/t.o/.fi.le", "path/t.o/.fi.le"),
-            ("", ""),
-
             ("C:\\path\\to\\file", "path/to/file"),
             ("C:/path/to/file", "path/to/file"),
             ("D:\\Users\\username\\file", "Users/username/file"),
@@ -139,6 +129,32 @@ mod tests {
             (".\\.\\.\\path", "path"),
             ("..\\..\\path\\to\\file", "path/to/file"),
             (".\\..\\path\\to\\file", "path/to/file"),
+        ];
+
+        for (input, expected) in test_cases {
+            assert_eq!(
+                path_to_s3_key(input),
+                expected,
+                "Failed for input: {}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn test_normalize_path_linux() {
+        let test_cases = vec![
+            ("./path/to/file", "path/to/file"),
+            ("../path/to/file", "path/to/file"),
+            ("/path/to/file", "path/to/file"),
+            ("path/to/file", "path/to/file"),
+            ("./path/../to/file", "to/file"),
+            ("./../path/to/file", "path/to/file"),
+            ("///path/to/file", "path/to/file"),
+            ("./././path", "path"),
+            ("./path/t.o/.fi.le", "path/t.o/.fi.le"),
+            ("", ""),
         ];
 
         for (input, expected) in test_cases {
