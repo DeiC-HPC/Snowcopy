@@ -239,12 +239,13 @@ mod tests {
         assert!(!ui.inner.destination_checker_visible.load(Ordering::SeqCst));
 
         // After some uploads, still hidden
-        ui_tx.send(UiEvent::TransferredData(100)).unwrap();
+        ui_tx.send(UiEvent::FileDiscovered(100)).unwrap();
+        ui_tx.send(UiEvent::FileTransferred(100)).unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(!ui.inner.destination_checker_visible.load(Ordering::SeqCst));
 
         // After FileAlreadyAtTarget, it should become visible
-        ui_tx.send(UiEvent::FileAlreadyAtTarget(500)).unwrap();
+        ui_tx.send(UiEvent::FileAlreadyAtTarget(100)).unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(ui.inner.destination_checker_visible.load(Ordering::SeqCst));
 
