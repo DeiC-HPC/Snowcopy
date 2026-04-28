@@ -1,4 +1,6 @@
 use std::fmt;
+use std::time::{SystemTime, Duration};
+use tokio::sync::oneshot;
 
 pub struct CcLoadAndTransfer { //TODO Jon: The Java way would be to encapsulate this data. Should that be done here with impl and traits?
     pub amount : u64,
@@ -16,6 +18,7 @@ pub enum CommandCenterEvent {
     StatusChanged(Status),
     Log(String),
     NonDestructiveMode(String),
+    RetryRequested(oneshot::Sender<Duration>, u32, SystemTime, String),
 }
 
 #[allow(dead_code)] //TODO Jon: not all status are used currently

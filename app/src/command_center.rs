@@ -1,7 +1,9 @@
 use crate::ui::{ProgressBarUi, Ui, UiEvent};
+use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use util_layer::cc_util::{CommandCenterEvent, Status};
+use util_layer::constants::MAX_RETRY;
 
 struct NoopUiSender;
 
@@ -56,6 +58,7 @@ impl CC for CommandCenter {
         let stats = self.stats;
         let handle = tokio::task::spawn(async move {
             let mut file_transferred_count = 0u64;
+            let mut total_retries = 0u64;
             let mut total_file_permit_time = 0f64;
             let mut total_req_permit_time = 0f64;
             let mut total_file_work_time = 0f64;
@@ -100,15 +103,24 @@ impl CC for CommandCenter {
                         let _ = ui_tx.send(UiEvent::Println(string));
                         total_non_destructive_skips += 1;
                     }
+                    CommandCenterEvent::RetryRequested(tx, attempts, _time, message) => { //TODO Jon: later we should add some metrics and use them to get an idea of the entire stack
+                        if attempts > MAX_RETRY {
+                            panic!("{}: Retry amount {} exceeded MAX_RETRY {}", message, attempts, MAX_RETRY);
+                        }
+                        total_retries += 1;
+                        let initial_delay = Duration::from_secs(1);
+                        let delay = initial_delay * 2u32.pow(attempts - 1);
+                        let _ = tx.send(delay);
+                    }
                 }
             }
 
             if stats {
-                let _ = ui_tx.send(UiEvent::Println(format!("Total files completed: {}", file_transferred_count)));
-                let _ = ui_tx.send(UiEvent::Println(format!("Total time spent acquiring file permits: {:.2}s", total_file_permit_time))); //TODO Jon: Is this metric actually relevant?
-                let _ = ui_tx.send(UiEvent::Println(format!("Total time spent acquiring request permits: {:.2}s", total_req_permit_time)));
-                let _ = ui_tx.send(UiEvent::Println(format!("Total time spent working on disk I/O: {:.2}s", total_file_work_time)));
-                let _ = ui_tx.send(UiEvent::Println(format!("Total time spent working on request I/O: {:.2}s", total_req_work_time)));
+                ui_tx.send(UiEvent::Println(format!("Total files completed: {}", file_transferred_count))).expect("Should never fail");
+                ui_tx.send(UiEvent::Println(format!("Total time spent acquiring file permits: {:.2}s", total_file_permit_time))).expect("Should never fail"); //TODO Jon: Is this metric actually relevant?
+                ui_tx.send(UiEvent::Println(format!("Total time spent acquiring request permits: {:.2}s", total_req_permit_time))).expect("Should never fail");
+                ui_tx.send(UiEvent::Println(format!("Total time spent working on disk I/O: {:.2}s", total_file_work_time))).expect("Should never fail");
+                ui_tx.send(UiEvent::Println(format!("Total time spent working on request I/O: {:.2}s", total_req_work_time))).expect("Should never fail");
             }
 
             drop(ui_tx); //This allows the UI task to exit gracefully when all files have been uploaded
@@ -117,6 +129,9 @@ impl CC for CommandCenter {
             }
             if let Some(ui) = ui {
                 ui.finish(&Status::Finished.to_string()); //This must be done after the UI thread is done, as we experienced incorrect reporting due to race conditions otherwise
+            }
+            if total_retries > 0 { //TODO Jon: Should this just be part of UI bar? Yeeesss
+                println!("Total retries: {}", total_retries);
             }
             if total_non_destructive_skips > 0 {
                 println!();
