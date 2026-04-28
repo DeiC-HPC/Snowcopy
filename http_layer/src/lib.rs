@@ -24,6 +24,7 @@ use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
 use util_layer::cc_util::CcLoadAndTransfer;
 use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
+use util_layer::snow_errors::{S3Error, SnowCopyError};
 use util_layer::{FileInfo, SnowContext};
 
 const READ_BUFFER_SIZE: usize = 256 * 1024;
@@ -99,16 +100,18 @@ pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
     let req_work_start = Instant::now();
     let resp = client.request(req).await?;
     let req_work_elapsed = req_work_start.elapsed();
-    drop(permit);
 
     let status = resp.status();
 
+    if !status.is_success() {
+        let s3_err = map_s3_error(resp).await;
+        drop(permit);
+        return Err(s3_err.into());
+    }
+
     //drain body so the connection can be returned to the pool.
     resp.into_body().collect().await?;
-
-    if !status.is_success() {
-        anyhow::bail!("PUT failed: {}", status);
-    }
+    drop(permit);
 
     let transfer_metrics = CcLoadAndTransfer {
         amount : file_info.file_size,
@@ -124,7 +127,7 @@ pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, fro
     let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, file_info, file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let req_permit_start = Instant::now();
-    let permit = req_sem.acquire().await?;
+    let permit = req_sem.acquire().await.expect("Should never fail");
     let req_permit_elapsed = req_permit_start.elapsed();
 
     let req_work_start = Instant::now();
@@ -139,11 +142,16 @@ pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, fro
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    if !status.is_success() {
+        let s3_err = map_s3_error(resp).await;
+        return Err(s3_err.into());
+    }
+
     // Drain body so the connection can be returned to the pool.
     resp.into_body().collect().await?;
 
-    if !status.is_success() || etag.is_none() {
-        anyhow::bail!("PUT range failed: {}", status);
+    if etag.is_none() {
+        return Err(SnowCopyError::MissingRequiredHeader("etag").into());
     }
 
     let transfer_metrics = CcLoadAndTransfer {
@@ -227,26 +235,49 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         len: amount as usize,
     };
 
-    let bytes = Bytes::from_owner(body_buffer);
 
-    let req = create_and_sign_req(ctx, canonical_uri, query_uri, amount, &bytes, sha256_hex, mtime_str)?;
+    let mut header_map : HashMap<String, String> = HashMap::new();
+
+    /*  TODO Jon: Add a parameter option for whoever desires more than 1 hash of their paylaods
+    let mut hasher = Hasher::new(MessageDigest::md5())?;
+    hasher.update(&bytes_for_hash)?;
+    let digest = hasher.finish()?;
+    let md5_hash = general_purpose::STANDARD.encode(digest);
+    header_map.insert("content-md5".to_string(), md5_hash.clone());
+ */
+
+    header_map.insert("content-type".to_string(), "application/octet-stream".to_string());
+    header_map.insert("content-length".to_string(), amount.to_string());
+    header_map.insert(
+        signer::get_amz_content_header(AWS_ALGORITHM),
+        sha256_hex,
+    );
+    if let Some(mtime_str) = mtime_str {
+        header_map.insert("x-amz-meta-mtime".to_string(), mtime_str);
+    }
+
+    let bytes = Bytes::from_owner(body_buffer);
+    let req = create_and_sign_req(ctx, canonical_uri, query_uri, Some(&bytes), Method::PUT, &header_map)?;
 
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
 
 pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) -> Result<()> {
-    let req = create_and_sign_get_req(ctx, canonical_uri, query_uri, None)?;
+    let mut header_map : HashMap<String, String> = HashMap::new();
+    header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
 
-    let req_permit = req_sem.acquire().await?;
+    let req = create_and_sign_req(ctx, canonical_uri, query_uri,  None, Method::GET, &header_map)?;
+
+    let req_permit = req_sem.acquire().await.expect("Should never fail");
     let resp = client.request(req).await?;
-
-
+    
     let status = resp.status();
     if !status.is_success() {
-        anyhow::bail!("GET failed: {}", status);
+        let s3_err = map_s3_error(resp).await;
+        return Err(s3_err.into());
     }
 
-    let file_permit = file_sem.acquire().await?;
+    let file_permit = file_sem.acquire().await.expect("Should never fail");
     let mut file = File::create(&file_info.file_path).await?;
     let mut body = resp.into_body();
 
@@ -272,7 +303,7 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
     let num_sub_parts = 4; //TODO Jon: configurable/change dynamically?
     let sub_part_size = (total_range_size + num_sub_parts - 1) / num_sub_parts;
 
-    let mut join_set = JoinSet::new();
+    let mut join_set: JoinSet<Result<()>> = JoinSet::new();
 
     for i in 0..num_sub_parts {
         let sub_start = start + (i * sub_part_size) as u64;
@@ -289,13 +320,19 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
         let req_sem = req_sem.clone();
 
         join_set.spawn(async move {
-            let req = create_and_sign_get_req(ctx, canonical_uri, &query_uri, Some(sub_range))?;
-            let _permit = req_sem.acquire().await?;
+            let mut header_map : HashMap<String, String> = HashMap::new();
+            header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
+            header_map.insert("range".to_string(), sub_range);
+
+            let req = create_and_sign_req(ctx, canonical_uri, &query_uri, None, Method::GET, &header_map)?;
+            let _permit = req_sem.acquire().await.expect("Should never fail");
             let resp = client.request(req).await?;
 
             let status = resp.status();
+
             if !status.is_success() && status != hyper::StatusCode::PARTIAL_CONTENT {
-                anyhow::bail!("GET sub-range failed: {}", status);
+                let s3_err = map_s3_error(resp).await;
+                return Err(s3_err.into());
             }
 
             let mut body = resp.into_body();
@@ -320,12 +357,16 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
                     sub_data_len += data.len();
                 }
             }
-            Ok(())
+            Ok::<(), anyhow::Error>(())
         });
     }
 
     while let Some(res) = join_set.join_next().await {
-        res.map_err(|e| anyhow::anyhow!("Task join error: {}", e))??;
+        match res {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(err),
+            Err(join_err) => return Err(anyhow::anyhow!("Task join error: {}", join_err)),
+        }
     }
 
     Ok(PooledBuffer {
@@ -335,27 +376,24 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
     })
 }
 
-//TODO Jon: this should be combined with create_and_sign_req to some extent. There is som code duplication.
-fn create_and_sign_get_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, range: Option<String>) -> Result<Request<StreamingBody>> {
+
+fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>) -> Result<Request<StreamingBody>> {
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
         region: ctx.s3_region().to_string(),
         service: "s3".to_string(),
     };
 
-    let mut signed_headers = HashMap::new();
+    let mut signed_headers : HashMap<String, String> = HashMap::new();
     signed_headers.insert("host".to_string(), ctx.s3_host().to_string());
     signed_headers.insert("x-amz-date".to_string(), credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string());
-    signed_headers.insert(
-        signer::get_amz_content_header(AWS_ALGORITHM),
-        EMPTY_PAYLOAD_SHA256.to_string(),
-    );
-    if let Some(ref r) = range {
-        signed_headers.insert("range".to_string(), r.clone());
+
+    for (key, value) in header_map {
+        signed_headers.insert(key.to_string(), value.to_string());
     }
 
     let auth_header = signer::get_s3_auth_header(
-        Method::GET.as_str(),
+        method.as_str(),
         ctx.clone(),
         &credential_scope,
         AWS_ALGORITHM,
@@ -370,80 +408,21 @@ fn create_and_sign_get_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, qu
         format!("https://{}{}?{}", ctx.s3_host(), canonical_uri, query_uri)
     };
 
-    let mut req_builder = Request::builder()
-        .method(Method::GET)
-        .uri(uri);
-
-    for (header_name, header_value) in &signed_headers {
-        req_builder = req_builder.header(header_name, header_value);
-    }
-
-    let body: StreamingBody = http_body_util::Empty::new()
-        .map_err(|inf: Infallible| match inf {})
-        .boxed();
-
-    let req = req_builder
-        .header("authorization", auth_header)
-        .body(body)?;
-
-    Ok(req)
-}
-
-fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, amount: u64, bytes_for_hash: &Bytes, sha256_hex: String, mtime: Option<String>) -> Result<Request<StreamingBody>> {
-/*
-    I want to delete this. However, the problem is that if we want to make some checksum calculation of
-    the entire multipart file, then we need to provide md5, such that we can check that big file's
-    Etag is a md5 hash of all the part's md5 hashes.
-    TODO Jon: This should be a parameter option.
-
-    let mut hasher = Hasher::new(MessageDigest::md5())?;
-    hasher.update(&bytes_for_hash)?;
-    let digest = hasher.finish()?;
-    let md5_hash = general_purpose::STANDARD.encode(digest);
-*/
-    let body: StreamingBody = Full::new(bytes_for_hash.clone())
-        .map_err(|inf: Infallible| match inf {})
-        .boxed();
-
-    let credential_scope = CredentialScope {
-        timestamp: chrono::Utc::now(),
-        region: ctx.s3_region().to_string(),
-        service: "s3".to_string(),
+    let body : StreamingBody = match payload {
+        None => {
+            http_body_util::Empty::new()
+                .map_err(|inf: Infallible| match inf {})
+                .boxed()
+        }
+        Some(bytes) => {
+            Full::new(bytes.clone())
+                .map_err(|inf: Infallible| match inf {})
+                .boxed()
+        }
     };
 
-
-    let mut signed_headers = HashMap::new(); //TODO Jon: usr &str here instead of strings.
-    signed_headers.insert("host".to_string(), ctx.s3_host().to_string());
-    signed_headers.insert("content-type".to_string(), "application/octet-stream".to_string());
-    signed_headers.insert("content-length".to_string(), amount.to_string());
-    //signed_headers.insert("content-md5".to_string(), md5_hash.clone());
-    signed_headers.insert("x-amz-date".to_string(), credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string());
-    signed_headers.insert(
-        signer::get_amz_content_header(AWS_ALGORITHM),
-        sha256_hex,
-    );
-
-    if let Some(mtime_str) = mtime {
-        signed_headers.insert("x-amz-meta-mtime".to_string(), mtime_str);
-    }
-
-    let auth_header = signer::get_s3_auth_header(
-        Method::PUT.as_str(),
-        ctx.clone(),
-        &credential_scope,
-        AWS_ALGORITHM,
-        &signed_headers,
-        canonical_uri.clone(),
-        &query_uri,
-    );
-
-    let uri = if query_uri.is_empty() {
-        format!("https://{}{}", ctx.s3_host(), canonical_uri)
-    } else {
-        format!("https://{}{}?{}", ctx.s3_host(), canonical_uri, query_uri)
-    };
     let mut req_builder = Request::builder()
-        .method(Method::PUT)
+        .method(method)
         .uri(uri);
 
     for (header_name, header_value) in &signed_headers {
@@ -452,7 +431,7 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
 
     let req = req_builder
         .header("authorization", auth_header)
-        .body(body)?;
+        .body(body).expect("Failed to create request. This should never happen.");
     Ok(req)
 }
 
@@ -487,4 +466,23 @@ pub async fn send_with_logging(
     let resp = client.request(req).await?;
     logging::log_response_headers(&resp);
     Ok(resp)
+}
+
+pub async fn map_s3_error(resp: hyper::Response<hyper::body::Incoming>) -> SnowCopyError {
+    let status = resp.status();
+    let body_bytes = match resp.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => return SnowCopyError::Hyper(e),
+    };
+
+    let body_str = match String::from_utf8(body_bytes.to_vec()) {
+        Ok(s) => s,
+        Err(e) => return SnowCopyError::Parse(format!("Body was not valid UTF-8: {}", e)),
+    };
+
+    if let Some(s3_err) = S3Error::from_xml(&body_str) {
+        SnowCopyError::S3(s3_err)
+    } else {
+        SnowCopyError::Http(status.as_u16())
+    }
 }

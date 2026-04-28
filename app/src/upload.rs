@@ -12,6 +12,8 @@ use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use util_layer::cc_util::{CommandCenterEvent, Status};
+use util_layer::snow_errors::SnowCopyError;
+use util_layer::retry::retry_async;
 use util_layer::{build_context, constants, Config, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
@@ -20,7 +22,7 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
     let (cc_tx, cc_handle) = cc.start();
 
     let mut files_to_upload_channel = walk_directory(path.to_path_buf(), cc_tx.clone()).await;
-    
+
     let client = Arc::new(aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str(), config.s3_region.as_str()).await);
     let bucket_creation_handle = create_bucket_if_not_exist(&bucket, &client);
 
@@ -55,8 +57,7 @@ fn create_bucket_if_not_exist(bucket: &Arc<String>, client: &Arc<AWSClient>) -> 
                 Ok(Some(_)) => true, // Bucket created
                 Ok(None) => false, // Bucket already exists
                 Err(e) => {
-                    eprintln!("Failed to create bucket: {:?}", e);
-                    false
+                    panic!("Failed to create bucket: {:?}", e);
                 }
             }
         })
@@ -75,7 +76,7 @@ async fn upload_file_async_and_add_to_handles(
     task_sem: Arc<Semaphore>,
     buffer_pool: Arc<BufferPool>,
     cc_tx: UnboundedSender<CommandCenterEvent>,
-    handles: &mut Vec<tokio::task::JoinHandle<()>>,
+    handles: &mut Vec<JoinHandle<()>>,
 ) {
     match result {
         Ok(file_info) => {
@@ -88,7 +89,7 @@ async fn upload_file_async_and_add_to_handles(
             handles.push(handle);
         }
         Err(e) => {
-            eprintln!("Error walking directory: {}", e);
+            panic!("Error walking directory: {}", e);
         }
     }
 }
@@ -103,11 +104,11 @@ async fn upload_file(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_client: Arc
 
 async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
     let mut create_multipart_upload = aws_client.create_multipart_upload().bucket(bucket.as_ref()).key(&*file_info.key);
-    
+
     if let Some(mtime) = file_info.modified_time {
         create_multipart_upload = create_multipart_upload.metadata("mtime", util_layer::time::time_to_float_string(mtime));
     }
-    
+
     let create_multipart_upload_output = create_multipart_upload.send().await.unwrap();
     let upload_id = create_multipart_upload_output.upload_id().unwrap();
 
@@ -136,7 +137,25 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
         let ctx_cloned = ctx.clone();
         let canonical_uri_cloned = canonical_uri.clone();
         let handle = tokio::spawn(async move {
-            let result = http_layer::put_file_range(ctx_cloned, file_info_clone.clone(), start_pos, amount, &hyper_client, file_sem_clone, req_sem_clone, buffer_pool_clone, canonical_uri_cloned, &query_uri).await;
+            let result = retry_async(|| {
+                let ctx = ctx_cloned.clone();
+                let file_info = file_info_clone.clone();
+                let hyper_client = hyper_client.clone();
+                let file_sem = file_sem_clone.clone();
+                let req_sem = req_sem_clone.clone();
+                let buffer_pool = buffer_pool_clone.clone();
+                let canonical_uri = canonical_uri_cloned.clone();
+                let query_uri = query_uri.clone();
+                async move {
+                    http_layer::put_file_range(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
+                }
+            }, sender_cloned.clone(), |e: &anyhow::Error| {
+                if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
+                    return snow_error.is_retryable();
+                }
+                false
+            }, format!("Uploading part {} of {}", part_number, file_info_clone.key)).await;
+
             match result {
                 Ok((etag, metrics)) => {
                     let completed_part = CompletedPartAws::builder()
@@ -148,8 +167,7 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
                     sender_cloned.send(CommandCenterEvent::PartTransferred(metrics)).unwrap();
                 }
                 Err(e) => {
-                    eprintln!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e);
-                    return; //TODO JON: handling
+                    panic!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e); //TODO JON: is this the way?
                 }
             }
         });
@@ -168,14 +186,32 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
     let canonical_uri = Arc::new(format!("/{}/{}", bucket, file_info.key));
     let query_uri = "".to_string();
 
-    let result = http_layer::put_file(ctx, file_info.clone(), &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await;
+    let result = retry_async(|| {
+        let ctx = ctx.clone();
+        let file_info = file_info.clone();
+        let hyper_client = hyper_client.clone();
+        let file_sem = file_sem.clone();
+        let req_sem = req_sem.clone();
+        let buffer_pool = buffer_pool.clone();
+        let canonical_uri = canonical_uri.clone();
+        let query_uri = query_uri.clone();
+        async move {
+            http_layer::put_file(ctx, file_info, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
+        }
+    }, sender.clone(), |e: &anyhow::Error| {
+        if let Some(snow_err) = e.downcast_ref::<SnowCopyError>() {
+            return snow_err.is_retryable();
+        }
+        false
+    }, format!("Uploading {}", file_info.key)).await;
+
     match result {
         Ok(metrics) => {
             let file_size = file_info.file_size;
             sender.send(CommandCenterEvent::PartTransferred(metrics)).unwrap();
             sender.send(CommandCenterEvent::FileTransferred(file_size)).unwrap();
         },
-        Err(e) => eprintln!("Error uploading file {}: {}", file_info.file_path.to_str().unwrap(), e), //TODO JON: send error to command_center
+        Err(e) => panic!("Error uploading file {}: {}", file_info.file_path.to_str().unwrap(), e),
     }
 }
 
@@ -203,21 +239,19 @@ fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCen
 
                         if should_upload(&file_info, size, s3_mtime).await {
                             if exists_at_target && !destructive {
-                                let _ = cc_tx.send(CommandCenterEvent::NonDestructiveMode(format!("Skipping upload of already existing file {:?}", file_info.file_path)));
+                                cc_tx.send(CommandCenterEvent::NonDestructiveMode(format!("Skipping upload of already existing file {:?}", file_info.file_path))).expect("Failed to send message to command center. Should never happen.");
                             } else {
-                                if let Err(e) = upload_tx.send(Ok(file_info)).await { //Ui will be updated later.
-                                    let _ = cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to upload queue: {}", e))); //TODO Jon should be error logging?
-                                }
+                                upload_tx.send(Ok(file_info)).await.expect("Should never fail.")
                             }
                         } else {
                             // Already uploaded, just let CC and ui know. We are done with the file
-                            let _ = cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(file_info.file_size));
+                            cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(file_info.file_size)).expect("Should never fail.");
                         }
                         drop(permit);
                     });
                 }
                 Err(e) => {
-                    let _ = upload_tx.send(Err(e));
+                    upload_tx.send(Err(e)).await.expect("Should never fail.");
                 }
             }
         }
@@ -266,7 +300,7 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
             match entry {
                 Ok(entry) => {
                     if entry.path_is_symlink() {
-                        let _ = cc_tx.send(CommandCenterEvent::Log(format!("SKIPPING symbolic link: {}", entry.path().display())));
+                        cc_tx.send(CommandCenterEvent::Log(format!("SKIPPING symbolic link: {}", entry.path().display()))).expect("Failed to send message to command center. Should never happen.");
                     } else if entry.file_type().is_file() {
                         let metadata = entry.metadata().unwrap();
                         let file_size = metadata.len();
@@ -278,26 +312,20 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
 
                         let key: String = util_layer::path_to_s3_key(relative_path.to_str().unwrap());
 
-                        if cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).is_err() {
-                            //TODO JON: print error? it should never fail.
-                        }
+                        cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).expect("Failed to send message to command center. Should never happen.");
 
                         let file_info = FileInfo { file_path, key, file_size, modified_time };
-                        if tx.blocking_send(Ok(file_info)).is_err() {
-                            //TODO JON: print error? it should never fail.
-                        }
+                        tx.blocking_send(Ok(file_info)).expect("Failed to send message. Should never happen.");
                     }
                 }
                 Err(e) => {
-                    let io_error = io::Error::new(io::ErrorKind::Other, e);
-                    if tx.blocking_send(Err(io_error)).is_err() {
-                        //TODO JON: print error? it should never fail.
-                    }
+                    let io_error = io::Error::new(io::ErrorKind::Other, e); //TODO Jon, is this correct error type? I guess there might be some permission issues that could hit here? Not sure how to handle it.
+                    tx.blocking_send(Err(io_error)).expect("Failed to send message. Should never happen.");
                 }
             }
         }
 
-        let _ = cc_tx.send(CommandCenterEvent::StatusChanged(Status::Transferring));
+        cc_tx.send(CommandCenterEvent::StatusChanged(Status::Transferring)).expect("Failed to send message to command center. Should never happen.");
 
     });
 

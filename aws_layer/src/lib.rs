@@ -1,5 +1,6 @@
 mod s3example_error;
 
+use aws_config::retry::RetryConfig;
 use aws_config::timeout::TimeoutConfig;
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3::config::{Builder, Credentials, ProvideCredentials, RequestChecksumCalculation, ResponseChecksumValidation};
@@ -79,12 +80,15 @@ pub async fn create_client(access_key: &str, secret_key: &str, url: &str, region
         .operation_timeout(Duration::from_secs(120))
         .build();
 
+    let retry_config = RetryConfig::standard()
+        .with_max_attempts(constants::MAX_RETRY);
 
     let s3_conf = Builder::from(&shared_config)
         .force_path_style(true)
         .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
         .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
         .timeout_config(timeout_config)
+        .retry_config(retry_config)
         .build();
 
 

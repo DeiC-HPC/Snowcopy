@@ -8,6 +8,8 @@ use url::Url;
 pub mod constants;
 pub mod cc_util;
 pub mod time;
+pub mod retry;
+pub mod snow_errors;
 
 fn default_region() -> String { "us-east-1".to_string() }
 

@@ -1,3 +1,4 @@
+use chrono::Local;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -150,7 +151,8 @@ impl Ui for ProgressBarUi {
                         inner.transfer_pb.set_prefix(msg);
                     }
                     UiEvent::Println(msg) => {
-                        inner.mp.println(msg).unwrap();
+                        let timestamp = Local::now().format("%H:%M:%S");
+                        inner.mp.println(format!("[{}] {}", timestamp, msg)).unwrap();
                     }
                 }
 

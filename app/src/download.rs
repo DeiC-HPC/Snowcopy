@@ -5,10 +5,14 @@ use aws_layer::{async_head_objects_from_bucket, get_s3_mtime, AWSClient, S3Objec
 use http_layer::{BufferPool, PoolClient};
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
+use anyhow::Error;
 use tokio::sync::mpsc::{self, Receiver, UnboundedSender};
 use tokio::sync::Semaphore;
+use util_layer::snow_errors::SnowCopyError;
+use util_layer::retry::retry_async;
 use util_layer::{build_context, constants, FileInfo, SnowContext};
 
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -46,7 +50,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, DOWNLOAD_MULTIPART_THRESHOLD as usize));
 
-    let mut created_dirs: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut created_dirs: HashSet<PathBuf> = HashSet::new();
     let mut join_set = JoinSet::new();
 
     //Process objects from bucket
@@ -116,14 +120,14 @@ async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String
                 let (should_download, non_destructive_skip) = should_download_object(&mut object, destructive);
 
                 if should_download && non_destructive_skip {
-                    let _ = cc_tx.send(CommandCenterEvent::NonDestructiveMode(format!("Skipping download of already existing file {:?}", object.local_path)));
+                    cc_tx.send(CommandCenterEvent::NonDestructiveMode(format!("SKIPPING download as file already exists with DIFFERENT content {:?}", object.local_path))).expect("Failed to send message. This should never happen.");
                 } else if should_download {
                     if let Err(e) = download_tx.send(object).await {
-                        let _ = cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to download queue: {}", e)));
+                        cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to download queue: {}", e))).expect("Failed to send message. This should never happen.");
                     }
                 } else {
                     // Already downloaded, just update progress for the UI
-                    let _ = cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(object.size as u64));
+                    cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(object.size as u64)).expect("Failed to send message. This should never happen.");
                 }
                 drop(permit);
             });
@@ -177,7 +181,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
         //TODO Jon: Right now we rely on file::seek to extend the file. We should consider if we should not just preallocate the file here.
         //TODO Jon: It works because the specific tokio implementation handles seeking outside the current file limit like we want it to.
         if let Err(e) = tokio::fs::File::create(&file_path).await {
-            cc_sender.send(CommandCenterEvent::Log(format!("Failed to create file {:?}: {}", file_path, e))).unwrap();
+            cc_sender.send(CommandCenterEvent::Log(format!("Failed to create file {:?}: {}", file_path, e))).expect("Failed to send message. This should never happen.");
             return;
         }
 
@@ -200,22 +204,27 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
 
             let buffer_pool = buffer_pool.clone();
 
+            let cc_sender = cc_sender.clone();
             download_set.spawn(async move {
-                let data = match http_layer::get_file_range(snow_context, &pool_client, buffer_pool, canonical_uri, &query_uri, req_sem, start, end).await {
-                    Ok(d) => d,
-                    Err(e) => return Err(e),
-                };
-
-                let _file_permit = file_sem.acquire().await.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to acquire file semaphore: {}", e)))?;
-                let mut file = tokio::fs::OpenOptions::new()
-                    .write(true)
-                    .open(&file_path)
-                    .await?;
-
-                file.seek(std::io::SeekFrom::Start(start)).await?;
-                file.write_all(data.as_ref()).await?;
-                file.flush().await?; //We must flush to ensure our mtime update is not overwritten after its been set.
-                Ok(data.len as u64)
+                retry_async(|| {
+                    let snow_context = snow_context.clone();
+                    let pool_client = pool_client.clone();
+                    let req_sem = req_sem.clone();
+                    let file_sem = file_sem.clone();
+                    let canonical_uri = canonical_uri.clone();
+                    let query_uri = query_uri.clone();
+                    let file_path = file_path.clone();
+                    let buffer_pool = buffer_pool.clone();
+                    let cc_sender = cc_sender.clone();
+                    async move {
+                        download_part(start, end, snow_context, &pool_client, req_sem, file_sem, canonical_uri, &query_uri, &file_path, buffer_pool, cc_sender).await
+                    }
+                }, cc_sender.clone(), |e: &anyhow::Error| {
+                    if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
+                        return snow_error.is_retryable();
+                    }
+                    false
+                }, format!("Downloading part (bytes {} to {}) of {}", start, end, canonical_uri)).await
             });
         }
 
@@ -231,11 +240,11 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                     };
                     cc_sender.send(CommandCenterEvent::PartTransferred(transfer_metrics)).unwrap();
                 },
-                Ok(Err(e)) => {//TODO JON: handle retry
-                    cc_sender.send(CommandCenterEvent::Log(format!("Part download failed for {}: {}", key, e))).unwrap();
+                Ok(Err(e)) => {
+                    panic!("Part download failed for {}: {}", key, e);
                 }
                 Err(e) => {//Should never happen
-                    cc_sender.send(CommandCenterEvent::Log(format!("Task join failed for {}: {}", key, e))).unwrap();
+                    panic!("Task join failed for {}: {}", key, e);
                 }
             }
         }
@@ -255,7 +264,25 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
         let canonical_uri = Arc::new(format!("/{}/{}", &bucket, object.key));
         let query_uri = String::new();
 
-        match http_layer::get_file(snow_context.clone(), file_info, &pool_client, canonical_uri, &query_uri, file_sem, req_sem).await {
+        let result = retry_async(|| {
+            let snow_context = snow_context.clone();
+            let file_info = file_info.clone();
+            let pool_client = pool_client.clone();
+            let canonical_uri = canonical_uri.clone();
+            let query_uri = query_uri.clone();
+            let file_sem = file_sem.clone();
+            let req_sem = req_sem.clone();
+            async move {
+                http_layer::get_file(snow_context, file_info, &pool_client, canonical_uri, &query_uri, file_sem, req_sem).await
+            }
+        }, cc_sender.clone(), |e: &anyhow::Error| {
+            if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
+                return snow_error.is_retryable();
+            }
+            false
+        }, format!("Downloading {}", object.key)).await;
+
+        match result {
             Ok(_) => {
                 let transfer_metrics = CcLoadAndTransfer { //TODO Jon: I would like the metrics part to be more elegant
                     amount : object.size as u64,
@@ -278,16 +305,31 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
     }
 }
 
-fn update_mod_time_on_file(object: &S3Object, cc_sender: &UnboundedSender<CommandCenterEvent>) {
+async fn download_part(start: u64, end: u64, snow_context: Arc<SnowContext>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, file_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, file_path: &PathBuf, buffer_pool: Arc<BufferPool>, cc_sender: UnboundedSender<CommandCenterEvent>) -> Result<u64, Error> {
+    let data = http_layer::get_file_range(snow_context, &pool_client, buffer_pool, canonical_uri, &query_uri, req_sem, start, end).await?;
+
+    let _file_permit = file_sem.acquire().await.expect("Should never fail");
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .open(&file_path)
+        .await?;
+
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    file.write_all(data.as_ref()).await?;
+    file.flush().await?; //We must flush to ensure our mtime update is not overwritten after its been set.
+    Ok(data.len as u64)
+}
+
+fn update_mod_time_on_file(object: &S3Object, cc_sender: &UnboundedSender<CommandCenterEvent>) { //TODO JON: should we retry? I think this should never fail, in practice, unless some other program takes write of the file and then we dont want to update mtime anyways
     if let Some(mtime) = object.modified_time {
-        match fs::OpenOptions::new().write(true).open(&object.local_path) { //TODO JON: is it faster if we get the reference used when writing the file? Could easily be improved in simple download
+        match fs::OpenOptions::new().write(true).open(&object.local_path) {
             Ok(file) => {
                 if let Err(e) = file.set_modified(mtime) {
-                    cc_sender.send(CommandCenterEvent::Log(format!("Failed to update mtime for {:?}: {}", object.local_path, e))).unwrap();
+                    cc_sender.send(CommandCenterEvent::Log(format!("Failed to update mtime for {:?}: {}", object.local_path, e))).expect("Failed to send message. This should never happen.");
                 }
             }
             Err(e) => {
-                cc_sender.send(CommandCenterEvent::Log(format!("Failed to open file to update mtime for {:?}: {}", object.local_path, e))).unwrap();
+                cc_sender.send(CommandCenterEvent::Log(format!("Failed to open file to update mtime for {:?}: {}", object.local_path, e))).expect("Failed to send message. This should never happen.");
             }
         }
     }
