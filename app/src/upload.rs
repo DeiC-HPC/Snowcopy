@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use util_layer::cc_util::{CommandCenterEvent, Status};
 use util_layer::snow_errors::SnowCopyError;
-use util_layer::retry::retry_async;
+use util_layer::retry::retry_on_failure_async;
 use util_layer::{build_context, constants, Config, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
@@ -137,7 +137,7 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
         let ctx_cloned = ctx.clone();
         let canonical_uri_cloned = canonical_uri.clone();
         let handle = tokio::spawn(async move {
-            let result = retry_async(|| {
+            let result = retry_on_failure_async(|| {
                 let ctx = ctx_cloned.clone();
                 let file_info = file_info_clone.clone();
                 let hyper_client = hyper_client.clone();
@@ -186,7 +186,7 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
     let canonical_uri = Arc::new(format!("/{}/{}", bucket, file_info.key));
     let query_uri = "".to_string();
 
-    let result = retry_async(|| {
+    let result = retry_on_failure_async(|| {
         let ctx = ctx.clone();
         let file_info = file_info.clone();
         let hyper_client = hyper_client.clone();

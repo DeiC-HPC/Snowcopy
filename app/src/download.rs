@@ -11,7 +11,7 @@ use anyhow::Error;
 use tokio::sync::mpsc::{self, Receiver, UnboundedSender};
 use tokio::sync::Semaphore;
 use util_layer::snow_errors::SnowCopyError;
-use util_layer::retry::retry_async;
+use util_layer::retry::retry_on_failure_async;
 use util_layer::{build_context, constants, FileInfo, SnowContext};
 
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
@@ -205,7 +205,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
 
             let cc_sender = cc_sender.clone();
             download_set.spawn(async move {
-                retry_async(|| {
+                retry_on_failure_async(|| {
                     let snow_context = snow_context.clone();
                     let pool_client = pool_client.clone();
                     let req_sem = req_sem.clone();
@@ -263,7 +263,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
         let canonical_uri = Arc::new(format!("/{}/{}", &bucket, object.key));
         let query_uri = String::new();
 
-        let result = retry_async(|| {
+        let result = retry_on_failure_async(|| {
             let snow_context = snow_context.clone();
             let file_info = file_info.clone();
             let pool_client = pool_client.clone();
