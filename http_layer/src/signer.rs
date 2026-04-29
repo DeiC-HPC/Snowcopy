@@ -4,6 +4,7 @@ use openssl::sign::Signer;
 use openssl::sha::sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
+use util_layer::constants::{AMZ_CHUNK_SIGNATURE_HEADER, AMZ_TRAILER_SIGNATURE, AWS_CHUNK_PAYLOAD_ALGORITHM, AWS_CHUNK_TRAILER_ALGORITHM, EMPTY_PAYLOAD_SHA256};
 use util_layer::SnowContext;
 
 pub struct CredentialScope {
@@ -127,7 +128,7 @@ pub(crate) fn sha256_hex(data: &[u8]) -> String {
     hex::encode(actual_hash)
 }
 
-fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     let pkey = PKey::hmac(key).expect("Failed to create HMAC key");
     let mut signer = Signer::new(MessageDigest::sha256(), &pkey).expect("Failed to create HMAC signer");
     signer.update(data).expect("Failed to update HMAC signer");
@@ -137,7 +138,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     res
 }
 
-fn s3_signing_key(
+pub fn s3_signing_key(
     secret_key: &str,
     date_y_m_d: &str,
     region: &str,
@@ -150,4 +151,100 @@ fn s3_signing_key(
     let k_region = hmac_sha256(&k_date, region.as_bytes());
     let k_service = hmac_sha256(&k_region, b"s3");
     hmac_sha256(&k_service, b"aws4_request")
+}
+
+/// Signs a chunk for AWS chunked encoding (trailing headers)
+pub fn sign_chunk(
+    signing_key: &[u8; 32],
+    amz_date: &str,
+    credential_scope: &str,
+    prev_signature: &str,
+    chunk_data: &[u8],
+) -> String {
+    let chunk_hash = sha256_hex(chunk_data);
+
+    let string_to_sign = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}",
+        AWS_CHUNK_PAYLOAD_ALGORITHM,
+        amz_date,
+        credential_scope,
+        prev_signature,
+        EMPTY_PAYLOAD_SHA256,
+        chunk_hash
+    );
+
+    hex::encode(hmac_sha256(signing_key, string_to_sign.as_bytes()))
+}
+
+/// Signs a trailer for AWS chunked encoding with trailing headers
+pub fn sign_trailer(
+    signing_key: &[u8; 32],
+    amz_date: &str,
+    credential_scope: &str,
+    prev_signature: &str,
+    trailer_name: &str,
+    trailer_value: &str,
+) -> String {
+    // The canonicalized trailer string is "name:value\n" (single LF), then SHA256-hex of that
+    let trailer_line = format!("{}:{}\n", trailer_name.to_lowercase(), trailer_value);
+    let trailer_hash = sha256_hex(trailer_line.as_bytes());
+
+    let string_to_sign = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        AWS_CHUNK_TRAILER_ALGORITHM,
+        amz_date,
+        credential_scope,
+        prev_signature,
+        trailer_hash
+    );
+
+    hex::encode(hmac_sha256(signing_key, string_to_sign.as_bytes()))
+}
+
+// TODO LND: This can be compressed - no need to show our work, just give us the number
+/// Calculates the total encoded Content-Length for aws-chunked + SigV4 streaming with trailing headers
+pub fn aws_chunked_trailer_encoded_length(
+    decoded_len: u64,
+    chunk_size: usize,
+    trailer_name: &str,
+    trailer_value_len: usize,
+) -> u64 {
+    let mut total: u64 = 0;
+
+    // Signature header overhead: ";chunk-signature=<64-hex-chars>"
+    let sig_header_overhead: u64 = 1 + AMZ_CHUNK_SIGNATURE_HEADER.len() as u64 + 1 + 64;
+
+    // 1) Payload chunks
+    let mut remain = decoded_len;
+    while remain > 0 {
+        let n = std::cmp::min(chunk_size as u64, remain);
+        remain -= n;
+
+        let hex_digits = format!("{:x}", n).len() as u64;
+
+        total += hex_digits;         // "<hexlen>"
+        total += sig_header_overhead; // ";chunk-signature=<sig>"
+        total += 2;                  // "\r\n" after chunk header line
+        total += n;                  // chunk data
+        total += 2;                  // "\r\n" after chunk data
+    }
+
+    // 2) Final 0-byte data chunk: "0;chunk-signature=<64-hex>\r\n"
+    total += 1;                  // "0"
+    total += sig_header_overhead; // ";chunk-signature=<sig>"
+    total += 2;                  // "\r\n" after header line
+
+    // 3) Trailing headers (raw, NOT in a chunk wrapper):
+    //    "<trailerName>:<value>\r\n"
+    //    "x-amz-trailer-signature:<64-hex-sig>\r\n"
+    //    "\r\n"
+    let lower_trailer_name = trailer_name.to_lowercase();
+    let checksum_line_len: u64 = lower_trailer_name.len() as u64 + 1 + trailer_value_len as u64 + 2; // name + ":" + value + "\r\n"
+    let trailer_sig_line_len: u64 = AMZ_TRAILER_SIGNATURE.len() as u64 + 1 + 64 + 2; // name + ":" + 64-hex + "\r\n"
+
+    total += checksum_line_len;
+    total += trailer_sig_line_len;
+    total += 2; // final "\r\n"
+
+    total
 }

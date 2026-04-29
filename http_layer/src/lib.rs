@@ -183,6 +183,7 @@ async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::
 }
 
 async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
+    let trailing = true;    // TODO LND: This should be a parameter
     let file_permit_start = Instant::now();
     let file_lock = file_sem.acquire().await?;
     let file_permit_elapsed = file_permit_start.elapsed();
@@ -257,7 +258,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     }
 
     let bytes = Bytes::from_owner(body_buffer);
-    let req = create_and_sign_req(ctx, canonical_uri, query_uri, Some(&bytes), Method::PUT, &header_map)?;
+    let req = create_and_sign_req(ctx, canonical_uri, query_uri, Some(&bytes), Method::PUT, &header_map, trailing)?;
 
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
@@ -266,7 +267,7 @@ pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
 
-    let req = create_and_sign_req(ctx, canonical_uri, query_uri,  None, Method::GET, &header_map)?;
+    let req = create_and_sign_req(ctx, canonical_uri, query_uri, None, Method::GET, &header_map, false)?;
 
     let req_permit = req_sem.acquire().await.expect("Should never fail");
     let resp = client.request(req).await?;
@@ -324,7 +325,7 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
             header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
             header_map.insert("range".to_string(), sub_range);
 
-            let req = create_and_sign_req(ctx, canonical_uri, &query_uri, None, Method::GET, &header_map)?;
+            let req = create_and_sign_req(ctx, canonical_uri, &query_uri, None, Method::GET, &header_map, false)?;
             let _permit = req_sem.acquire().await.expect("Should never fail");
             let resp = client.request(req).await?;
 
@@ -377,7 +378,7 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
 }
 
 
-fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>) -> Result<Request<StreamingBody>> {
+fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>, trailing: bool) -> Result<Request<StreamingBody>> {
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
         region: ctx.s3_region().to_string(),
