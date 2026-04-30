@@ -54,7 +54,8 @@ async fn main() -> Result<()> {
         download::download(arc_bucket, "", path, file_limit, req_limit, silent, stats, &config, destructive).await;
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive).await
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive).await,
+            TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config).await,
         };
     }
 
@@ -91,11 +92,13 @@ async fn gather_credentials() -> Config {
 
 enum TransferMethod {
     CephS3Tokio,
+    TransferManager,
 }
 
 fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
     match method {
-        Some("o2") => Some(TransferMethod::CephS3Tokio),
+        Some("o1") => Some(TransferMethod::CephS3Tokio),
+        Some("o2") => Some(TransferMethod::TransferManager),
         _other => None,
     }
 }
@@ -125,7 +128,7 @@ fn parse_arguments() -> ArgMatches {
                 .help("Transfer method")
                 .short('o')
                 .required(false)
-                .default_value("o2")
+                .default_value("o1")
             //.index(1),
         )
         .arg(
