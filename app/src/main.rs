@@ -51,10 +51,14 @@ async fn main() -> Result<()> {
 
 
     if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
-        download::download(arc_bucket, "", path, file_limit, req_limit, silent, stats, &config, destructive).await;
+        match method {
+            TransferMethod::CephS3Tokio => download::download(arc_bucket, "", path, file_limit, req_limit, silent, stats, &config, destructive).await,
+            TransferMethod::TransferManager => transfer_manager::download(arc_bucket, path, silent, stats, &config, req_limit).await,
+        }
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive).await
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive).await,
+            TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config, req_limit).await,
         };
     }
 
@@ -91,11 +95,13 @@ async fn gather_credentials() -> Config {
 
 enum TransferMethod {
     CephS3Tokio,
+    TransferManager,
 }
 
 fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
     match method {
-        Some("o2") => Some(TransferMethod::CephS3Tokio),
+        Some("o1") => Some(TransferMethod::CephS3Tokio),
+        Some("o2") => Some(TransferMethod::TransferManager),
         _other => None,
     }
 }
@@ -125,7 +131,7 @@ fn parse_arguments() -> ArgMatches {
                 .help("Transfer method")
                 .short('o')
                 .required(false)
-                .default_value("o2")
+                .default_value("o1")
             //.index(1),
         )
         .arg(

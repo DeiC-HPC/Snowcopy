@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use crate::cc_util::CommandCenterEvent;
 
 
-/// ```rust
+/// ```text
 /// Asynchronously retries a given operation upon failure based on the specified retry condition.
 /// The idea is that one can warp fucntions in this and provide information about which errors should be retired.
 /// The reason that the command_center is involved is to provide a centralized logging and monitoring system for retry operations.
