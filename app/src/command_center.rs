@@ -65,6 +65,7 @@ impl CC for CommandCenter {
             let mut total_req_work_time = 0f64;
 
             let mut total_non_destructive_skips = 0u64;
+            let mut total_non_trailing_headers = 0u64;
 
             let _ = ui_tx.send(UiEvent::Message(Status::Discovering.to_string()));
 
@@ -103,6 +104,10 @@ impl CC for CommandCenter {
                         let _ = ui_tx.send(UiEvent::Println(string));
                         total_non_destructive_skips += 1;
                     }
+                    CommandCenterEvent::NonTrailingMode(string) => {
+                        let _ = ui_tx.send(UiEvent::Println(string));
+                        total_non_trailing_headers += 1;
+                    }
                     CommandCenterEvent::RetryRequested(tx, attempts, _time, message) => { //TODO Jon: later we should add some metrics and use them to get an idea of the entire stack
                         if attempts > MAX_RETRY {
                             panic!("{}: Retry amount {} exceeded MAX_RETRY {}", message, attempts, MAX_RETRY);
@@ -136,6 +141,10 @@ impl CC for CommandCenter {
             if total_non_destructive_skips > 0 {
                 println!();
                 println!("Non-destructive mode: Skipped {} files. Rerun program with --destructive to overwrite them", total_non_destructive_skips);
+            }
+            if total_non_trailing_headers > 0 {
+                println!();
+                println!("Non-trailing mode: Skipped {} files. Rerun program with --trailing to append to them", total_non_trailing_headers);
             }
 
         });

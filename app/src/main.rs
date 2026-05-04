@@ -41,6 +41,7 @@ async fn main() -> Result<()> {
     let download = matches.get_flag("download");
     let stats = matches.get_flag("stats");
     let destructive = matches.get_flag("destructive");
+    let trailing = matches.get_flag("trailing");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
 
     let path = Path::new(path_as_string);
     let arc_bucket = Arc::new(bucket.to_string());
@@ -57,7 +58,7 @@ async fn main() -> Result<()> {
         }
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive).await,
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive, trailing).await,
             TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config, req_limit).await,
         };
     }
@@ -192,6 +193,13 @@ fn parse_arguments() -> ArgMatches {
                 .required(false)
                 .action(clap::ArgAction::SetTrue)
                 .conflicts_with("non-destructive"),
+        )
+        .arg(
+            Arg::new("trailing")
+                .long("trailing")
+                .help("Trailing header mode (uses trailing headers for S3 operations)")
+                .required(false)
+                .action(clap::ArgAction::SetTrue)
         )
         .after_help("Upload example:\n  snowplowRust -b bucket-name path/to/source")
         .get_matches();

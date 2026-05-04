@@ -18,6 +18,7 @@ pub enum CommandCenterEvent {
     StatusChanged(Status),
     Log(String),
     NonDestructiveMode(String),
+    NonTrailingMode(String),
     RetryRequested(oneshot::Sender<Duration>, u32, SystemTime, String),
 }
 

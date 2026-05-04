@@ -304,7 +304,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
     }
 }
 
-async fn download_part(start: u64, end: u64, snow_context: Arc<SnowContext>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, file_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, file_path: &PathBuf, buffer_pool: Arc<BufferPool>, cc_sender: UnboundedSender<CommandCenterEvent>) -> Result<u64, Error> {
+async fn download_part(start: u64, end: u64, snow_context: Arc<SnowContext>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, file_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, file_path: &PathBuf, buffer_pool: Arc<BufferPool>, _cc_sender: UnboundedSender<CommandCenterEvent>) -> Result<u64, Error> {
     let data = http_layer::get_file_range(snow_context, &pool_client, buffer_pool, canonical_uri, &query_uri, req_sem, start, end).await?;
 
     let _file_permit = file_sem.acquire().await.expect("Should never fail");
