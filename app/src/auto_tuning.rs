@@ -90,11 +90,14 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
                     if speed >= 10000 {
                         limit = limit * 4;
                     }
-                    if speed >= 40000 {
+                    if speed >= 20000 {
                         limit = (limit as f32 * 1.5) as usize;
                     }
+                    if speed >= 40000 {
+                        limit = (limit as f32 * 1.3) as usize;
+                    }
                     if speed >= 100000 {
-                        limit = (limit as f32 * 1.5) as usize;
+                        limit = (limit as f32 * 1.3) as usize;
                     }
                 }
 
