@@ -23,3 +23,4 @@ pub const AMZ_STREAMING_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAI
 pub const AMZ_CHUNK_SIGNATURE_HEADER: &str = "chunk-signature";
 pub const AMZ_CHECKSUM_SHA256: &str = "x-amz-checksum-sha256";
 pub const AMZ_TRAILER_SIGNATURE: &str = "x-amz-trailer-signature";
+pub const AWS_TRAILER_CHUNK_SIZE: usize = 5 * 1024 * 1024;

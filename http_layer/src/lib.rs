@@ -3,11 +3,12 @@ mod signer;
 
 use crate::signer::CredentialScope;
 use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, StreamBody};
-use hyper::body::Frame;
+use hyper::body::{Body, Frame};
 use hyper::{Method, Request, Uri};
 use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
@@ -16,6 +17,10 @@ use hyper_util::{
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
+use std::io::Write;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+// TODO LND: Is this the best way to write
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Semaphore};
@@ -23,7 +28,7 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
 use util_layer::cc_util::CcLoadAndTransfer;
-use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
+use util_layer::constants::{AMZ_CHECKSUM_SHA256, AMZ_CHUNK_SIGNATURE_HEADER, AMZ_STREAMING_TRAILER, AMZ_TRAILER_SIGNATURE, AWS_ALGORITHM, AWS_TRAILER_CHUNK_SIZE, EMPTY_PAYLOAD_SHA256};
 use util_layer::snow_errors::{S3Error, SnowCopyError};
 use util_layer::{FileInfo, SnowContext};
 
@@ -258,7 +263,12 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     }
 
     let bytes = Bytes::from_owner(body_buffer);
-    let req = create_and_sign_req(ctx, canonical_uri, query_uri, Some(&bytes), Method::PUT, &header_map, trailing)?;
+
+    let req = if trailing {
+        create_and_sign_req_trailing_checksum(ctx, canonical_uri, query_uri, Some(&bytes), Method::PUT, &header_map)?
+    } else {
+        create_and_sign_req(ctx, canonical_uri, query_uri, Some(&bytes), Method::PUT, &header_map)?
+    };
 
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
@@ -267,7 +277,7 @@ pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
 
-    let req = create_and_sign_req(ctx, canonical_uri, query_uri, None, Method::GET, &header_map, false)?;
+    let req = create_and_sign_req(ctx, canonical_uri, query_uri, None, Method::GET, &header_map)?;
 
     let req_permit = req_sem.acquire().await.expect("Should never fail");
     let resp = client.request(req).await?;
@@ -325,7 +335,7 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
             header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
             header_map.insert("range".to_string(), sub_range);
 
-            let req = create_and_sign_req(ctx, canonical_uri, &query_uri, None, Method::GET, &header_map, false)?;
+            let req = create_and_sign_req(ctx, canonical_uri, &query_uri, None, Method::GET, &header_map)?;
             let _permit = req_sem.acquire().await.expect("Should never fail");
             let resp = client.request(req).await?;
 
@@ -378,7 +388,7 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
 }
 
 
-fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>, trailing: bool) -> Result<Request<StreamingBody>> {
+fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>) -> Result<Request<StreamingBody>> {
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
         region: ctx.s3_region().to_string(),
@@ -403,11 +413,7 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
         &query_uri,
     );
 
-    let uri = if query_uri.is_empty() {
-        format!("https://{}{}", ctx.s3_host(), canonical_uri)
-    } else {
-        format!("https://{}{}?{}", ctx.s3_host(), canonical_uri, query_uri)
-    };
+    let uri = format_query(&ctx, canonical_uri, query_uri);
 
     let body : StreamingBody = match payload {
         None => {
@@ -436,6 +442,114 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
     Ok(req)
 }
 
+/// Create and sign an HTTP request with trailing checksum for S3 operations.
+fn create_and_sign_req_trailing_checksum(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>) -> Result<Request<StreamingBody>> {
+    let credential_scope = CredentialScope {
+        timestamp: chrono::Utc::now(),
+        region: ctx.s3_region().to_string(),
+        service: "s3".to_string(),
+    };
+
+    let amz_date = credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string();
+    let date_y_m_d = credential_scope.timestamp.format("%Y%m%d").to_string();
+    let credential_scope_str = format!(
+        "{}/{}/s3/aws4_request",
+        date_y_m_d,
+        credential_scope.region
+    );
+
+    let mut signed_headers: HashMap<String, String> = HashMap::new();
+    signed_headers.insert("host".to_string(), ctx.s3_host().to_string());
+    signed_headers.insert("x-amz-date".to_string(), amz_date.clone());
+
+    // For trailing headers mode, we need special handling
+    let payload_bytes = payload.unwrap();
+    let decoded_len = payload_bytes.len() as u64;
+
+    // Set headers for aws-chunked with trailing checksum
+    signed_headers.insert("content-encoding".to_string(), "aws-chunked".to_string());
+    signed_headers.insert(
+        signer::get_amz_content_header(AWS_ALGORITHM),
+        AMZ_STREAMING_TRAILER.to_string(),
+    );
+    signed_headers.insert("x-amz-decoded-content-length".to_string(), decoded_len.to_string());
+    signed_headers.insert("x-amz-trailer".to_string(), AMZ_CHECKSUM_SHA256.to_string());
+
+    // Add other headers from header_map (except content-length and x-amz-content-sha256 which we handle specially)
+    for (key, value) in header_map {
+        let key_lower = key.to_lowercase();
+        if key_lower != "content-length" && key_lower != signer::get_amz_content_header(AWS_ALGORITHM).to_lowercase() {
+            signed_headers.insert(key.to_string(), value.to_string());
+        }
+    }
+
+    // Calculate encoded content length
+    let encoded_len = signer::aws_chunked_trailer_encoded_length(
+        decoded_len,
+        AWS_TRAILER_CHUNK_SIZE,
+        AMZ_CHECKSUM_SHA256,
+        44, // Base64 SHA256 is always 44 characters
+    );
+    signed_headers.insert("content-length".to_string(), encoded_len.to_string());
+
+    // Get auth header and seed signature
+    let (auth_header, seed_signature) = signer::get_s3_auth_header_and_signature(
+        method.as_str(),
+        ctx.clone(),
+        &credential_scope,
+        AWS_ALGORITHM,
+        &signed_headers,
+        canonical_uri.clone(),
+        query_uri,
+    );
+
+    let uri = format_query(&ctx, canonical_uri, query_uri);
+
+    // Create signing key
+    let signing_key = signer::s3_signing_key(
+        ctx.s3_secret_key(),
+        &date_y_m_d,
+        ctx.s3_region(),
+    );
+
+    // Create the aws-chunked body with trailing headers
+    let chunked_body = AwsChunkedTrailerBody::new(
+        payload_bytes.clone(),
+        AWS_TRAILER_CHUNK_SIZE,
+        signing_key,
+        amz_date,
+        credential_scope_str,
+        seed_signature,
+        AMZ_CHECKSUM_SHA256.to_string(),
+    );
+
+    // Boxes AwsChunkedTrailerBody into a StreamingBody
+    let body : StreamingBody = chunked_body.into_streaming_body();
+
+    let mut req_builder = Request::builder()
+        .method(method)
+        .uri(uri);
+
+    for (header_name, header_value) in &signed_headers {
+        req_builder = req_builder.header(header_name, header_value);
+    }
+
+    let req = req_builder
+        .header("authorization", auth_header)
+        .body(body)
+        .expect("Failed to create request. This should never happen.");
+
+    Ok(req)
+}
+
+fn format_query(ctx: &Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String) -> String {
+    if query_uri.is_empty() {
+        format!("https://{}{}", ctx.s3_host(), canonical_uri)
+    } else {
+        format!("https://{}{}?{}", ctx.s3_host(), canonical_uri, query_uri)
+    }
+}
+
 pub struct PooledBuffer {
     pub buffer: Option<Vec<u8>>,
     pub pool: Arc<BufferPool>,
@@ -455,6 +569,212 @@ impl Drop for PooledBuffer {
             tokio::spawn(async move {
                 pool.return_buffer(buf).await;
             });
+        }
+    }
+}
+
+/// AWS Chunked encoding body with trailing headers for SigV4 streaming
+/// This wraps a payload and produces aws-chunked encoded output with:
+/// - Signed data chunks
+/// - Final empty chunk
+/// - Trailing checksum header with signature
+pub struct AwsChunkedTrailerBody {
+    /// The raw payload data
+    data: Bytes,
+    /// Current position in the data
+    data_pos: usize,
+    /// Chunk size for aws-chunked encoding
+    chunk_size: usize,
+    /// Signing key for chunk signatures
+    signing_key: [u8; 32],
+    /// AMZ date string (format: 20060102T150405Z)
+    amz_date: String,
+    /// Credential scope string
+    credential_scope: String,
+    /// Previous signature (starts with seed signature)
+    prev_signature: String,
+    /// Trailer name (e.g., "x-amz-checksum-sha256")
+    trailer_name: String,
+    /// Running SHA256 hash of the payload
+    checksum_hasher: openssl::hash::Hasher,
+    /// Internal buffer for encoded chunks
+    buf: Vec<u8>,
+    /// Current read position in buf
+    buf_pos: usize,
+    /// State machine for body production
+    state: ChunkedBodyState,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ChunkedBodyState {
+    /// Emitting data chunks
+    DataChunks,
+    /// Emitting the final 0-byte chunk
+    FinalEmptyChunk,
+    /// Emitting trailing headers
+    Trailers,
+    /// Done
+    Done,
+}
+
+impl AwsChunkedTrailerBody {
+    pub fn new(
+        data: Bytes,
+        chunk_size: usize,
+        signing_key: [u8; 32],
+        amz_date: String,
+        credential_scope: String,
+        seed_signature: String,
+        trailer_name: String,
+    ) -> Self {
+        Self {
+            data,
+            data_pos: 0,
+            chunk_size,
+            signing_key,
+            amz_date,
+            credential_scope,
+            prev_signature: seed_signature,
+            trailer_name,
+            checksum_hasher: signer::create_sha256_hasher(),
+            buf: Vec::with_capacity(chunk_size + 256),
+            buf_pos: 0,
+            state: ChunkedBodyState::DataChunks,
+        }
+    }
+
+    fn fill_next_chunk(&mut self) -> bool {
+        self.buf.clear();
+        self.buf_pos = 0;
+
+        match self.state {
+            ChunkedBodyState::DataChunks => {
+                if self.data_pos >= self.data.len() {
+                    // No more data, move to final empty chunk
+                    self.state = ChunkedBodyState::FinalEmptyChunk;
+                    return self.fill_next_chunk();
+                }
+
+                let remaining = self.data.len() - self.data_pos;
+                let chunk_len = std::cmp::min(self.chunk_size, remaining);
+                let chunk_data = &self.data[self.data_pos..self.data_pos + chunk_len];
+                self.data_pos += chunk_len;
+
+                // Update running checksum
+                self.checksum_hasher.update(chunk_data).expect("Failed to update hasher");
+
+                // Sign the chunk
+                let chunk_sig = signer::sign_chunk(
+                    &self.signing_key,
+                    &self.amz_date,
+                    &self.credential_scope,
+                    &self.prev_signature,
+                    chunk_data,
+                );
+                self.prev_signature = chunk_sig.clone();
+
+                // Format: <hex-len>;chunk-signature=<sig>\r\n<data>\r\n
+                write!(
+                    &mut self.buf,
+                    "{:x};{}={}\r\n",
+                    chunk_len,
+                    AMZ_CHUNK_SIGNATURE_HEADER,
+                    chunk_sig
+                ).unwrap();
+                self.buf.extend_from_slice(chunk_data);
+                self.buf.extend_from_slice(b"\r\n");
+
+                true
+            }
+            ChunkedBodyState::FinalEmptyChunk => {
+                // Sign empty chunk
+                let empty_sig = signer::sign_chunk(
+                    &self.signing_key,
+                    &self.amz_date,
+                    &self.credential_scope,
+                    &self.prev_signature,
+                    &[],
+                );
+                self.prev_signature = empty_sig.clone();
+
+                // Format: 0;chunk-signature=<sig>\r\n
+                write!(     // TODO LND: Make sure we are not writing twice + check write performance
+                    &mut self.buf,
+                    "0;{}={}\r\n",
+                    AMZ_CHUNK_SIGNATURE_HEADER,
+                    empty_sig
+                ).unwrap();
+
+                self.state = ChunkedBodyState::Trailers;
+                true
+            }
+            ChunkedBodyState::Trailers => {
+                // Compute final checksum
+                let digest = self.checksum_hasher.finish().expect("Failed to finish hasher");
+                let checksum_b64 = BASE64_STANDARD.encode(&digest);
+
+                // Sign the trailer
+                let trailer_sig = signer::sign_trailer(
+                    &self.signing_key,
+                    &self.amz_date,
+                    &self.credential_scope,
+                    &self.prev_signature,
+                    &self.trailer_name,
+                    &checksum_b64,
+                );
+
+                // Format trailing headers:
+                // <trailer-name>:<value>\r\n
+                // x-amz-trailer-signature:<sig>\r\n
+                // \r\n
+                write!(     // TODO LND: Make sure we are not writing more than necessary + check write performance
+                    &mut self.buf,
+                    "{}:{}\r\n",
+                    self.trailer_name.to_lowercase(),
+                    checksum_b64
+                ).unwrap();
+                write!(     // TODO LND: Make sure we are not writing more than necessary + check write performance
+                    &mut self.buf,
+                    "{}:{}\r\n",
+                    AMZ_TRAILER_SIGNATURE,
+                    trailer_sig
+                ).unwrap();
+                self.buf.extend_from_slice(b"\r\n");
+
+                self.state = ChunkedBodyState::Done;
+                true
+            }
+            ChunkedBodyState::Done => false,
+        }
+    }
+
+    pub fn into_streaming_body(self) -> StreamingBody {
+        BodyExt::boxed(self)
+    }
+}
+
+impl Body for AwsChunkedTrailerBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        // If we have data remaining in the buffer, return it
+        if self.buf_pos < self.buf.len() {
+            let data = std::mem::take(&mut self.buf);
+            self.buf_pos = 0;
+            return Poll::Ready(Some(Ok(Frame::data(Bytes::from(data)))));
+        }
+
+        // Try to fill the next chunk
+        if self.fill_next_chunk() {
+            let data = std::mem::take(&mut self.buf);
+            self.buf_pos = 0;
+            Poll::Ready(Some(Ok(Frame::data(Bytes::from(data)))))
+        } else {
+            Poll::Ready(None)
         }
     }
 }
