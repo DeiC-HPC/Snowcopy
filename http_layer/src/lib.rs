@@ -1,8 +1,9 @@
 mod logging;
 mod signer;
+pub mod download;
 
 use crate::signer::CredentialScope;
-use anyhow::Result;
+use anyhow::{Error, Result};
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use http_body_util::combinators::BoxBody;
@@ -15,14 +16,17 @@ use hyper_util::{
 };
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::task;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
-use util_layer::cc_util::CcLoadAndTransfer;
+use util_layer::cc_util::{CcLoadAndTransfer, CommandCenterEvent};
 use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
 use util_layer::snow_errors::{S3Error, SnowCopyError};
 use util_layer::{FileInfo, SnowContext};
@@ -262,37 +266,6 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
 
-pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) -> Result<()> {
-    let mut header_map : HashMap<String, String> = HashMap::new();
-    header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
-
-    let req = create_and_sign_req(ctx, canonical_uri, query_uri,  None, Method::GET, &header_map)?;
-
-    let req_permit = req_sem.acquire().await.expect("Should never fail");
-    let resp = client.request(req).await?;
-    
-    let status = resp.status();
-    if !status.is_success() {
-        let s3_err = map_s3_error(resp).await;
-        return Err(s3_err.into());
-    }
-
-    let file_permit = file_sem.acquire().await.expect("Should never fail");
-    let mut file = File::create(&file_info.file_path).await?;
-    let mut body = resp.into_body();
-
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| anyhow::anyhow!("Body error: {}", e))?;
-        if let Some(data) = frame.data_ref() {
-            file.write_all(data).await?;
-        }
-    }
-    file.flush().await?;
-    drop(file_permit);
-    drop(req_permit);
-
-    Ok(())
-}
 
 pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, start: u64, end: u64) -> Result<PooledBuffer> {
     let total_range_size = (end - start + 1) as usize;

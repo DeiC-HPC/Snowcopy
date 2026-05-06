@@ -36,7 +36,7 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
     }
 }
 
-pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, path: &Path, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Arc<Semaphore>, Arc<Semaphore>, usize) {
+pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, download_file_concurrency_override: Option<usize>, path: &Path, cc_tx: UnboundedSender<CommandCenterEvent>, download : bool) -> (Arc<Semaphore>, Arc<Semaphore>, usize, usize) {
     let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, _filesystem) = detect(path);
 
     let buffer_pool_size: usize = {
@@ -125,6 +125,14 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
         }
     };
 
+    let download_file_concurrency = { //TODO JON: HDD, should have a lower number.
+        if let Some(dc_override) = download_file_concurrency_override {
+            dc_override
+        } else {
+            16
+        }
+    };
+
 
     let file_sem = Arc::new(Semaphore::new(file_limit));
     let req_sem = Arc::new(Semaphore::new(req_limit));
@@ -138,15 +146,25 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
         available_memory as f64 / (1024.0 * 1024.0 * 1024.0),
         max_network_speed.map(|s| format!("{}", s)).unwrap_or_else(|| "N/A".to_string())
     )));
-    let _ = cc_tx.send(CommandCenterEvent::Log(format!(
-        "<Init. tuning: file_limit: {}, req_limit: {}, buffer_pool_size: {:.2} GiB>",
-        file_limit,
-        req_limit,
-        buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0)
-    )));
 
+    if download {
+        let _ = cc_tx.send(CommandCenterEvent::Log(format!(
+            "<Init. tuning: file_limit: {}, req_limit: {}, buffer pool size: {:.2} GiB, download file concurrency: {}>",
+            file_limit,
+            req_limit,
+            buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0),
+            download_file_concurrency
+        )));
+    } else {
+        let _ = cc_tx.send(CommandCenterEvent::Log(format!(
+            "<Init. tuning: file_limit: {}, req_limit: {}, buffer_pool_size: {:.2} GiB>",
+            file_limit,
+            req_limit,
+            buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0)
+        )));
+    }
 
-    (file_sem, req_sem, buffer_pool_size)
+    (file_sem, req_sem, buffer_pool_size, download_file_concurrency)
 }
 
 fn canonicalize_for_compare(path: &Path) -> PathBuf {

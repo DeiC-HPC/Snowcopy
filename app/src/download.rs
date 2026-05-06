@@ -3,8 +3,10 @@ use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 use aws_layer::{async_head_objects_from_bucket, get_s3_mtime, AWSClient, S3Object};
 use http_layer::{BufferPool, PoolClient};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::fs::File;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use anyhow::Error;
@@ -17,6 +19,7 @@ use util_layer::{build_context, constants, FileInfo, SnowContext};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use util_layer::cc_util::{CcLoadAndTransfer, CommandCenterEvent};
+use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.
@@ -35,7 +38,7 @@ fn ensure_parent_dirs_exist(file_path: &Path, created_dirs: &mut HashSet<std::pa
     Ok(())
 }
 
-pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool, config: &util_layer::Config, destructive: bool) {
+pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &util_layer::Config, destructive: bool) {
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
@@ -45,8 +48,8 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
 
     let pool_client = Arc::new(http_layer::build_https_client());
     let snow_context = Arc::new(build_context(config.clone()));
-    let (file_sem, req_sem, buffer_pool_size) = auto_tune_semaphores(file_limit, req_limit, dest, cc_tx.clone());
-    let task_sem = Arc::new(Semaphore::new(500));
+    let (file_sem, req_sem, buffer_pool_size, download_file_concurrency) = auto_tune_semaphores(file_limit, req_limit, download_concurrency, dest, cc_tx.clone(), true);
+    let task_sem = Arc::new(Semaphore::new(req_sem.available_permits() * 2));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, DOWNLOAD_MULTIPART_THRESHOLD as usize));
 
     let mut created_dirs: HashSet<PathBuf> = HashSet::new();
@@ -71,7 +74,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
 
         let permit = task_sem.clone().acquire_owned().await.unwrap();
         join_set.spawn(async move {
-            download_object(bucket, pool_client, snow_context, object, file_sem, req_sem, cc_tx, buffer_pool).await;
+            download_object(bucket, pool_client, snow_context, object, file_sem, req_sem, cc_tx, buffer_pool, download_file_concurrency).await;
             drop(permit);
         });
     }
@@ -169,7 +172,7 @@ fn should_download_object(object: &mut S3Object, destructive: bool) -> (bool, bo
     (needs_download, should_skip)
 }
 
-async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, buffer_pool: Arc<BufferPool>) {
+async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, buffer_pool: Arc<BufferPool>, download_file_concurrency: usize) {
     if object.size > DOWNLOAD_MULTIPART_THRESHOLD {
         // fancy pantsy multipart download...
         let file_path = object.local_path.clone();
@@ -177,14 +180,24 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
         let key = object.key.clone();
         let total_size = object.size as u64;
 
-        //TODO Jon: Right now we rely on file::seek to extend the file. We should consider if we should not just preallocate the file here.
-        //TODO Jon: It works because the specific tokio implementation handles seeking outside the current file limit like we want it to.
-        if let Err(e) = tokio::fs::File::create(&file_path).await {
-            cc_sender.send(CommandCenterEvent::Log(format!("Failed to create file {:?}: {}", file_path, e))).expect("Failed to send message. This should never happen.");
-            return;
+
+        let file = match File::create(&file_path) {
+            Ok(f) => f,
+            Err(e) => {
+                cc_sender.send(CommandCenterEvent::Log(format!("Failed to create file {:?}: {}", file_path, e))).expect("Failed to send message. This should never happen.");
+                return; //TODO JON: panic?
+            }
+        };
+
+        if let Err(e) = file.set_len(total_size) {
+            cc_sender.send(CommandCenterEvent::Log(format!("Failed to truncate file {:?} to {}: {}", file_path, total_size, e))).expect("Failed to send message. This should never happen.");
+            return; //TODO JON: panic
         }
 
-        let chunk_size = DOWNLOAD_MULTIPART_THRESHOLD as u64;
+        let mut file = Arc::new(file);
+
+        let ideal_chunk_size = total_size.div_ceil(download_file_concurrency as u64);
+        let chunk_size = std::cmp::max(ideal_chunk_size, DOWNLOAD_MULTIPART_THRESHOLD as u64);
         let num_parts = (total_size + chunk_size - 1) / chunk_size;
 
         let mut download_set = JoinSet::new();
@@ -200,6 +213,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
             let canonical_uri = Arc::new(format!("/{}/{}", &bucket, key));
             let query_uri = String::new();
             let file_path = file_path.clone();
+            let file = file.clone();
 
             let buffer_pool = buffer_pool.clone();
 
@@ -215,8 +229,10 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                     let file_path = file_path.clone();
                     let buffer_pool = buffer_pool.clone();
                     let cc_sender = cc_sender.clone();
+                    let file = file.clone();
                     async move {
-                        download_part(start, end, snow_context, &pool_client, req_sem, file_sem, canonical_uri, &query_uri, &file_path, buffer_pool, cc_sender).await
+                        //download_part_buffered(start, end, snow_context, &pool_client, req_sem, file_sem, canonical_uri, &query_uri, &file_path, buffer_pool).await
+                        http_layer::download::download_file_range(start, end, snow_context, &pool_client, req_sem, canonical_uri, &query_uri, &file_path, file).await
                     }
                 }, cc_sender.clone(), |e: &anyhow::Error| {
                     if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
@@ -248,6 +264,11 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
             }
         }
 
+        if let Err(e) = file.flush() {
+            cc_sender.send(CommandCenterEvent::Log(format!("Failed to flush file {:?}: {}", file_path, e))).expect("Failed to send message. This should never happen.");
+            return;
+        }
+
         cc_sender.send(CommandCenterEvent::FileTransferred(total_size)).unwrap();
         update_mod_time_on_file(&object, &cc_sender);
 
@@ -272,7 +293,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
             let file_sem = file_sem.clone();
             let req_sem = req_sem.clone();
             async move {
-                http_layer::get_file(snow_context, file_info, &pool_client, canonical_uri, &query_uri, file_sem, req_sem).await
+                http_layer::download::get_file(snow_context, file_info, &pool_client, canonical_uri, &query_uri, file_sem, req_sem).await
             }
         }, cc_sender.clone(), |e: &anyhow::Error| {
             if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
@@ -304,7 +325,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
     }
 }
 
-async fn download_part(start: u64, end: u64, snow_context: Arc<SnowContext>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, file_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, file_path: &PathBuf, buffer_pool: Arc<BufferPool>, cc_sender: UnboundedSender<CommandCenterEvent>) -> Result<u64, Error> {
+async fn download_part_buffered(start: u64, end: u64, snow_context: Arc<SnowContext>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, file_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, file_path: &PathBuf, buffer_pool: Arc<BufferPool>) -> Result<u64, Error> {
     let data = http_layer::get_file_range(snow_context, &pool_client, buffer_pool, canonical_uri, &query_uri, req_sem, start, end).await?;
 
     let _file_permit = file_sem.acquire().await.expect("Should never fail");
