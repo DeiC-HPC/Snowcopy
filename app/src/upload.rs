@@ -17,7 +17,7 @@ use util_layer::retry::retry_on_failure_async;
 use util_layer::{build_context, constants, Config, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
-pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool, config: &Config, destructive: bool, trailing: bool) {
+pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool, config: &Config, destructive: bool, trailing: bool, trailing_small: bool) {
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
@@ -40,7 +40,7 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
         files_to_upload_channel = check_already_exists(&bucket, &cc_tx, client.clone(), files_to_upload_channel, req_sem.clone(), destructive);
     }
     while let Some(result) = files_to_upload_channel.recv().await {
-        upload_file_async_and_add_to_handles(result, context_arc.clone(), bucket.clone(), client.clone(), hyper_client.clone(), file_sem.clone(), req_sem.clone(), task_sem.clone(), buffer_pool.clone(), cc_tx.clone(), &mut handles, trailing).await;
+        upload_file_async_and_add_to_handles(result, context_arc.clone(), bucket.clone(), client.clone(), hyper_client.clone(), file_sem.clone(), req_sem.clone(), task_sem.clone(), buffer_pool.clone(), cc_tx.clone(), &mut handles, trailing, trailing_small).await;
     }
 
     join_all(handles).await;
@@ -78,13 +78,14 @@ async fn upload_file_async_and_add_to_handles(
     cc_tx: UnboundedSender<CommandCenterEvent>,
     handles: &mut Vec<JoinHandle<()>>,
     trailing: bool,
+    trailing_small: bool
 ) {
     match result {
         Ok(file_info) => {
             let file_info_arc = Arc::new(file_info);
             let permit = task_sem.acquire_owned().await.unwrap();
             let handle = tokio::spawn(async move {
-                upload_file(ctx, bucket, client, hyper_client, file_info_arc, file_sem, req_sem, buffer_pool, cc_tx, trailing).await;
+                upload_file(ctx, bucket, client, hyper_client, file_info_arc, file_sem, req_sem, buffer_pool, cc_tx, trailing, trailing_small).await;
                 drop(permit);
             });
             handles.push(handle);
@@ -95,11 +96,11 @@ async fn upload_file_async_and_add_to_handles(
     }
 }
 
-async fn upload_file(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>, trailing: bool) {
+async fn upload_file(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>, trailing: bool, trailing_small: bool) {
     if file_info.file_size > constants::CHUNK_SIZE {
         upload_with_multipart(ctx, bucket, aws_client, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender, trailing).await;
     } else {
-        small_file_upload(ctx, bucket, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender, trailing).await;
+        small_file_upload(ctx, bucket, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender, trailing_small).await;
     }
 }
 
@@ -148,7 +149,11 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
                 let canonical_uri = canonical_uri_cloned.clone();
                 let query_uri = query_uri.clone();
                 async move {
-                    http_layer::put_file_range(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri, trailing).await
+                    if trailing {
+                        http_layer::put_file_range_streaming(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri).await
+                    } else {
+                        http_layer::put_file_range(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
+                    }
                 }
             }, sender_cloned.clone(), |e: &anyhow::Error| {
                 if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
@@ -197,7 +202,11 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
         let canonical_uri = canonical_uri.clone();
         let query_uri = query_uri.clone();
         async move {
-            http_layer::put_file(ctx, file_info, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri, trailing).await
+            if trailing { 
+                http_layer::put_file_streaming(ctx, file_info, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri).await
+            } else {
+                http_layer::put_file(ctx, file_info, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
+            }
         }
     }, sender.clone(), |e: &anyhow::Error| {
         if let Some(snow_err) = e.downcast_ref::<SnowCopyError>() {

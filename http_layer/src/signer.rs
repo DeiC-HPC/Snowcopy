@@ -159,10 +159,8 @@ pub fn sign_chunk(
     amz_date: &str,
     credential_scope: &str,
     prev_signature: &str,
-    chunk_data: &[u8],
+    chunk_hash: &str,
 ) -> String {
-    let chunk_hash = sha256_hex(chunk_data);
-
     let string_to_sign = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         AWS_CHUNK_PAYLOAD_ALGORITHM,
@@ -205,7 +203,7 @@ pub fn sign_trailer(
 /// Calculates the total encoded Content-Length for aws-chunked + SigV4 streaming with trailing headers
 pub fn aws_chunked_trailer_encoded_length(
     decoded_len: u64,
-    chunk_size: usize,
+    chunk_size: u64,
     trailer_name: &str,
     trailer_value_len: usize,
 ) -> u64 {
@@ -217,7 +215,7 @@ pub fn aws_chunked_trailer_encoded_length(
     // 1) Payload chunks
     let mut remain = decoded_len;
     while remain > 0 {
-        let n = std::cmp::min(chunk_size as u64, remain);
+        let n = std::cmp::min(chunk_size, remain);
         remain -= n;
 
         let hex_digits = format!("{:x}", n).len() as u64;
@@ -233,6 +231,7 @@ pub fn aws_chunked_trailer_encoded_length(
     total += 1;                  // "0"
     total += sig_header_overhead; // ";chunk-signature=<sig>"
     total += 2;                  // "\r\n" after header line
+    total += 2;                  // "\r\n" empty line before trailers
 
     // 3) Trailing headers (raw, NOT in a chunk wrapper):
     //    "<trailerName>:<value>\r\n"

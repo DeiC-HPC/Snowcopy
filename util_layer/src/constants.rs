@@ -14,7 +14,7 @@ pub const DISCOVERY_LIMIT_DOWNLOAD: u64 = 5000;
 pub const METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD: u64 = 1000;
 pub const DISCOVERY_LIMIT_UPLOAD: u64 = 5000;
 pub const METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_UPLOAD: u64 = 1000;
-pub const MAX_RETRY: u32 = 10;
+pub const MAX_RETRY: u32 = 0;
 
 //Trailing header
 pub const AWS_CHUNK_PAYLOAD_ALGORITHM: &str = "AWS4-HMAC-SHA256-PAYLOAD";
@@ -23,4 +23,4 @@ pub const AMZ_STREAMING_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAI
 pub const AMZ_CHUNK_SIGNATURE_HEADER: &str = "chunk-signature";
 pub const AMZ_CHECKSUM_SHA256: &str = "x-amz-checksum-sha256";
 pub const AMZ_TRAILER_SIGNATURE: &str = "x-amz-trailer-signature";
-pub const AWS_TRAILER_CHUNK_SIZE: usize = 5 * 1024 * 1024;
+pub const STREAMING_READ_BUFFER_SIZE: u64 = 128 * 1024;
