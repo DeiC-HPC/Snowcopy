@@ -312,14 +312,8 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
                 if let Some(data) = frame.data_ref() {
                     let offset = (sub_start - start) as usize + sub_data_len;
                     // SAFETY: each spawn writes to a unique non-overlapping range in the buffer.
-                    //TODO JON: This is something we should consider carefully. But I think the functionality is nice
-                    //and I trust that it is very testable. Thus we should be confident that there are no memory leaks and that
-                    // we don't write into wrong memory.
-                    //Ideally we can rewrite the code in some way where there is no copying. Perhaps just do 1MB slices?
-                    //Dunno, having less writers running simultaneously, I think, is to our benefit. We are faster than the
-                    //golang implementation where each file is split up into 5MB chunks and a goroutine is assigned the transfer
-                    //and disk writing for each chunk. I like the idea here better, where one disk writer is supported by multiple
-                    //networking threads
+                    //TODO JON: I believe we don't need the unsafe. If we decide to go this direction, then slices should be used instead
+
                     unsafe {
                         let dst = (buffer_ptr as *mut u8).add(offset);
                         std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());

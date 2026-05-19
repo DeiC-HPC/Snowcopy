@@ -47,7 +47,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
 
     let pool_client = Arc::new(http_layer::build_https_client());
     let snow_context = Arc::new(build_context(config.clone()));
-    let (file_sem, req_sem, buffer_pool_size, download_file_concurrency) = auto_tune_semaphores(file_limit, req_limit, download_concurrency, dest, cc_tx.clone(), true);
+    let (file_sem, req_sem, _buffer_pool_size, download_file_concurrency) = auto_tune_semaphores(file_limit, req_limit, download_concurrency, dest, cc_tx.clone(), true);
     let task_sem = Arc::new(Semaphore::new(req_sem.available_permits() * 2));
 
     let mut created_dirs: HashSet<PathBuf> = HashSet::new();
@@ -318,6 +318,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
     }
 }
 
+#[allow(dead_code)]
 async fn download_part_buffered(start: u64, end: u64, snow_context: Arc<SnowContext>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, file_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, file_path: &PathBuf, buffer_pool: Arc<BufferPool>) -> Result<u64, Error> {
     let data = http_layer::get_file_range(snow_context, &pool_client, buffer_pool, canonical_uri, &query_uri, req_sem, start, end).await?;
 
@@ -333,6 +334,7 @@ async fn download_part_buffered(start: u64, end: u64, snow_context: Arc<SnowCont
     Ok(data.len as u64)
 }
 
+#[allow(dead_code)]
 fn update_mod_time_on_file(object: &S3Object, cc_sender: &UnboundedSender<CommandCenterEvent>) { //TODO JON: should we retry? I think this should never fail, in practice, unless some other program takes write of the file and then we dont want to update mtime anyways
     if let Some(mtime) = object.modified_time {
         match fs::OpenOptions::new().write(true).open(&object.local_path) {
