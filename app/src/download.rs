@@ -1,25 +1,24 @@
 use crate::auto_tuning::auto_tune_semaphores;
 use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
+use anyhow::Error;
 use aws_layer::{async_head_objects_from_bucket, get_s3_mtime, AWSClient, S3Object};
 use http_layer::{BufferPool, PoolClient};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use anyhow::Error;
 use tokio::sync::mpsc::{self, Receiver, UnboundedSender};
 use tokio::sync::Semaphore;
-use util_layer::snow_errors::SnowCopyError;
 use util_layer::retry::retry_on_failure_async;
+use util_layer::snow_errors::SnowCopyError;
 use util_layer::{build_context, constants, FileInfo, SnowContext};
 
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use util_layer::cc_util::{CcLoadAndTransfer, CommandCenterEvent};
-use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.
@@ -50,7 +49,6 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     let snow_context = Arc::new(build_context(config.clone()));
     let (file_sem, req_sem, buffer_pool_size, download_file_concurrency) = auto_tune_semaphores(file_limit, req_limit, download_concurrency, dest, cc_tx.clone(), true);
     let task_sem = Arc::new(Semaphore::new(req_sem.available_permits() * 2));
-    let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, DOWNLOAD_MULTIPART_THRESHOLD as usize));
 
     let mut created_dirs: HashSet<PathBuf> = HashSet::new();
     let mut join_set = JoinSet::new();
@@ -70,11 +68,10 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
         let req_sem = req_sem.clone();
         let task_sem = task_sem.clone();
         let cc_tx = cc_tx.clone();
-        let buffer_pool = buffer_pool.clone();
 
         let permit = task_sem.clone().acquire_owned().await.unwrap();
         join_set.spawn(async move {
-            download_object(bucket, pool_client, snow_context, object, file_sem, req_sem, cc_tx, buffer_pool, download_file_concurrency).await;
+            download_object(bucket, pool_client, snow_context, object, file_sem, req_sem, cc_tx, download_file_concurrency).await;
             drop(permit);
         });
     }
@@ -172,7 +169,7 @@ fn should_download_object(object: &mut S3Object, destructive: bool) -> (bool, bo
     (needs_download, should_skip)
 }
 
-async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, buffer_pool: Arc<BufferPool>, download_file_concurrency: usize) {
+async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, download_file_concurrency: usize) {
     if object.size > DOWNLOAD_MULTIPART_THRESHOLD {
         // fancy pantsy multipart download...
         let file_path = object.local_path.clone();
@@ -209,13 +206,9 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
             let snow_context = snow_context.clone();
             let pool_client = pool_client.clone();
             let req_sem = req_sem.clone();
-            let file_sem = file_sem.clone();
             let canonical_uri = Arc::new(format!("/{}/{}", &bucket, key));
             let query_uri = String::new();
-            let file_path = file_path.clone();
             let file = file.clone();
-
-            let buffer_pool = buffer_pool.clone();
 
             let cc_sender = cc_sender.clone();
             download_set.spawn(async move {
@@ -223,16 +216,11 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                     let snow_context = snow_context.clone();
                     let pool_client = pool_client.clone();
                     let req_sem = req_sem.clone();
-                    let file_sem = file_sem.clone();
                     let canonical_uri = canonical_uri.clone();
                     let query_uri = query_uri.clone();
-                    let file_path = file_path.clone();
-                    let buffer_pool = buffer_pool.clone();
-                    let cc_sender = cc_sender.clone();
                     let file = file.clone();
                     async move {
-                        //download_part_buffered(start, end, snow_context, &pool_client, req_sem, file_sem, canonical_uri, &query_uri, &file_path, buffer_pool).await
-                        http_layer::download::download_file_range(start, end, snow_context, &pool_client, req_sem, canonical_uri, &query_uri, &file_path, file).await
+                        http_layer::download::download_file_range(start, end, snow_context, &pool_client, req_sem, canonical_uri, &query_uri, file).await
                     }
                 }, cc_sender.clone(), |e: &anyhow::Error| {
                     if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
@@ -268,9 +256,15 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
             cc_sender.send(CommandCenterEvent::Log(format!("Failed to flush file {:?}: {}", file_path, e))).expect("Failed to send message. This should never happen.");
             return;
         }
+        if let Some(mtime) = object.modified_time { //TODO JON: error handling. Do we want to retry? When would this ever happen
+            if let Err(e) = file.set_modified(mtime) {
+                cc_sender.send(CommandCenterEvent::Log(format!("Failed to set modified time for file {:?}: {}", file_path, e))).expect("Failed to send message. This should never happen.");
+                return;
+            }
+        }
 
         cc_sender.send(CommandCenterEvent::FileTransferred(total_size)).unwrap();
-        update_mod_time_on_file(&object, &cc_sender);
+
 
     } else {
         //simple download
@@ -315,7 +309,6 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                 cc_sender.send(CommandCenterEvent::PartTransferred(transfer_metrics)).unwrap();
                 cc_sender.send(CommandCenterEvent::FileTransferred(object.size as u64)).unwrap();
 
-                update_mod_time_on_file(&object, &cc_sender);
                 //cc_sender.send(CommandCenterEvent::Log(format!("Successfully downloaded {}", object.key))).unwrap();
             }
             Err(e) => {

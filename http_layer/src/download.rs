@@ -1,29 +1,21 @@
+use crate::{create_and_sign_req, map_s3_error, signer, PoolClient};
+use anyhow::Error;
+use http_body_util::BodyExt;
+use hyper::Method;
 use std::collections::HashMap;
 use std::fs::File;
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::io::Write;
-use anyhow::Error;
-use tokio::sync::Semaphore;
-use util_layer::cc_util::CommandCenterEvent;
-use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
-use util_layer::{FileInfo, SnowContext};
-use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full, StreamBody};
-use hyper::body::Frame;
-use hyper::{Method, Request, Uri};
-use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
-    rt::TokioExecutor,
-};
 #[cfg(unix)]
 use std::os::unix::fs::FileExt;
 #[cfg(windows)]
 use std::os::windows::fs::FileExt;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use tokio::task;
-use crate::{create_and_sign_req, map_s3_error, signer, PoolClient};
+use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
+use util_layer::{FileInfo, SnowContext};
 
-pub async fn download_file_range(start: u64, end: u64, snow_context: Arc<SnowContext>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, file_path: &PathBuf, fd : Arc<File>) -> std::result::Result<u64, Error> {
+pub async fn download_file_range(start: u64, end: u64, snow_context: Arc<SnowContext>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, fd : Arc<File>) -> std::result::Result<u64, Error> {
     let range = format!("bytes={}-{}", start, end);
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
@@ -81,7 +73,7 @@ fn write_at_offset(file: &File, data: &[u8], offset: u64) -> std::io::Result<usi
     file.seek_write(data, offset)
 }
 
-pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) -> anyhow::Result<()> {
+pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) -> Result<(), Error> {
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
 
@@ -97,7 +89,6 @@ pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
     }
 
     let file_permit = file_sem.acquire().await.expect("Should never fail");
-
 
     let mut body = resp.into_body();
     let path = file_info.file_path.clone();
@@ -121,10 +112,14 @@ pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
         }
     }
 
-
     // Final flush and close happen in the blocking pool.
     task::spawn_blocking(move || -> std::io::Result<()> {
         file.flush()?;
+
+        if let Some(mtime) = file_info.modified_time {
+            file.set_modified(mtime)?;
+        }
+
         drop(file);
         Ok(())
     })

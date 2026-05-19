@@ -3,7 +3,7 @@ mod signer;
 pub mod download;
 
 use crate::signer::CredentialScope;
-use anyhow::{Error, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use futures_util::TryStreamExt;
 use http_body_util::combinators::BoxBody;
@@ -16,17 +16,14 @@ use hyper_util::{
 };
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Semaphore};
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::task;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
-use util_layer::cc_util::{CcLoadAndTransfer, CommandCenterEvent};
+use util_layer::cc_util::CcLoadAndTransfer;
 use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
 use util_layer::snow_errors::{S3Error, SnowCopyError};
 use util_layer::{FileInfo, SnowContext};

@@ -129,7 +129,7 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
         if let Some(dc_override) = download_file_concurrency_override {
             dc_override
         } else {
-            16
+            100
         }
     };
 
