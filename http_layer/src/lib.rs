@@ -27,9 +27,9 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use tokio_util::io::ReaderStream;
 use util_layer::cc_util::CcLoadAndTransfer;
-use util_layer::constants::{AMZ_CHECKSUM_SHA256, AMZ_CHUNK_SIGNATURE_HEADER, AMZ_STREAMING_TRAILER, AMZ_TRAILER_SIGNATURE, AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256, STREAMING_READ_BUFFER_SIZE};
+use util_layer::constants::{AMZ_CHECKSUM_SHA256, AMZ_CHUNK_SIGNATURE_HEADER, AMZ_STREAMING_TRAILER, AMZ_TRAILER_SIGNATURE, AWS_ALGORITHM, CHUNKSIGNATURE_LENGTH, EMPTY_PAYLOAD_SHA256};
 use util_layer::snow_errors::{S3Error, SnowCopyError};
-use util_layer::{FileInfo, SnowContext};
+use util_layer::{FileInfo, SnowContext, TrailingInfo};
 
 const READ_BUFFER_SIZE: usize = 256 * 1024;
 pub struct BufferPool {
@@ -169,7 +169,7 @@ pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, fro
     Ok((etag.unwrap(), transfer_metrics))
 }
 
-pub async fn put_file_streaming(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String) -> Result<CcLoadAndTransfer> {
+pub async fn put_file_streaming(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, chunk_size: u64) -> Result<CcLoadAndTransfer> {
     let file_permit_start = Instant::now();
     let file_lock = file_sem.acquire().await?;
     let file_permit_elapsed = file_permit_start.elapsed();
@@ -183,6 +183,7 @@ pub async fn put_file_streaming(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>,
         query_uri,
         file,
         file_info.file_size,
+        chunk_size,
     )?;
 
     let file_work_elapsed = file_work_start.elapsed();
@@ -228,6 +229,7 @@ pub async fn put_file_range_streaming(
     req_sem: Arc<Semaphore>,
     canonical_uri: Arc<String>,
     query_uri: &String,
+    trailing_info: TrailingInfo
 ) -> Result<(String, CcLoadAndTransfer)> {
     let file_permit_start = Instant::now();
     let file_lock = file_sem.acquire().await?;
@@ -246,6 +248,7 @@ pub async fn put_file_range_streaming(
         query_uri,
         file,
         amount,
+        trailing_info.trailing_chunk_size
     )?;
 
     let file_work_elapsed = file_work_start.elapsed();
@@ -547,6 +550,7 @@ fn create_streaming_req_trailing_checksum(
     query_uri: &String,
     file: File,
     file_size: u64,
+    chunk_size: u64,
 ) -> Result<Request<StreamingBody>> {
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
@@ -576,7 +580,7 @@ fn create_streaming_req_trailing_checksum(
 
     let encoded_len = signer::aws_chunked_trailer_encoded_length(
         file_size,
-        STREAMING_READ_BUFFER_SIZE,
+        chunk_size,
         AMZ_CHECKSUM_SHA256,
         44,
     );
@@ -608,6 +612,7 @@ fn create_streaming_req_trailing_checksum(
         credential_scope_str,
         seed_signature,
         AMZ_CHECKSUM_SHA256.to_string(),
+        chunk_size
     );
 
     let body: StreamingBody = streaming_body.into_streaming_body();
@@ -688,10 +693,10 @@ pub struct StreamingFileChunkedBodyInner {
     final_checksum: Option<String>,
     /// Buffer for holding read data
     read_buf: Vec<u8>,
-    /// Buffer for writing aws-chunked encoded output
-    out_buf: Vec<u8>,
     /// Current read position in buf
     state: StreamingChunkedState,
+    /// Chunk size (in kB)
+    chunk_size: u64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -715,6 +720,7 @@ impl StreamingFileChunkedBody {
         credential_scope: String,
         seed_signature: String,
         trailer_name: String,
+        chunk_size: u64,
     ) -> Self {
         Self {
             inner: StreamingFileChunkedBodyInner {
@@ -727,9 +733,9 @@ impl StreamingFileChunkedBody {
                 trailer_name,
                 checksum_hasher: Some(signer::create_sha256_hasher()),
                 final_checksum: None,
-                read_buf: vec![0u8; STREAMING_READ_BUFFER_SIZE as usize],
-                out_buf: Vec::with_capacity((STREAMING_READ_BUFFER_SIZE as usize) + 256),
+                read_buf: Vec::with_capacity((chunk_size + 256) as usize),
                 state: StreamingChunkedState::Reading,
+                chunk_size,
             }
         }
     }
@@ -737,14 +743,28 @@ impl StreamingFileChunkedBody {
     pub fn into_streaming_body(self) -> StreamingBody {
         BodyExt::boxed(self)
     }
+
+    fn extract_bytes_read_digits(bytes_read: usize) -> usize {
+        match bytes_read {
+            0..=0xF => 1,
+            0..=0xFF => 2,
+            0..=0xFFF => 3,
+            0..=0xFFFF => 4,
+            0..=0xF_FFFF => 5,
+            0..=0xFF_FFFF => 6,
+            0..=0xFFF_FFFF => 7,
+            0..=0xFFFF_FFFF => 8,
+            0..=0xF_FFFF_FFFF => 9,
+            _ => 10,    // TODO LND: What is the max digit size for a max chunk size?
+        }
+    }
 }
 
 impl StreamingFileChunkedBodyInner {
 
-    fn format_data_chunk(&mut self, bytes_read: usize) {
-        self.out_buf.clear();
+    fn format_data_chunk(&mut self, data_index: usize, bytes_read: usize) {
 
-        let chunk_data = &self.read_buf[..bytes_read];
+        let chunk_data = &self.read_buf[data_index..data_index + bytes_read];
 
         let chunk_hash = sha256_hex(chunk_data);
 
@@ -755,22 +775,23 @@ impl StreamingFileChunkedBodyInner {
             &self.prev_signature,
             chunk_hash.as_str(),
         );
-        self.prev_signature = chunk_sig.clone();
 
+        // Prepend 0..data_index
         write!(
-            &mut self.out_buf,
+            &mut self.read_buf[0..],
             "{:x};{}={}\r\n",
             bytes_read,
             AMZ_CHUNK_SIGNATURE_HEADER,
-            chunk_sig
+            &chunk_sig
         ).unwrap();
-        self.out_buf.extend_from_slice(chunk_data);
-        self.out_buf.extend_from_slice(b"\r\n");
+        
+        // Append data_index+bytes_read..EOF
+        self.read_buf[data_index + bytes_read] = b'\r';
+        self.read_buf[data_index + bytes_read + 1] = b'\n';
+        self.prev_signature = chunk_sig;
     }
 
     fn format_final_chunk(&mut self) {
-        self.out_buf.clear();
-
         // Finalize the checksum now, before we need it for trailers
         if let Some(mut hasher) = self.checksum_hasher.take() {
             let digest = hasher.finish().expect("Failed to finish hasher");
@@ -782,12 +803,12 @@ impl StreamingFileChunkedBodyInner {
             &self.amz_date,
             &self.credential_scope,
             &self.prev_signature,
-            &*sha256_hex(&[]),  // TODO LND: Empty chunk hash can be hardcoded
+            EMPTY_PAYLOAD_SHA256,
         );
         self.prev_signature = empty_sig.clone();
 
         write!(
-            &mut self.out_buf,
+            &mut self.read_buf,
             "0;{}={}\r\n\r\n",
             AMZ_CHUNK_SIGNATURE_HEADER,
             empty_sig
@@ -795,8 +816,6 @@ impl StreamingFileChunkedBodyInner {
     }
 
     fn format_trailers(&mut self) {
-        self.out_buf.clear();
-
         let checksum_b64 = self.final_checksum.as_ref()
             .expect("Checksum should have been computed in format_final_chunk");
 
@@ -810,7 +829,7 @@ impl StreamingFileChunkedBodyInner {
         );
 
         write!(
-            &mut self.out_buf,
+            &mut self.read_buf,
             "{}:{}\r\n{}:{}\r\n\r\n",
             self.trailer_name.to_lowercase(),
             checksum_b64,
@@ -835,13 +854,18 @@ impl Body for StreamingFileChunkedBody {
         loop {
             match inner.state {
                 StreamingChunkedState::Reading => {
+                    inner.read_buf.clear();
                     if inner.remaining == 0 {
                         inner.state = StreamingChunkedState::FinalChunk;
                         continue;
                     }
 
-                    let to_read = std::cmp::min(STREAMING_READ_BUFFER_SIZE, inner.remaining) as usize;
-                    let buf = &mut inner.read_buf[..to_read];
+                    let to_read = std::cmp::min(inner.chunk_size, inner.remaining) as usize;
+                    let to_read_digits = Self::extract_bytes_read_digits(to_read);
+                    let data_index = to_read_digits + CHUNKSIGNATURE_LENGTH;            // "<data_index>;chunk-signature=<FixedLengthChunkSignature>\r\n"
+                    inner.read_buf.resize(data_index + to_read + 2, 0);     // Resize to ChunkSignature + Data length + "\r\n"
+                    inner.read_buf.truncate(data_index + to_read + 2);
+                    let buf = &mut inner.read_buf[data_index..data_index + to_read];    // Buf is offset to reserve space for chunk signature
                     let mut read_buf = tokio::io::ReadBuf::new(buf);
 
                     // Get the file - we need to pin it for poll_read
@@ -850,6 +874,10 @@ impl Body for StreamingFileChunkedBody {
                     match file.poll_read(cx, &mut read_buf) {
                         Poll::Ready(Ok(())) => {
                             let bytes_read = read_buf.filled().len();
+
+                            if bytes_read != to_read {
+                                panic!("Expected to read {} bytes, but read {} bytes", to_read, bytes_read);
+                            }
 
                             if bytes_read == 0 {
                                 // EOF
@@ -860,9 +888,9 @@ impl Body for StreamingFileChunkedBody {
                             inner.checksum_hasher.as_mut().expect("Hasher should have been created").update(read_buf.filled()).expect("Failed to update SHA256 hasher");
 
                             inner.remaining -= bytes_read as u64;
-                            inner.format_data_chunk(bytes_read);
+                            inner.format_data_chunk(data_index, bytes_read);
 
-                            let data = std::mem::take(&mut inner.out_buf);
+                            let data = std::mem::take(&mut inner.read_buf);
                             return Poll::Ready(Some(Ok(Frame::data(Bytes::from(data)))));
                         }
                         Poll::Ready(Err(e)) => {
@@ -877,14 +905,14 @@ impl Body for StreamingFileChunkedBody {
                 StreamingChunkedState::FinalChunk => {
                     inner.format_final_chunk();
                     inner.state = StreamingChunkedState::Trailers;
-                    let data = std::mem::take(&mut inner.out_buf);
+                    let data = std::mem::take(&mut inner.read_buf);
                     return Poll::Ready(Some(Ok(Frame::data(Bytes::from(data)))));
                 }
 
                 StreamingChunkedState::Trailers => {
                     inner.format_trailers();
                     inner.state = StreamingChunkedState::Done;
-                    let data = std::mem::take(&mut inner.out_buf);
+                    let data = std::mem::take(&mut inner.read_buf);
                     return Poll::Ready(Some(Ok(Frame::data(Bytes::from(data)))));
                 }
 

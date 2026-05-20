@@ -14,11 +14,12 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
-use util_layer::{constants, Config};
+use util_layer::{constants, Config, TrailingInfo};
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
 #[cfg(not(target_env = "msvc"))]
 use jemallocator::Jemalloc;
+use util_layer::constants::STREAMING_READ_BUFFER_SIZE;
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -43,6 +44,7 @@ async fn main() -> Result<()> {
     let destructive = matches.get_flag("destructive");
     let trailing = matches.get_flag("trailing");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
     let trailing_small = matches.get_flag("trailing-small");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
+    let trailing_chunk_size = matches.get_one::<usize>("trailing-chunk-size").copied(); // TODO LND: Possibly a temporary flag
 
     let path = Path::new(path_as_string);
     let arc_bucket = Arc::new(bucket.to_string());
@@ -58,8 +60,13 @@ async fn main() -> Result<()> {
             TransferMethod::TransferManager => transfer_manager::download(arc_bucket, path, silent, stats, &config, req_limit).await,
         }
     } else {
+        let trailing_info = TrailingInfo {
+            trailing_chunk_size: trailing_chunk_size.unwrap_or(STREAMING_READ_BUFFER_SIZE as usize) as u64 * 1024,
+            trailing,
+            trailing_small,
+        };
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive, trailing, trailing_small).await,
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive, trailing_info).await,
             TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config, req_limit).await,
         };
     }
@@ -98,14 +105,6 @@ async fn gather_credentials() -> Config {
 enum TransferMethod {
     CephS3Tokio,
     TransferManager,
-}
-
-fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
-    match method {
-        Some("o1") => Some(TransferMethod::CephS3Tokio),
-        Some("o2") => Some(TransferMethod::TransferManager),
-        _other => None,
-    }
 }
 
 fn parse_arguments() -> ArgMatches {
@@ -209,9 +208,26 @@ fn parse_arguments() -> ArgMatches {
                 .required(false)
                 .action(clap::ArgAction::SetTrue)
         )
+        .arg(
+            Arg::new("trailing-chunk-size")
+                .long("trailing-chunk-size")
+                .value_name("NUMBER")
+                .help("Size of chunks used for trailing header operations in kB")
+                .required(false)
+                .value_parser(clap::value_parser!(usize))
+                .num_args(1),
+        )
         .after_help("Upload example:\n  snowplowRust -b bucket-name path/to/source")
         .get_matches();
     matches
+}
+
+fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
+    match method {
+        Some("o1") => Some(TransferMethod::CephS3Tokio),
+        Some("o2") => Some(TransferMethod::TransferManager),
+        _other => None,
+    }
 }
 
 fn init_logging() {

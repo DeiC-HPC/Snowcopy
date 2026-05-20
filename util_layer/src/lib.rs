@@ -65,6 +65,13 @@ pub struct FileInfo {
     pub modified_time: Option<SystemTime>,
 }
 
+#[derive(Clone)]
+pub struct TrailingInfo {
+    pub trailing_chunk_size: u64,
+    pub trailing: bool,
+    pub trailing_small: bool,
+}
+
 pub fn path_to_s3_key(path: &str) -> String {
     use std::path::Component;
 
