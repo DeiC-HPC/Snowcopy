@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
     let transfer_method = matches.get_one::<String>("o").expect("required");
     let file_limit = matches.get_one::<usize>("file_limit").copied();
     let req_limit = matches.get_one::<usize>("req_limit").copied();
+    let download_concurrency = matches.get_one::<usize>("download_concurrency").copied();
     let silent = matches.get_flag("silent");
     let download = matches.get_flag("download");
     let stats = matches.get_flag("stats");
@@ -52,12 +53,12 @@ async fn main() -> Result<()> {
 
     if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
         match method {
-            TransferMethod::CephS3Tokio => download::download(arc_bucket, "", path, file_limit, req_limit, silent, stats, &config, destructive).await,
+            TransferMethod::CephS3Tokio => download::download(arc_bucket, "", path, file_limit, req_limit, download_concurrency, silent, stats, &config, destructive).await,
             TransferMethod::TransferManager => transfer_manager::download(arc_bucket, path, silent, stats, &config, req_limit).await,
         }
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive).await,
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, download_concurrency, silent, stats, &config, destructive).await,
             TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config, req_limit).await,
         };
     }
@@ -150,6 +151,16 @@ fn parse_arguments() -> ArgMatches {
                 .long("req-limit")
                 .value_name("NUMBER")
                 .help("Maximum number of concurrent requests")
+                .required(false)
+                .value_parser(clap::value_parser!(usize))
+                .num_args(1),
+        )
+        .arg(
+            Arg::new("download_concurrency")
+                .short('c')
+                .long("download-concurrency")
+                .value_name("NUMBER")
+                .help("Maximum number of concurrent downloads per file")
                 .required(false)
                 .value_parser(clap::value_parser!(usize))
                 .num_args(1),

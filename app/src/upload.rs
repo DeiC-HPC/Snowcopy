@@ -17,7 +17,7 @@ use util_layer::retry::retry_on_failure_async;
 use util_layer::{build_context, constants, Config, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
-pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool, config: &Config, destructive: bool) {
+pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &Config, destructive: bool) {
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
@@ -27,7 +27,7 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
     let bucket_creation_handle = create_bucket_if_not_exist(&bucket, &client);
 
     let hyper_client = Arc::new(build_https_client());
-    let (file_sem, req_sem, buffer_pool_size) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, path, cc_tx.clone());
+    let (file_sem, req_sem, buffer_pool_size, _) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, download_concurrency, path, cc_tx.clone(), false);
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, constants::CHUNK_SIZE as usize));
     let context_arc = Arc::new(build_context(config.clone()));

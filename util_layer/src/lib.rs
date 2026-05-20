@@ -10,6 +10,7 @@ pub mod cc_util;
 pub mod time;
 pub mod retry;
 pub mod snow_errors;
+pub mod download;
 
 fn default_region() -> String { "us-east-1".to_string() }
 
