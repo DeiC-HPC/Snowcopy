@@ -231,37 +231,6 @@ pub fn s3_signing_key(
     hmac_sha256(&k_service, b"aws4_request")
 }
 
-/// Signs a chunk for AWS chunked encoding (trailing headers)
-pub fn sign_chunk(
-    signing_key: &[u8; 32],
-    amz_date: &str,
-    credential_scope: &str,
-    prev_signature: &str,
-    chunk_hash: &str,
-) -> String {
-    let capacity = AWS_CHUNK_PAYLOAD_ALGORITHM.len() + 1
-        + amz_date.len() + 1
-        + credential_scope.len() + 1
-        + prev_signature.len() + 1
-        + EMPTY_PAYLOAD_SHA256.len() + 1
-        + chunk_hash.len();
-
-    let mut string_to_sign = String::with_capacity(capacity);
-    string_to_sign.push_str(AWS_CHUNK_PAYLOAD_ALGORITHM);
-    string_to_sign.push('\n');
-    string_to_sign.push_str(amz_date);
-    string_to_sign.push('\n');
-    string_to_sign.push_str(credential_scope);
-    string_to_sign.push('\n');
-    string_to_sign.push_str(prev_signature);
-    string_to_sign.push('\n');
-    string_to_sign.push_str(EMPTY_PAYLOAD_SHA256);
-    string_to_sign.push('\n');
-    string_to_sign.push_str(chunk_hash);
-
-    hex::encode(hmac_sha256(signing_key, string_to_sign.as_bytes()))
-}
-
 // TODO LND: This can be compressed - no need to show our work, just give us the number
 /// Calculates the total encoded Content-Length for aws-chunked + SigV4 streaming with trailing headers
 pub fn aws_chunked_trailer_encoded_length(
