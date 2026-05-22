@@ -18,6 +18,84 @@ pub fn create_sha256_hasher() -> Hasher {
     Hasher::new(MessageDigest::sha256()).expect("Failed to create SHA256 hasher")
 }
 
+/// Signing key for AWS chunked encoding
+pub struct ChunkSigner {
+    pkey: PKey<openssl::pkey::Private>,
+}
+
+impl ChunkSigner {
+    pub fn new(signing_key: &[u8;32]) -> Self {
+        Self {
+            pkey: PKey::hmac(signing_key).expect("Failed to create HMAC key"),
+        }
+    }
+
+    pub fn sign(&self, data: &[u8]) -> [u8; 32] {
+        let mut signer = Signer::new(MessageDigest::sha256(), &self.pkey)
+            .expect("Failed to create HMAC signer");
+        signer.update(data).expect("Failed to update HMAC signer");
+        let signature = signer.sign_to_vec().expect("Failed to sign HMAC");
+        let mut res = [0u8; 32];
+        res.copy_from_slice(&signature);
+        res
+    }
+
+    pub fn sign_chunk(
+        &self,
+        amz_date: &str,
+        credential_scope: &str,
+        prev_signature: &str,
+        chunk_hash: &str,
+    ) -> String {
+        let capacity = AWS_CHUNK_PAYLOAD_ALGORITHM.len() + 1
+            + amz_date.len() + 1
+            + credential_scope.len() + 1
+            + prev_signature.len() + 1
+            + EMPTY_PAYLOAD_SHA256.len() + 1
+            + chunk_hash.len();
+
+        let mut string_to_sign = String::with_capacity(capacity);
+        string_to_sign.push_str(AWS_CHUNK_PAYLOAD_ALGORITHM);
+        string_to_sign.push('\n');
+        string_to_sign.push_str(amz_date);
+        string_to_sign.push('\n');
+        string_to_sign.push_str(credential_scope);
+        string_to_sign.push('\n');
+        string_to_sign.push_str(prev_signature);
+        string_to_sign.push('\n');
+        string_to_sign.push_str(EMPTY_PAYLOAD_SHA256);
+        string_to_sign.push('\n');
+        string_to_sign.push_str(chunk_hash);
+
+        hex::encode(self.sign(string_to_sign.as_bytes()))
+    }
+
+    /// Signs a trailer for AWS chunked encoding with trailing headers
+    pub fn sign_trailer(
+        &self,
+        amz_date: &str,
+        credential_scope: &str,
+        prev_signature: &str,
+        trailer_name: &str,
+        trailer_value: &str,
+    ) -> String {
+        // The canonicalized trailer string is "name:value\n" (single LF), then SHA256-hex of that
+        let trailer_line = format!("{}:{}\n", trailer_name.to_lowercase(), trailer_value);
+        let trailer_hash = sha256_hex(trailer_line.as_bytes());
+
+        let string_to_sign = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            AWS_CHUNK_TRAILER_ALGORITHM,
+            amz_date,
+            credential_scope,
+            prev_signature,
+            trailer_hash
+        );
+
+        hex::encode(self.sign(string_to_sign.as_bytes()))
+    }
+}
+
 pub fn finish_sha256_hex(mut hasher: Hasher) -> String {
     let digest = hasher.finish().expect("Failed to finish SHA256 hashing");
     hex::encode(digest)
@@ -161,40 +239,25 @@ pub fn sign_chunk(
     prev_signature: &str,
     chunk_hash: &str,
 ) -> String {
-    let string_to_sign = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}",
-        AWS_CHUNK_PAYLOAD_ALGORITHM,
-        amz_date,
-        credential_scope,
-        prev_signature,
-        EMPTY_PAYLOAD_SHA256,
-        chunk_hash
-    );
+    let capacity = AWS_CHUNK_PAYLOAD_ALGORITHM.len() + 1
+        + amz_date.len() + 1
+        + credential_scope.len() + 1
+        + prev_signature.len() + 1
+        + EMPTY_PAYLOAD_SHA256.len() + 1
+        + chunk_hash.len();
 
-    hex::encode(hmac_sha256(signing_key, string_to_sign.as_bytes()))
-}
-
-/// Signs a trailer for AWS chunked encoding with trailing headers
-pub fn sign_trailer(
-    signing_key: &[u8; 32],
-    amz_date: &str,
-    credential_scope: &str,
-    prev_signature: &str,
-    trailer_name: &str,
-    trailer_value: &str,
-) -> String {
-    // The canonicalized trailer string is "name:value\n" (single LF), then SHA256-hex of that
-    let trailer_line = format!("{}:{}\n", trailer_name.to_lowercase(), trailer_value);
-    let trailer_hash = sha256_hex(trailer_line.as_bytes());
-
-    let string_to_sign = format!(
-        "{}\n{}\n{}\n{}\n{}",
-        AWS_CHUNK_TRAILER_ALGORITHM,
-        amz_date,
-        credential_scope,
-        prev_signature,
-        trailer_hash
-    );
+    let mut string_to_sign = String::with_capacity(capacity);
+    string_to_sign.push_str(AWS_CHUNK_PAYLOAD_ALGORITHM);
+    string_to_sign.push('\n');
+    string_to_sign.push_str(amz_date);
+    string_to_sign.push('\n');
+    string_to_sign.push_str(credential_scope);
+    string_to_sign.push('\n');
+    string_to_sign.push_str(prev_signature);
+    string_to_sign.push('\n');
+    string_to_sign.push_str(EMPTY_PAYLOAD_SHA256);
+    string_to_sign.push('\n');
+    string_to_sign.push_str(chunk_hash);
 
     hex::encode(hmac_sha256(signing_key, string_to_sign.as_bytes()))
 }

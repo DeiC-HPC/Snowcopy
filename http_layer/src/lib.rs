@@ -1,7 +1,7 @@
 mod logging;
 mod signer;
 
-use crate::signer::{sha256_hex, CredentialScope};
+use crate::signer::{sha256_hex, ChunkSigner, CredentialScope};
 use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use bytes::Bytes;
@@ -677,8 +677,8 @@ pub struct StreamingFileChunkedBodyInner {
     file: Option<Pin<Box<tokio::fs::File>>>,
     /// Remaining bytes to read from the file
     remaining: u64,
-    /// Signing key for chunk signatures
-    signing_key: [u8; 32],
+    /// Chunk signer with premade Signing key for chunk signatures
+    chunk_signer: ChunkSigner,
     /// AMZ date string (format: 20060102T150405Z)
     amz_date: String,
     /// Credential scope string
@@ -726,7 +726,7 @@ impl StreamingFileChunkedBody {
             inner: StreamingFileChunkedBodyInner {
                 file: Some(Box::pin(file)),
                 remaining: file_size,
-                signing_key,
+                chunk_signer: ChunkSigner::new(&signing_key),
                 amz_date,
                 credential_scope,
                 prev_signature: seed_signature,
@@ -768,8 +768,7 @@ impl StreamingFileChunkedBodyInner {
 
         let chunk_hash = sha256_hex(chunk_data);
 
-        let chunk_sig = signer::sign_chunk(
-            &self.signing_key,
+        let chunk_sig = self.chunk_signer.sign_chunk(
             &self.amz_date,
             &self.credential_scope,
             &self.prev_signature,
@@ -798,8 +797,7 @@ impl StreamingFileChunkedBodyInner {
             self.final_checksum = Some(BASE64_STANDARD.encode(&digest));
         }
 
-        let empty_sig = signer::sign_chunk(
-            &self.signing_key,
+        let empty_sig = self.chunk_signer.sign_chunk(
             &self.amz_date,
             &self.credential_scope,
             &self.prev_signature,
@@ -819,8 +817,7 @@ impl StreamingFileChunkedBodyInner {
         let checksum_b64 = self.final_checksum.as_ref()
             .expect("Checksum should have been computed in format_final_chunk");
 
-        let trailer_sig = signer::sign_trailer(
-            &self.signing_key,
+        let trailer_sig = self.chunk_signer.sign_trailer(
             &self.amz_date,
             &self.credential_scope,
             &self.prev_signature,
@@ -851,7 +848,7 @@ impl Body for StreamingFileChunkedBody {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let inner = &mut self.inner;
 
-        loop {
+        loop {  //TODO LND: Find out a way to speed up the loops (less time waiting)
             match inner.state {
                 StreamingChunkedState::Reading => {
                     inner.read_buf.clear();
@@ -870,6 +867,8 @@ impl Body for StreamingFileChunkedBody {
 
                     // Get the file - we need to pin it for poll_read
                     let file = inner.file.as_mut().expect("file should exist").as_mut();
+
+                    // LOCK FILE
 
                     match file.poll_read(cx, &mut read_buf) {
                         Poll::Ready(Ok(())) => {
