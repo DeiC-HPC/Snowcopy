@@ -171,7 +171,7 @@ pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, fro
 
 pub async fn put_file_streaming(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, chunk_size: u64) -> Result<CcLoadAndTransfer> {
     let file_permit_start = Instant::now();
-    let file_lock = file_sem.acquire().await?;
+    //let file_lock = file_sem.acquire().await?;    // TODO LND: Cleanup
     let file_permit_elapsed = file_permit_start.elapsed();
 
     let file_work_start = Instant::now();
@@ -183,6 +183,7 @@ pub async fn put_file_streaming(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>,
         query_uri,
         file,
         file_info.file_size,
+        file_sem,
         chunk_size,
     )?;
 
@@ -196,7 +197,6 @@ pub async fn put_file_streaming(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>,
     let resp = client.request(req).await?;
     let req_work_elapsed = req_work_start.elapsed();
 
-    drop(file_lock);
     drop(permit);
 
     let status = resp.status();
@@ -231,8 +231,7 @@ pub async fn put_file_range_streaming(
     query_uri: &String,
     trailing_info: TrailingInfo
 ) -> Result<(String, CcLoadAndTransfer)> {
-    let file_permit_start = Instant::now();
-    let file_lock = file_sem.acquire().await?;
+    let file_permit_start = Instant::now(); // TODO LND: cleanup statistics
     let file_permit_elapsed = file_permit_start.elapsed();
 
     let file_work_start = Instant::now();
@@ -248,6 +247,7 @@ pub async fn put_file_range_streaming(
         query_uri,
         file,
         amount,
+        file_sem,
         trailing_info.trailing_chunk_size
     )?;
 
@@ -261,7 +261,6 @@ pub async fn put_file_range_streaming(
     let resp = client.request(req).await?;
     let req_work_elapsed = req_work_start.elapsed();
 
-    drop(file_lock);
     drop(permit);
 
     let status = resp.status();
@@ -550,6 +549,7 @@ fn create_streaming_req_trailing_checksum(
     query_uri: &String,
     file: File,
     file_size: u64,
+    file_sem: Arc<Semaphore>,
     chunk_size: u64,
 ) -> Result<Request<StreamingBody>> {
     let credential_scope = CredentialScope {
@@ -607,6 +607,7 @@ fn create_streaming_req_trailing_checksum(
     let streaming_body = StreamingFileChunkedBody::new(
         file,
         file_size,
+        file_sem,
         signing_key,
         amz_date,
         credential_scope_str,
@@ -677,6 +678,8 @@ pub struct StreamingFileChunkedBodyInner {
     file: Option<Pin<Box<tokio::fs::File>>>,
     /// Remaining bytes to read from the file
     remaining: u64,
+    /// Semaphore to protect file access
+    file_sem: Arc<Semaphore>,
     /// Chunk signer with premade Signing key for chunk signatures
     chunk_signer: ChunkSigner,
     /// AMZ date string (format: 20060102T150405Z)
@@ -715,6 +718,7 @@ impl StreamingFileChunkedBody {
     pub fn new(
         file: File,
         file_size: u64,
+        file_sem: Arc<Semaphore>,
         signing_key: [u8; 32],
         amz_date: String,
         credential_scope: String,
@@ -726,6 +730,7 @@ impl StreamingFileChunkedBody {
             inner: StreamingFileChunkedBodyInner {
                 file: Some(Box::pin(file)),
                 remaining: file_size,
+                file_sem,
                 chunk_signer: ChunkSigner::new(&signing_key),
                 amz_date,
                 credential_scope,
@@ -867,12 +872,12 @@ impl Body for StreamingFileChunkedBody {
 
                     // Get the file - we need to pin it for poll_read
                     let file = inner.file.as_mut().expect("file should exist").as_mut();
-
-                    // LOCK FILE
+                    let file_lock = inner.file_sem.acquire();
 
                     match file.poll_read(cx, &mut read_buf) {
                         Poll::Ready(Ok(())) => {
                             let bytes_read = read_buf.filled().len();
+                            drop(file_lock);
 
                             if bytes_read != to_read {
                                 panic!("Expected to read {} bytes, but read {} bytes", to_read, bytes_read);
