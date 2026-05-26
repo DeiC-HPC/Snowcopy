@@ -17,7 +17,7 @@ use util_layer::retry::retry_on_failure_async;
 use util_layer::{build_context, constants, Config, FileInfo, SnowContext};
 use walkdir::WalkDir;
 
-pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &Config, destructive: bool) {
+pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &Config) {
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
@@ -37,7 +37,7 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
 
     if !bucket_created {
         //We did not create the bucket, so check for already uploaded files
-        files_to_upload_channel = check_already_exists(&bucket, &cc_tx, client.clone(), files_to_upload_channel, req_sem.clone(), destructive);
+        files_to_upload_channel = check_already_exists(&bucket, &cc_tx, client.clone(), files_to_upload_channel, req_sem.clone());
     }
     while let Some(result) = files_to_upload_channel.recv().await {
         upload_file_async_and_add_to_handles(result, context_arc.clone(), bucket.clone(), client.clone(), hyper_client.clone(), file_sem.clone(), req_sem.clone(), task_sem.clone(), buffer_pool.clone(), cc_tx.clone(), &mut handles).await;
@@ -215,7 +215,7 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
     }
 }
 
-fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, _req_sem: Arc<Semaphore>, destructive: bool) -> Receiver<Result<FileInfo, io::Error>> {
+fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, _req_sem: Arc<Semaphore>) -> Receiver<Result<FileInfo, io::Error>> {
     let (upload_tx, upload_rx) = mpsc::channel::<Result<FileInfo, io::Error>>(constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_UPLOAD as usize);
 
     let checker_client = client.clone();
@@ -235,14 +235,10 @@ fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCen
                     let cc_tx = cc_tx_checker.clone();
 
                     checker_set.spawn(async move {
-                        let (exists_at_target, size, s3_mtime) = get_s3_mtime(&client, &bucket, &file_info.key).await;
+                        let (_exists_at_target, size, s3_mtime) = get_s3_mtime(&client, &bucket, &file_info.key).await;
 
                         if should_upload(&file_info, size, s3_mtime).await {
-                            if exists_at_target && !destructive {
-                                cc_tx.send(CommandCenterEvent::NonDestructiveMode(format!("Skipping upload of already existing file {:?}", file_info.file_path))).expect("Failed to send message to command center. Should never happen.");
-                            } else {
-                                upload_tx.send(Ok(file_info)).await.expect("Should never fail.")
-                            }
+                            upload_tx.send(Ok(file_info)).await.expect("Should never fail.")
                         } else {
                             // Already uploaded, just let CC and ui know. We are done with the file
                             cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(file_info.file_size)).expect("Should never fail.");

@@ -17,7 +17,6 @@ pub enum CommandCenterEvent {
     FileAlreadyAtTarget(u64),
     StatusChanged(Status),
     Log(String),
-    NonDestructiveMode(String),
     RetryRequested(oneshot::Sender<Duration>, u32, SystemTime, String),
 }
 

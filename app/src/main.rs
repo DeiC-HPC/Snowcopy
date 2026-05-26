@@ -41,7 +41,6 @@ async fn main() -> Result<()> {
     let silent = matches.get_flag("silent");
     let download = matches.get_flag("download");
     let stats = matches.get_flag("stats");
-    let destructive = matches.get_flag("destructive");
 
     let path = Path::new(path_as_string);
     let arc_bucket = Arc::new(bucket.to_string());
@@ -53,12 +52,12 @@ async fn main() -> Result<()> {
 
     if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
         match method {
-            TransferMethod::CephS3Tokio => download::download(arc_bucket, "", path, file_limit, req_limit, download_concurrency, silent, stats, &config, destructive).await,
+            TransferMethod::CephS3Tokio => download::download(arc_bucket, "", path, file_limit, req_limit, download_concurrency, silent, stats, &config).await,
             TransferMethod::TransferManager => transfer_manager::download(arc_bucket, path, silent, stats, &config, req_limit).await,
         }
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, download_concurrency, silent, stats, &config, destructive).await,
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, download_concurrency, silent, stats, &config).await,
             TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config, req_limit).await,
         };
     }
@@ -187,22 +186,6 @@ fn parse_arguments() -> ArgMatches {
                 .help("Enable statistics output")
                 .required(false)
                 .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("non-destructive") //TODO Jon: this exists because we might want to be able to change a configured --destructive mode to a --non-destructive mode in the future.
-                .long("non-destructive")
-                .help("Non-destructive mode (do not override files already present in the destination directory, default if no other mode is specified)")
-                .required(false)
-                .action(clap::ArgAction::SetTrue)
-                .conflicts_with("destructive"),
-        )
-        .arg(
-            Arg::new("destructive")
-                .long("destructive")
-                .help("Destructive mode (override files already present in the destination directory)")
-                .required(false)
-                .action(clap::ArgAction::SetTrue)
-                .conflicts_with("non-destructive"),
         )
         .after_help("Upload example:\n  snowplowRust -b bucket-name path/to/source")
         .get_matches();
