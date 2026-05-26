@@ -64,8 +64,6 @@ impl CC for CommandCenter {
             let mut total_file_work_time = 0f64;
             let mut total_req_work_time = 0f64;
 
-            let mut total_non_destructive_skips = 0u64;
-
             let _ = ui_tx.send(UiEvent::Message(Status::Discovering.to_string()));
 
             while let Some(ev) = cc_rx.recv().await {
@@ -99,10 +97,6 @@ impl CC for CommandCenter {
                     CommandCenterEvent::Log(string) => {
                         let _ = ui_tx.send(UiEvent::Println(string));
                     }
-                    CommandCenterEvent::NonDestructiveMode(string) => {
-                        let _ = ui_tx.send(UiEvent::Println(string));
-                        total_non_destructive_skips += 1;
-                    }
                     CommandCenterEvent::RetryRequested(tx, attempts, _time, message) => { //TODO Jon: later we should add some metrics and use them to get an idea of the entire stack
                         if attempts > MAX_RETRY {
                             panic!("{}: Retry amount {} exceeded MAX_RETRY {}", message, attempts, MAX_RETRY);
@@ -132,10 +126,6 @@ impl CC for CommandCenter {
             }
             if total_retries > 0 { //TODO Jon: Should this just be part of UI bar? Yeeesss
                 println!("Total retries: {}", total_retries);
-            }
-            if total_non_destructive_skips > 0 {
-                println!();
-                println!("Non-destructive mode: Skipped {} files. Rerun program with --destructive to overwrite them", total_non_destructive_skips);
             }
 
         });
