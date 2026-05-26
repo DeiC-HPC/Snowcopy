@@ -1,5 +1,5 @@
 pub const CONFIG_PATH: &str = "config.json";
-//pub const DEFAULT_REGION:&str = "us-east-1"; //TODO: should exist somewhere that aws_layer can access
+pub const DEFAULT_REGION: &str = "us-east-1";
 pub const CHUNK_SIZE: u64 = 5 * 1024 * 1024;
 pub const DOWNLOAD_CHUNK_SIZE: usize = 1 * 1024 * 1024;
 pub const DOWNLOAD_MULTIPART_THRESHOLD: u64 = (2 * DOWNLOAD_CHUNK_SIZE) as u64;

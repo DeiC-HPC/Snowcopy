@@ -8,6 +8,7 @@ aws_layer = { path = "../aws_layer" }
 http_layer = { path = "../http_layer" }
 util_layer = { path = "../util_layer"}
 transfer_manager = { path = "../transfer_manager"}
+config = { path = "../config" }
 tokio = { version = "1", features = ["full"] }
 serde_json = "1.0"
 clap = { version = "4.5.54", features = ["derive"] }
