@@ -254,19 +254,29 @@ where
         if let Event::Key(key) = event::read()? {
             match app.input_mode {
                 InputMode::Normal => match key.code {
-                    KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Char('q') => {
+                        app.save_edit()?;
+                        return Ok(());
+                    }
                     KeyCode::Char('a') => {
+                        app.save_edit()?;
                         app.add_endpoint()?;
                         app.focus = Focus::Fields;
                         app.selected_field = Field::Name;
                         app.edit_buffer = "name".to_string();
                         app.input_mode = InputMode::Editing;
                     }
-                    KeyCode::Char('d') => app.delete_endpoint()?,
+                    KeyCode::Char('d') => {
+                        app.save_edit()?;
+                        app.delete_endpoint()?;
+                    }
                     KeyCode::Char('h') => app.show_help = !app.show_help,
                     KeyCode::Down => {
                         match app.focus {
-                            Focus::Endpoints => app.next_endpoint(),
+                            Focus::Endpoints => {
+                                app.save_edit()?;
+                                app.next_endpoint();
+                            }
                             Focus::Fields => {
                                 app.next_field();
                                 app.start_editing();
@@ -275,7 +285,10 @@ where
                     }
                     KeyCode::Up => {
                         match app.focus {
-                            Focus::Endpoints => app.previous_endpoint(),
+                            Focus::Endpoints => {
+                                app.save_edit()?;
+                                app.previous_endpoint();
+                            }
                             Focus::Fields => {
                                 app.previous_field();
                                 app.start_editing();
@@ -285,6 +298,7 @@ where
                     KeyCode::Right => {
                         match app.focus {
                             Focus::Endpoints => {
+                                app.save_edit()?;
                                 app.focus = Focus::Fields;
                                 app.start_editing();
                             }
@@ -294,7 +308,10 @@ where
                     KeyCode::Left => {
                         match app.focus {
                             Focus::Endpoints => {}
-                            Focus::Fields => app.focus = Focus::Endpoints,
+                            Focus::Fields => {
+                                app.save_edit()?;
+                                app.focus = Focus::Endpoints;
+                            }
                         }
                     }
                     KeyCode::Enter => app.start_editing(),
@@ -313,7 +330,10 @@ where
                     KeyCode::Enter => {
                         app.save_edit()?;
                     }
-                    KeyCode::Esc => app.input_mode = InputMode::Normal,
+                    KeyCode::Esc => {
+                        app.save_edit()?;
+                        app.input_mode = InputMode::Normal;
+                    }
                     KeyCode::Left => {
                         app.save_edit()?;
                         app.focus = Focus::Endpoints;
@@ -520,8 +540,8 @@ Navigation:
 
     let footer_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::Endpoints => "q: quit | s: save | a: add | d: delete | Down/Up: navigate endpoints | Right: focus fields | h: help",
-            Focus::Fields => "q: quit | s: save | a: add | d: delete | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
+            Focus::Endpoints => "q: quit | a: add | d: delete | Down/Up: navigate endpoints | Right: focus fields | h: help",
+            Focus::Fields => "q: quit | a: add | d: delete | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
         },
         InputMode::Editing => "Enter: save | Esc: cancel | Up/Down: save & move | Ctrl-k: clear",
         InputMode::ConfirmDelete => "Are you sure you want to delete this endpoint? (y/n)",
