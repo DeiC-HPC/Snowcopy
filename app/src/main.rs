@@ -4,8 +4,6 @@ mod ui;
 mod download;
 mod command_center;
 
-use serde_json::Result;
-
 use std::time::Instant;
 
 use clap::{Arg, ArgMatches, Command};
@@ -26,14 +24,30 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     let start_time = Instant::now();
     init_logging();
 
     // Read Commandline Arguments
     let matches = parse_arguments();
-    let bucket = matches.get_one::<String>("bucket").expect("required");
-    let path_as_string = matches.get_one::<String>("path").expect("required");
+
+    if let Some(("config", _)) = matches.subcommand() {
+        if let Err(e) = config::run_tui() {
+            eprintln!("Error running config TUI: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let bucket = matches.get_one::<String>("bucket").ok_or_else(|| {
+        eprintln!("error: the following required arguments were not provided:\n  --bucket <NAME>\n\nUsage: snowplowRust --bucket <NAME> <PATH>\n\nFor more information, try '--help'.");
+        std::process::exit(2);
+    }).unwrap();
+
+    let path_as_string = matches.get_one::<String>("path").ok_or_else(|| {
+        eprintln!("error: the following required arguments were not provided:\n  <PATH>\n\nUsage: snowplowRust --bucket <NAME> <PATH>\n\nFor more information, try '--help'.");
+        std::process::exit(2);
+    }).unwrap();
     let transfer_method = matches.get_one::<String>("o").expect("required");
     let file_limit = matches.get_one::<usize>("file_limit").copied();
     let req_limit = matches.get_one::<usize>("req_limit").copied();
@@ -66,8 +80,6 @@ async fn main() -> Result<()> {
     if !silent {
         println!("Program execution time: {:.2?}", elapsed);
     }
-
-    Ok(())
 }
 
 async fn gather_credentials() -> Config {
@@ -110,19 +122,23 @@ fn parse_arguments() -> ArgMatches {
     let matches = Command::new("snowplowRust")
         .version("0.1.0")
         .about("Parses a -b argument and a path")
+        .subcommand(
+            Command::new("config")
+                .about("Open the TUI for configuration management")
+        )
         .arg(
             Arg::new("bucket")
                 .short('b')                 // allows -b
                 .long("bucket")             // also allows --bucket
                 .value_name("NAME")
                 .help("Bucket (e.g., 'some-bucket-name')")
-                .required(true)
+                .required(false)
                 .num_args(1),
         )
         .arg(
             Arg::new("path")
                 .help("Input path")
-                .required(true)
+                .required(false)
                 .value_name("PATH")
             //.index(1),
         )

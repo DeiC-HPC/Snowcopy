@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["global", "endpoints"],
+  "properties": {
+    "global": {
+      "type": "object",
+      "description": "Global default settings applied to all endpoints unless overridden",
+      "properties": {
+        "s3_region": {
+          "type": "string",
+          "default": "us-east-1"
+        }
+      },
+      "additionalProperties": true
+    },
+
+    "endpoints": {
+      "type": "array",
+      "description": "List of named S3 endpoints",
+      "items": {
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Unique name of the endpoint"
+          },
+
+          "config": {
+            "type": "object",
+            "description": "Optional S3 configuration for this endpoint",
+            "required": [
+              "s3_access_key",
+              "s3_secret_key",
+              "s3_url"
+            ],
+            "properties": {
+              "s3_access_key": {
+                "type": "string"
+              },
+              "s3_secret_key": {
+                "type": "string"
+              },
+              "s3_url": {
+                "type": "string",
+                "format": "uri"
+              },
+              "s3_region": {
+                "type": "string",
+                "description": "Overrides global region if set"
+              }
+            },
+            "additionalProperties": false
+          },
+
+          "settings": {
+            "type": "object",
+            "description": "Local settings overriding global ones",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
