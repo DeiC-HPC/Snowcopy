@@ -1,6 +1,6 @@
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::fs::File;
 use std::io::Write;
 use std::time::SystemTime;
@@ -9,15 +9,16 @@ use crate::cc_util::CommandCenterEvent;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct FileCompletionTracker {
-    pub pending_writes: AtomicUsize,
+    pub pending_bytes_to_be_written: std::sync::atomic::AtomicU64,
     pub mtime: Option<SystemTime>,
     pub total_size: u64,
     pub cc_sender: UnboundedSender<CommandCenterEvent>,
 }
 
 impl FileCompletionTracker {
-    pub fn complete_write(&self, mut file: &File) {
-        if self.pending_writes.fetch_sub(1, Ordering::SeqCst) == 1 {
+    pub fn complete_write(&self, mut file: &File, bytes_written: usize) {
+        //bookkeep written bytes, check if all bytes have been written
+        if self.pending_bytes_to_be_written.fetch_sub(bytes_written as u64, Ordering::SeqCst) == bytes_written as u64 {
             // This was the last write
             if let Some(mtime) = self.mtime {
                 file.flush().expect("Should never fail");

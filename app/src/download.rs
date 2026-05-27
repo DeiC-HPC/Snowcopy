@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::sync::Semaphore;
-use util_layer::constants::{DOWNLOAD_CHUNK_SIZE, METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD};
+use util_layer::constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD;
 use util_layer::download::{FileCompletionTracker, WriteMsg};
 use util_layer::retry::retry_on_failure_async;
 use util_layer::snow_errors::SnowCopyError;
@@ -179,16 +179,8 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
         let chunk_size = std::cmp::max(ideal_chunk_size, DOWNLOAD_MULTIPART_THRESHOLD);
         let num_parts = (total_size + chunk_size - 1) / chunk_size;
 
-        let mut total_chunks = 0;
-        for i in 0..num_parts {
-            let start = i * chunk_size;
-            let end = std::cmp::min(start + chunk_size - 1, total_size - 1);
-            let part_size = end - start + 1;
-            total_chunks += (part_size as usize + DOWNLOAD_CHUNK_SIZE - 1) / DOWNLOAD_CHUNK_SIZE;
-        }
-
         let tracker = Arc::new(FileCompletionTracker {
-            pending_writes: std::sync::atomic::AtomicUsize::new(total_chunks),
+            pending_bytes_to_be_written: std::sync::atomic::AtomicU64::new(total_size),
             mtime: object.modified_time,
             total_size,
             cc_sender: cc_sender.clone(),

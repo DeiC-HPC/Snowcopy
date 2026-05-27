@@ -16,7 +16,7 @@ use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender};
 use tokio::sync::Semaphore;
 use tokio::task;
 use util_layer::cc_util::{CcLoadAndTransfer, CommandCenterEvent};
-use util_layer::constants::{AWS_ALGORITHM, DOWNLOAD_CHUNK_SIZE, EMPTY_PAYLOAD_SHA256};
+use util_layer::constants::{AWS_ALGORITHM, DOWNLOAD_CHUNK_SIZE, DOWNLOAD_DIRECT_WRITE_FRAME_THRESHOLD, EMPTY_PAYLOAD_SHA256};
 use util_layer::download::{FileCompletionTracker, WriteMsg};
 use util_layer::{FileInfo, SnowContext};
 
@@ -40,7 +40,6 @@ pub async fn download_file_range(start: u64, end: u64, snow_context: Arc<SnowCon
 
     let mut body = resp.into_body();
 
-    //Here its important that we do not send mtime as we are part of a big parallel transfer, and it must be set as the last operation on the file.
     let bytes_read = download_body_to_buffer_and_offload_to_disk_writers(start, fd, disk_write_tx, &mut body, tracker, (end - start + 1) as usize).await?;
 
     if bytes_read != end - start + 1 {
@@ -59,27 +58,56 @@ async fn download_body_to_buffer_and_offload_to_disk_writers(start: u64, fd: Arc
 
     while let Some(frame) = body.frame().await {
         let frame = frame?;
+
         if let Ok(data) = frame.into_data() {
-            if buffer.is_empty() {
+
+            //Large enough tcp frame that we can just pass it directly to disk writers
+            if data.len() >= DOWNLOAD_DIRECT_WRITE_FRAME_THRESHOLD { //we can save time by not copying data into buffer
+                if !buffer.is_empty() {
+                    //flush current buffer before new frame directly to disk writers
+                    let buffered = std::mem::replace(&mut buffer, Vec::with_capacity(cmp::min(DOWNLOAD_CHUNK_SIZE, file_size)));
+
+                    disk_write_tx
+                        .send((fd.clone(), buffer_start, Bytes::from(buffered), tracker.clone()))
+                        .await?;
+                }
+
+                let offset = start + bytes_read;
+                bytes_read += data.len() as u64;
+
+                disk_write_tx
+                    .send((fd.clone(), offset, data, tracker.clone()))
+                    .await?;
+
+                continue;
+            }
+
+            if buffer.is_empty() { //this is only empty when we have just flushed it, in that case we should set the start position for the next buffer
                 buffer_start = start + bytes_read;
             }
 
             buffer.extend_from_slice(&data);
             bytes_read += data.len() as u64;
 
-            // flush if large enough
             if buffer.len() >= DOWNLOAD_CHUNK_SIZE {
-                let data = std::mem::replace(&mut buffer, Vec::with_capacity(DOWNLOAD_CHUNK_SIZE));
-                disk_write_tx.send((fd.clone(), buffer_start, Bytes::from(data), tracker.clone()))
+                let data = std::mem::replace(
+                    &mut buffer,
+                    Vec::with_capacity(cmp::min(DOWNLOAD_CHUNK_SIZE, file_size)),
+                );
+
+                disk_write_tx
+                    .send((fd.clone(), buffer_start, Bytes::from(data), tracker.clone()))
                     .await?;
             }
         }
     }
 
-    // flush remainder
     if !buffer.is_empty() {
-        disk_write_tx.send((fd, buffer_start, Bytes::from(buffer), tracker)).await?;
+        disk_write_tx
+            .send((fd, buffer_start, Bytes::from(buffer), tracker))
+            .await?;
     }
+
     Ok(bytes_read)
 }
 
@@ -115,9 +143,8 @@ pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
     let file = File::create(&path)?;
     let file_arc = Arc::new(file);
 
-    let num_chunks = (file_info.file_size as usize + DOWNLOAD_CHUNK_SIZE - 1) / DOWNLOAD_CHUNK_SIZE;
     let tracker = Arc::new(FileCompletionTracker {
-        pending_writes: std::sync::atomic::AtomicUsize::new(num_chunks),
+        pending_bytes_to_be_written: std::sync::atomic::AtomicU64::new(file_info.file_size),
         mtime: file_info.modified_time,
         total_size: file_info.file_size,
         cc_sender,
@@ -154,7 +181,7 @@ pub fn spawn_global_writers(
                             eprintln!("write error: {}", e); //TODO JON: Should we just retry? But what kind of local IO error would benefit from that?
                             //probably panic?
                         } else {
-                            tracker.complete_write(&file);
+                            tracker.complete_write(&file, data.len());
 
                             let transfer_metrics = CcLoadAndTransfer { //TODO JON: cleaner metrics. Perhaps optional.
                                 amount: data.len() as u64,
