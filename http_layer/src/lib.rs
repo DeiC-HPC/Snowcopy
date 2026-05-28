@@ -169,9 +169,9 @@ pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, fro
     Ok((etag.unwrap(), transfer_metrics))
 }
 
-pub async fn put_file_streaming(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, chunk_size: u64) -> Result<CcLoadAndTransfer> {
+pub async fn put_file_streaming(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, trailing_info: TrailingInfo) -> Result<CcLoadAndTransfer> {
     let file_permit_start = Instant::now();
-    //let file_lock = file_sem.acquire().await?;    // TODO LND: Cleanup
+    let open_file_lock = trailing_info.open_file_sem_limit.acquire().await?;
     let file_permit_elapsed = file_permit_start.elapsed();
 
     let file_work_start = Instant::now();
@@ -184,7 +184,7 @@ pub async fn put_file_streaming(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>,
         file,
         file_info.file_size,
         file_sem,
-        chunk_size,
+        trailing_info.trailing_chunk_size,
     )?;
 
     let file_work_elapsed = file_work_start.elapsed();
@@ -198,6 +198,7 @@ pub async fn put_file_streaming(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>,
     let req_work_elapsed = req_work_start.elapsed();
 
     drop(permit);
+    drop(open_file_lock);
 
     let status = resp.status();
 
@@ -231,7 +232,8 @@ pub async fn put_file_range_streaming(
     query_uri: &String,
     trailing_info: TrailingInfo
 ) -> Result<(String, CcLoadAndTransfer)> {
-    let file_permit_start = Instant::now(); // TODO LND: cleanup statistics
+    let file_permit_start = Instant::now();
+    let open_file_lock = trailing_info.open_file_sem_limit.acquire().await?;
     let file_permit_elapsed = file_permit_start.elapsed();
 
     let file_work_start = Instant::now();
@@ -262,6 +264,7 @@ pub async fn put_file_range_streaming(
     let req_work_elapsed = req_work_start.elapsed();
 
     drop(permit);
+    drop(open_file_lock);
 
     let status = resp.status();
     let etag = resp
@@ -862,17 +865,19 @@ impl Body for StreamingFileChunkedBody {
                         continue;
                     }
 
+                    // Get the file - we need to pin it for poll_read
+                    let file_lock = inner.file_sem.try_acquire();
+                    if !file_lock.is_ok() {
+                        return Poll::Pending;
+                    }
+                    let file = inner.file.as_mut().expect("file should exist").as_mut();
+
                     let to_read = std::cmp::min(inner.chunk_size, inner.remaining) as usize;
                     let to_read_digits = Self::extract_bytes_read_digits(to_read);
                     let data_index = to_read_digits + CHUNKSIGNATURE_LENGTH;            // "<data_index>;chunk-signature=<FixedLengthChunkSignature>\r\n"
                     inner.read_buf.resize(data_index + to_read + 2, 0);     // Resize to ChunkSignature + Data length + "\r\n"
-                    inner.read_buf.truncate(data_index + to_read + 2);
                     let buf = &mut inner.read_buf[data_index..data_index + to_read];    // Buf is offset to reserve space for chunk signature
                     let mut read_buf = tokio::io::ReadBuf::new(buf);
-
-                    // Get the file - we need to pin it for poll_read
-                    let file = inner.file.as_mut().expect("file should exist").as_mut();
-                    let file_lock = inner.file_sem.acquire();
 
                     match file.poll_read(cx, &mut read_buf) {
                         Poll::Ready(Ok(())) => {

@@ -1,8 +1,10 @@
 pub mod ui;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 use url::Url;
 
 pub mod constants;
@@ -70,6 +72,7 @@ pub struct TrailingInfo {
     pub trailing_chunk_size: u64,
     pub trailing: bool,
     pub trailing_small: bool,
+    pub open_file_sem_limit: Arc<Semaphore>,
 }
 
 pub fn path_to_s3_key(path: &str) -> String {

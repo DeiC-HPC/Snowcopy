@@ -202,9 +202,10 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
         let buffer_pool = buffer_pool.clone();
         let canonical_uri = canonical_uri.clone();
         let query_uri = query_uri.clone();
+        let trailing_info_clone = trailing_info.clone();
         async move {
             if trailing_info.trailing_small {
-                http_layer::put_file_streaming(ctx, file_info, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri, trailing_info.trailing_chunk_size).await
+                http_layer::put_file_streaming(ctx, file_info, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri, trailing_info_clone).await
             } else {
                 http_layer::put_file(ctx, file_info, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
             }

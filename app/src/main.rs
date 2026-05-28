@@ -13,13 +13,14 @@ use clap::{Arg, ArgMatches, Command};
 use std::path::Path;
 use std::sync::Arc;
 use tokio;
+use tokio::sync::Semaphore;
 use tracing_subscriber::{fmt, EnvFilter};
 use util_layer::{constants, Config, TrailingInfo};
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
 #[cfg(not(target_env = "msvc"))]
 use jemallocator::Jemalloc;
-use util_layer::constants::STREAMING_READ_BUFFER_SIZE;
+use util_layer::constants::{OPEN_FILE_LIMIT, STREAMING_READ_BUFFER_SIZE};
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -45,6 +46,7 @@ async fn main() -> Result<()> {
     let trailing = matches.get_flag("trailing");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
     let trailing_small = matches.get_flag("trailing-small");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
     let trailing_chunk_size = matches.get_one::<usize>("trailing-chunk-size").copied(); // TODO LND: Possibly a temporary flag
+    let open_file_sem_limit = matches.get_one::<usize>("open-file-limit").copied();
 
     let path = Path::new(path_as_string);
     let arc_bucket = Arc::new(bucket.to_string());
@@ -64,6 +66,7 @@ async fn main() -> Result<()> {
             trailing_chunk_size: trailing_chunk_size.unwrap_or(STREAMING_READ_BUFFER_SIZE as usize) as u64 * 1024,
             trailing,
             trailing_small,
+            open_file_sem_limit: Arc::new(Semaphore::new(open_file_sem_limit.unwrap_or(OPEN_FILE_LIMIT))),
         };
         match method {
             TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive, trailing_info).await,
@@ -213,6 +216,15 @@ fn parse_arguments() -> ArgMatches {
                 .long("trailing-chunk-size")
                 .value_name("NUMBER")
                 .help("Size of chunks used for trailing header operations in kB")
+                .required(false)
+                .value_parser(clap::value_parser!(usize))
+                .num_args(1),
+        )
+        .arg(
+            Arg::new("open-file-limit")
+                .long("open-file-limit")
+                .value_name("NUMBER")
+                .help("Limit of simultaneously open file descriptors")
                 .required(false)
                 .value_parser(clap::value_parser!(usize))
                 .num_args(1),
