@@ -1,6 +1,7 @@
 mod logging;
 mod signer;
 pub mod download;
+pub mod integrity;
 
 use crate::signer::CredentialScope;
 use anyhow::Result;
@@ -17,6 +18,8 @@ use hyper_util::{
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
+use openssl::base64;
+use openssl::hash::{Hasher, MessageDigest};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Semaphore};
@@ -210,22 +213,39 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     let mut total_read = 0usize;
     let chunk_size = READ_BUFFER_SIZE.min(amount as usize);
 
-    let mut hasher = signer::create_sha256_hasher();
+    //TODO JON: Its very possible that we should wrap this in a spawn_blocking and use a single file descriptor for the upload.
+    
+    let mut md5_hasher = if ctx.md5_checksum_itegrity_check() {
+        Some(Hasher::new(MessageDigest::md5())?)
+    } else {
+        None
+    };
+    let mut sha_hasher = signer::create_sha256_hasher();
 
-    while total_read < amount as usize {
+    while total_read < amount as usize { //read small chunks, so the block is less significant when hashing.
         let remaining = amount as usize - total_read;
         let to_read = remaining.min(chunk_size);
         let chunk = &mut buffer[total_read..total_read + to_read];
 
         file.read_exact(chunk).await?;
-        hasher.update(chunk).expect("Failed to update SHA256 hasher");
+        sha_hasher.update(chunk).expect("Failed to update SHA256 hasher");
+        if let Some(ref mut md5_hasher) = md5_hasher {
+            md5_hasher.update(chunk).expect("Failed to update MD5 hasher");
+        }
+
         total_read += to_read;
     }
     drop(file);
     let file_work_elapsed = file_work_start.elapsed();
     drop(file_lock);
 
-    let sha256_hex = signer::finish_sha256_hex(hasher);
+    let sha256_hex = signer::finish_sha256_hex(sha_hasher);
+    let md5_base64 = if let Some(mut md5_hasher) = md5_hasher {
+        let md5 = md5_hasher.finish()?;
+        Some(base64::encode_block(&md5))
+    } else {
+        None
+    };
 
     let mtime_str = file_info.modified_time.map(util_layer::time::time_to_float_string);
 
@@ -236,17 +256,11 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         len: amount as usize,
     };
 
-
     let mut header_map : HashMap<String, String> = HashMap::new();
 
-    /*  TODO Jon: Add a parameter option for whoever desires more than 1 hash of their paylaods
-    let mut hasher = Hasher::new(MessageDigest::md5())?;
-    hasher.update(&bytes_for_hash)?;
-    let digest = hasher.finish()?;
-    let md5_hash = general_purpose::STANDARD.encode(digest);
-    header_map.insert("content-md5".to_string(), md5_hash.clone());
- */
-
+    if let Some(md5_base64) = md5_base64 {
+        header_map.insert("content-md5".to_string(), md5_base64);
+    }
     header_map.insert("content-type".to_string(), "application/octet-stream".to_string());
     header_map.insert("content-length".to_string(), amount.to_string());
     header_map.insert(
@@ -262,7 +276,6 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
-
 
 pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, start: u64, end: u64) -> Result<PooledBuffer> {
     let total_range_size = (end - start + 1) as usize;

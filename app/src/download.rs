@@ -2,7 +2,7 @@ use crate::auto_tuning::auto_tune_semaphores;
 use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 use anyhow::Error;
-use aws_layer::{async_head_objects_from_bucket, get_s3_mtime, AWSClient, S3Object};
+use aws_layer::{async_head_objects_from_bucket, get_s3_metadata, AWSClient};
 use http_layer::{BufferPool, PoolClient};
 use std::collections::HashSet;
 use std::fs;
@@ -15,10 +15,11 @@ use util_layer::constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD;
 use util_layer::download::{FileCompletionTracker, WriteMsg};
 use util_layer::retry::retry_on_failure_async;
 use util_layer::snow_errors::SnowCopyError;
-use util_layer::{build_context, FileInfo, SnowContext};
+use util_layer::{build_context, FileInfo, SnowContext, S3Object};
 
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::task::JoinSet;
+use http_layer::integrity::{reconstructable_multipart_etag, IntegrityAlgorithm};
 use util_layer::cc_util::CommandCenterEvent;
 
 /// Ensures that the parent directory of the given path exists.
@@ -38,7 +39,7 @@ fn ensure_parent_dirs_exist(file_path: &Path, created_dirs: &mut HashSet<std::pa
     Ok(())
 }
 
-pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &util_layer::Config) {
+pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &util_layer::Config, md5_checksum_integrity: bool) {
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
@@ -47,7 +48,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     let mut download_rx = fetch_object_metadata_and_filter_already_downloaded(&bucket, &cc_tx, client, object_channel).await;
 
     let pool_client = Arc::new(http_layer::build_https_client());
-    let snow_context = Arc::new(build_context(config.clone()));
+    let snow_context = Arc::new(build_context(config.clone(), md5_checksum_integrity));
     let (file_sem, req_sem, _buffer_pool_size, download_file_concurrency) = auto_tune_semaphores(file_limit, req_limit, download_concurrency, dest, cc_tx.clone(), true);
     let task_sem = Arc::new(Semaphore::new(req_sem.available_permits() * 2));
 
@@ -87,6 +88,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
 }
 
 async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut object_channel: Receiver<S3Object>) -> Receiver<S3Object> {
+    //TODO JON in this PR: we should give a small warning if we find objects without enough metadata for verification
     let (download_tx, download_rx) = mpsc::channel::<S3Object>(METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD as usize);
 
     let checker_client = client.clone();
@@ -104,9 +106,11 @@ async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String
             let cc_tx = cc_tx_checker.clone();
 
             checker_set.spawn(async move {
-                let (_, _, mtime) = get_s3_mtime(&client, &bucket, &object.key).await;
+                let (_, _, mtime, chunk_size, etag) = get_s3_metadata(&client, &bucket, &object.key).await;
                 let mut object = object;
                 object.modified_time = mtime;
+                object.chunk_size = chunk_size;
+                object.etag = etag;
 
                 let should_download = should_download_object(&mut object);
 
@@ -154,7 +158,9 @@ fn should_download_object(object: &mut S3Object) -> bool {
 }
 
 async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object,  req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, download_file_concurrency: usize, disk_write_tx: Sender<WriteMsg>) {
-    if object.size > DOWNLOAD_MULTIPART_THRESHOLD as i64 {
+    let multipart_integrity_verification = snow_context.md5_checksum_itegrity_check() && reconstructable_multipart_etag(&object);
+
+    if object.size > DOWNLOAD_MULTIPART_THRESHOLD as i64 || multipart_integrity_verification {
         let file_path = object.local_path.clone();
         let bucket = bucket.clone();
         let key = object.key.clone();
@@ -176,8 +182,12 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
         let file = Arc::new(file);
 
         let ideal_chunk_size = total_size.div_ceil(download_file_concurrency as u64);
-        let chunk_size = std::cmp::max(ideal_chunk_size, DOWNLOAD_MULTIPART_THRESHOLD);
+        let mut chunk_size = std::cmp::max(ideal_chunk_size, DOWNLOAD_MULTIPART_THRESHOLD);
+        if multipart_integrity_verification {
+            chunk_size = object.chunk_size.unwrap() as u64;
+        }
         let num_parts = (total_size + chunk_size - 1) / chunk_size;
+        //TODO JON: if we are validating integrity, then the etag suffix is the number of parts. We can fail early here if there is a mismatch between the number of parts and the expected number of parts based on the etag suffix. Not sure how we should handle that case, though
 
         let tracker = Arc::new(FileCompletionTracker {
             pending_bytes_to_be_written: std::sync::atomic::AtomicU64::new(total_size),
@@ -186,8 +196,13 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
             cc_sender: cc_sender.clone(),
         });
 
-        let mut download_set = JoinSet::new();
+        let hash_algo = if multipart_integrity_verification {
+            IntegrityAlgorithm::MD5
+        } else {
+            IntegrityAlgorithm::None
+        };
 
+        let mut download_set = JoinSet::new();
         let canonical_uri = Arc::new(format!("/{}/{}", &bucket, key));
 
         for i in 0..num_parts {
@@ -202,10 +217,11 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
             let file = file.clone();
             let disk_write_tx = disk_write_tx.clone();
             let tracker = tracker.clone();
+            let hash_algo = hash_algo.clone();
 
             let cc_sender = cc_sender.clone();
             download_set.spawn(async move {
-                retry_on_failure_async(|| {
+                let res = retry_on_failure_async(|| {
                     let snow_context = snow_context.clone();
                     let pool_client = pool_client.clone();
                     let req_sem = req_sem.clone();
@@ -214,22 +230,59 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                     let file = file.clone();
                     let disk_write_tx = disk_write_tx.clone();
                     let tracker = tracker.clone();
+                    let hash_algo = hash_algo.clone();
 
                     async move {
-                        http_layer::download::download_file_range(start, end, snow_context, &pool_client, req_sem, canonical_uri, &query_uri, file, disk_write_tx, tracker).await
+                        http_layer::download::download_file_range(start, end, snow_context, &pool_client, req_sem, canonical_uri, &query_uri, file, disk_write_tx, tracker, hash_algo).await
                     }
                 }, cc_sender.clone(), |e: &anyhow::Error| {
                     if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
                         return snow_error.is_retryable();
                     }
                     false
-                }, format!("Downloading part (bytes {} to {}) of {}", start, end, canonical_uri)).await
+                }, format!("Downloading part (bytes {} to {}) of {}", start, end, canonical_uri)).await;
+                res.map(|(bytes, hash)| (i, bytes, hash))
             });
         }
 
+        let mut part_hashes = vec![None; num_parts as usize];
         while let Some(res) = download_set.join_next().await {
-            if let Err(e) = res.map_err(|e| Error::from(e)).and_then(|r| r) {
-                panic!("Part download failed for {}: {}", key, e);
+            match res {
+                Ok(Ok((i, _bytes, hash))) => {
+                    part_hashes[i as usize] = hash;
+                }
+                Ok(Err(e)) => {
+                    panic!("Part download failed for {}: {}", key, e);
+                }
+                Err(e) => {
+                    panic!("Join error for {}: {}", key, e);
+                }
+            }
+        }
+
+        if multipart_integrity_verification {
+            let part_md5s: Vec<Vec<u8>> = part_hashes
+                .into_iter()
+                .map(|h| {
+                    hex::decode(h.expect("All parts must have a hash if integrity verification is enabled"))
+                        .expect("Hash should be valid hex")
+                })
+                .collect();
+
+            let reconstructed_etag = http_layer::integrity::reconstruct_multipart_etag(&part_md5s);
+            let expected_etag = object.etag.as_ref().map(|e| e.trim_matches('"')).unwrap_or("");
+
+            if reconstructed_etag != expected_etag {
+                cc_sender.send(CommandCenterEvent::Log(format!(
+                    "Integrity check failed for {}. Expected {}, got {}",
+                    key, expected_etag, reconstructed_etag
+                ))).expect("Failed to send message");
+                // TODO Jon: how to handle failure? Retry this download a single time and if it fails again, then something is probably wrong with the metadata. That I'm unsure how to handle
+            } else {
+                cc_sender.send(CommandCenterEvent::Log(format!(
+                    "Integrity check passed for {}",
+                    key
+                ))).expect("Failed to send message");
             }
         }
     } else {

@@ -3,7 +3,7 @@ use crate::{auto_tuning};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use aws_layer::{get_s3_mtime, AWSClient, CompletedPartAws};
+use aws_layer::{get_s3_metadata, AWSClient, CompletedPartAws};
 use futures::future::join_all;
 use http_layer::{build_https_client, BufferPool, PoolClient};
 use std::sync::Arc;
@@ -16,8 +16,9 @@ use util_layer::snow_errors::SnowCopyError;
 use util_layer::retry::retry_on_failure_async;
 use util_layer::{build_context, constants, Config, FileInfo, SnowContext};
 use walkdir::WalkDir;
+use util_layer::constants::{CHUNK_SIZE, MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY};
 
-pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &Config) {
+pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &Config, md5_checksum_upload: bool) {
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
@@ -30,7 +31,7 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
     let (file_sem, req_sem, buffer_pool_size, _) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, download_concurrency, path, cc_tx.clone(), false);
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, constants::CHUNK_SIZE as usize));
-    let context_arc = Arc::new(build_context(config.clone()));
+    let context_arc = Arc::new(build_context(config.clone(), md5_checksum_upload));
     let mut handles = Vec::new();
 
     let bucket_created = bucket_creation_handle.await.unwrap();
@@ -107,6 +108,11 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
 
     if let Some(mtime) = file_info.modified_time {
         create_multipart_upload = create_multipart_upload.metadata("mtime", util_layer::time::time_to_float_string(mtime));
+    }
+
+    if ctx.md5_checksum_itegrity_check(){
+        //TODO JON: chunk will increase if file is larger than 50GiB
+        create_multipart_upload = create_multipart_upload.metadata(MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, CHUNK_SIZE.to_string());
     }
 
     let create_multipart_upload_output = create_multipart_upload.send().await.unwrap();
@@ -235,7 +241,7 @@ fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCen
                     let cc_tx = cc_tx_checker.clone();
 
                     checker_set.spawn(async move {
-                        let (_exists_at_target, size, s3_mtime) = get_s3_mtime(&client, &bucket, &file_info.key).await;
+                        let (_exists_at_target, size, s3_mtime, _chunk_size, _etag) = get_s3_metadata(&client, &bucket, &file_info.key).await;
 
                         if should_upload(&file_info, size, s3_mtime).await {
                             upload_tx.send(Ok(file_info)).await.expect("Should never fail.")
