@@ -6,6 +6,8 @@ use aws_config::timeout::TimeoutConfig;
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3::config::{Builder, Credentials, ProvideCredentials, RequestChecksumCalculation, ResponseChecksumValidation};
 use aws_sdk_s3::operation::create_bucket::CreateBucketOutput;
+use aws_sdk_s3::operation::get_object::GetObjectOutput;
+use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
 use s3example_error::S3ExampleError;
@@ -169,6 +171,8 @@ async fn list_bucket(
     Ok(())
 }
 
+
+
 pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: Arc<AWSClient>, sender: UnboundedSender<CommandCenterEvent>) ->  mpsc::Receiver<S3Object> {
     let (tx, rx) = mpsc::channel::<S3Object>(constants::DISCOVERY_LIMIT_DOWNLOAD as usize);
 
@@ -258,6 +262,41 @@ pub async fn get_s3_metadata(client: &AWSClient, bucket: &str, key: &str) -> (bo
         }
         Err(_) => (false, None, None, None, None, None),
     }
+}
+
+/*
+    TODO Jon: For endpoints that support get /key/partNumber=X, then we do not need to rely on our own metadata to reconstruct the etag.
+    The thing is that we do not know if all s3 clones support it, so it should be part of autodetection. Ceph does, so there is that. Minio, too.
+    It would be way more elegant since no extra metadata is needed. I'll leave this in for when we need it for autodetection.
+
+    let resp = get_object(&client.clone(), bucket.clone().as_str(), "BigFile-1.bin", Some(1)).await;
+    println!("{:?}", resp);
+
+*/
+pub async fn get_object(
+    client: &AWSClient,
+    bucket: &str,
+    key: &str,
+    part_number: Option<i32>,
+) -> std::result::Result<GetObjectOutput, S3ExampleError> {
+    let mut request = client.get_object().bucket(bucket).key(key);
+    if let Some(part) = part_number {
+        request = request.part_number(part);
+    }
+    request.send().await.map_err(S3ExampleError::from)
+}
+
+pub async fn head_object(
+    client: &AWSClient,
+    bucket: &str,
+    key: &str,
+    part_number: Option<i32>,
+) -> std::result::Result<HeadObjectOutput, S3ExampleError> {
+    let mut request = client.head_object().bucket(bucket).key(key);
+    if let Some(part) = part_number {
+        request = request.part_number(part);
+    }
+    request.send().await.map_err(S3ExampleError::from)
 }
 
 pub async fn load_aws_config_parts() -> (Credentials, Region, Option<String>) {
