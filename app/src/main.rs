@@ -55,6 +55,12 @@ async fn main() {
     let silent = matches.get_flag("silent");
     let download = matches.get_flag("download");
     let stats = matches.get_flag("stats");
+    let md5_checksum_integrity = matches
+        .get_one::<bool>("md5_checksum_integrity")
+        .copied()
+        .unwrap_or(true);
+
+    println!("{}", md5_checksum_integrity);
 
     let path = Path::new(path_as_string);
     let arc_bucket = Arc::new(bucket.to_string());
@@ -66,12 +72,12 @@ async fn main() {
 
     if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
         match method {
-            TransferMethod::CephS3Tokio => download::download(arc_bucket, "", path, file_limit, req_limit, download_concurrency, silent, stats, &config).await,
+            TransferMethod::CephS3Tokio => download::download(arc_bucket, "", path, file_limit, req_limit, download_concurrency, silent, stats, &config, md5_checksum_integrity).await,
             TransferMethod::TransferManager => transfer_manager::download(arc_bucket, path, silent, stats, &config, req_limit).await,
         }
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, download_concurrency, silent, stats, &config).await,
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, download_concurrency, silent, stats, &config, md5_checksum_integrity).await,
             TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config, req_limit).await,
         };
     }
@@ -202,6 +208,14 @@ fn parse_arguments() -> ArgMatches {
                 .help("Enable statistics output")
                 .required(false)
                 .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("md5_checksum_integrity")
+                .long("disable-md5-checksum-integrity")
+                .help("Disable MD5 checksum validation")
+                .required(false)
+                .default_value("true")
+                .action(clap::ArgAction::SetFalse),
         )
         .after_help("Upload example:\n  snowplowRust -b bucket-name path/to/source")
         .get_matches();

@@ -18,6 +18,7 @@ pub enum CommandCenterEvent {
     StatusChanged(Status),
     Log(String),
     RetryRequested(oneshot::Sender<Duration>, u32, SystemTime, String),
+    FileIntegrityChecked(bool) //JON: Should have key for some logging?
 }
 
 #[allow(dead_code)] //TODO Jon: not all status are used currently

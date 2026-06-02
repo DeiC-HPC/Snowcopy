@@ -1,24 +1,26 @@
 use crate::auto_tuning::auto_tune_semaphores;
-use crate::command_center::{CommandCenter, CC};
+use crate::command_center::{CommandCenter, Mode, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 use anyhow::Error;
-use aws_layer::{async_head_objects_from_bucket, get_s3_mtime, AWSClient, S3Object};
+use aws_layer::{async_head_objects_from_bucket, get_s3_metadata, AWSClient};
 use http_layer::{BufferPool, PoolClient};
 use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::sync::Semaphore;
-use util_layer::constants::{DOWNLOAD_CHUNK_SIZE, METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD};
+use util_layer::constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD;
 use util_layer::download::{FileCompletionTracker, WriteMsg};
 use util_layer::retry::retry_on_failure_async;
 use util_layer::snow_errors::SnowCopyError;
-use util_layer::{build_context, FileInfo, SnowContext};
+use util_layer::{build_context, FileInfo, SnowContext, S3Object};
 
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::task::JoinSet;
+use http_layer::integrity::{reconstructable_multipart_etag, IntegrityAlgorithm};
 use util_layer::cc_util::CommandCenterEvent;
 
 /// Ensures that the parent directory of the given path exists.
@@ -38,8 +40,8 @@ fn ensure_parent_dirs_exist(file_path: &Path, created_dirs: &mut HashSet<std::pa
     Ok(())
 }
 
-pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &util_layer::Config) {
-    let cc = CommandCenter::new(silent, stats);
+pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &util_layer::Config, md5_checksum_integrity: bool) {
+    let cc = CommandCenter::new(silent, stats, Mode::Download);
     let (cc_tx, cc_handle) = cc.start();
 
     let client = Arc::new(aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str(), config.s3_region.as_str()).await);
@@ -47,7 +49,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     let mut download_rx = fetch_object_metadata_and_filter_already_downloaded(&bucket, &cc_tx, client, object_channel).await;
 
     let pool_client = Arc::new(http_layer::build_https_client());
-    let snow_context = Arc::new(build_context(config.clone()));
+    let snow_context = Arc::new(build_context(config.clone(), md5_checksum_integrity));
     let (file_sem, req_sem, _buffer_pool_size, download_file_concurrency) = auto_tune_semaphores(file_limit, req_limit, download_concurrency, dest, cc_tx.clone(), true);
     let task_sem = Arc::new(Semaphore::new(req_sem.available_permits() * 2));
 
@@ -95,6 +97,8 @@ async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String
     let cc_tx_checker = cc_tx.clone();
 
     tokio::spawn(async move {
+        let warning_has_been_sent = Arc::new(AtomicBool::new(false));
+
         let mut checker_set = JoinSet::new();
         while let Some(object) = object_channel.recv().await {
             let client = checker_client.clone();
@@ -102,15 +106,26 @@ async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String
             let download_tx = download_tx.clone();
             let permit = checker_task_sem.clone().acquire_owned().await.unwrap();
             let cc_tx = cc_tx_checker.clone();
+            let warning_has_been_sent = warning_has_been_sent.clone();
 
             checker_set.spawn(async move {
-                let (_, _, mtime) = get_s3_mtime(&client, &bucket, &object.key).await;
+                let (_, _, mtime, chunk_size, etag, sha256) = get_s3_metadata(&client, &bucket, &object.key).await;
                 let mut object = object;
                 object.modified_time = mtime;
+                object.chunk_size = chunk_size;
+                object.etag = etag;
+                object.sha256_checksum = sha256;
 
                 let should_download = should_download_object(&mut object);
 
                 if should_download {
+                    if object.chunk_size.is_none() && object.sha256_checksum.is_none() {
+                        let already_sent = warning_has_been_sent.swap(true, Ordering::Relaxed);
+                        if !already_sent {
+                            cc_tx.send(CommandCenterEvent::Log("Lack of Snowcopy file metadata detected for some files - file integrity checks are reduced".to_string())).expect("Failed to send message. This should never happen.");
+                        }
+                    }
+
                     if let Err(e) = download_tx.send(object).await {
                         cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to download queue: {}", e))).expect("Failed to send message. This should never happen.");
                     }
@@ -154,7 +169,9 @@ fn should_download_object(object: &mut S3Object) -> bool {
 }
 
 async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object,  req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, download_file_concurrency: usize, disk_write_tx: Sender<WriteMsg>) {
-    if object.size > DOWNLOAD_MULTIPART_THRESHOLD as i64 {
+    let multipart_integrity_verification = snow_context.md5_checksum_integrity_check() && reconstructable_multipart_etag(&object);
+
+    if object.size > DOWNLOAD_MULTIPART_THRESHOLD as i64 || multipart_integrity_verification {
         let file_path = object.local_path.clone();
         let bucket = bucket.clone();
         let key = object.key.clone();
@@ -176,69 +193,32 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
         let file = Arc::new(file);
 
         let ideal_chunk_size = total_size.div_ceil(download_file_concurrency as u64);
-        let chunk_size = std::cmp::max(ideal_chunk_size, DOWNLOAD_MULTIPART_THRESHOLD);
+        let mut chunk_size = std::cmp::max(ideal_chunk_size, DOWNLOAD_MULTIPART_THRESHOLD);
+        if multipart_integrity_verification {
+            chunk_size = object.chunk_size.unwrap() as u64;
+        }
         let num_parts = (total_size + chunk_size - 1) / chunk_size;
+        //TODO JON: if we are validating integrity, then the etag suffix is the number of parts. We can fail early here if there is a mismatch between the number of parts and the expected number of parts based on the etag suffix. Not sure how we should handle that case, though
 
-        let mut total_chunks = 0;
-        for i in 0..num_parts {
-            let start = i * chunk_size;
-            let end = std::cmp::min(start + chunk_size - 1, total_size - 1);
-            let part_size = end - start + 1;
-            total_chunks += (part_size as usize + DOWNLOAD_CHUNK_SIZE - 1) / DOWNLOAD_CHUNK_SIZE;
-        }
+        let hash_algo = if multipart_integrity_verification {
+            IntegrityAlgorithm::MD5
+        } else {
+            IntegrityAlgorithm::None
+        };
 
-        let tracker = Arc::new(FileCompletionTracker {
-            pending_writes: std::sync::atomic::AtomicUsize::new(total_chunks),
-            mtime: object.modified_time,
-            total_size,
-            cc_sender: cc_sender.clone(),
-        });
+        let integrity_result = download_files_in_part_and_check_integrity(&pool_client, &snow_context, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &bucket, &key, total_size, file.clone(), chunk_size, num_parts, hash_algo.clone()).await;
 
-        let mut download_set = JoinSet::new();
+        if let Err(e) = integrity_result {
+            cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, e))).expect("Failed to send message. This should never happen.");
 
-        let canonical_uri = Arc::new(format!("/{}/{}", &bucket, key));
+            let integrity_result = download_files_in_part_and_check_integrity(&pool_client, &snow_context, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &bucket, &key, total_size, file, chunk_size, num_parts, hash_algo).await;
 
-        for i in 0..num_parts {
-            let start = i * chunk_size;
-            let end = std::cmp::min(start + chunk_size - 1, total_size - 1);
-
-            let snow_context = snow_context.clone();
-            let pool_client = pool_client.clone();
-            let req_sem = req_sem.clone();
-            let canonical_uri = canonical_uri.clone();
-            //let query_uri = String::new(); //TODO JON: when would we need this?
-            let file = file.clone();
-            let disk_write_tx = disk_write_tx.clone();
-            let tracker = tracker.clone();
-
-            let cc_sender = cc_sender.clone();
-            download_set.spawn(async move {
-                retry_on_failure_async(|| {
-                    let snow_context = snow_context.clone();
-                    let pool_client = pool_client.clone();
-                    let req_sem = req_sem.clone();
-                    let canonical_uri = canonical_uri.clone();
-                    let query_uri = String::new();
-                    let file = file.clone();
-                    let disk_write_tx = disk_write_tx.clone();
-                    let tracker = tracker.clone();
-
-                    async move {
-                        http_layer::download::download_file_range(start, end, snow_context, &pool_client, req_sem, canonical_uri, &query_uri, file, disk_write_tx, tracker).await
-                    }
-                }, cc_sender.clone(), |e: &anyhow::Error| {
-                    if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
-                        return snow_error.is_retryable();
-                    }
-                    false
-                }, format!("Downloading part (bytes {} to {}) of {}", start, end, canonical_uri)).await
-            });
-        }
-
-        while let Some(res) = download_set.join_next().await {
-            if let Err(e) = res.map_err(|e| Error::from(e)).and_then(|r| r) {
-                panic!("Part download failed for {}: {}", key, e);
+            if let Err(e) = integrity_result {
+                cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Its likely that there is something with the metadata, the network or the s3 storage system.", object.key, e))).expect("Failed to send message. This should never happen.");
+                //TODO JON: exit with different exit code, when we are done. When we figure out how to cancel / exit the program. I would assume that we send this info to the command center
             }
+
+            return;
         }
     } else {
         //simple download
@@ -252,30 +232,167 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
         let canonical_uri = Arc::new(format!("/{}/{}", &bucket, object.key));
         let query_uri = String::new();
 
-        let cc_sender_retry = cc_sender.clone();
-        let result = retry_on_failure_async(move || {
-            let snow_context = snow_context.clone();
-            let file_info = file_info.clone();
-            let pool_client = pool_client.clone();
-            let canonical_uri = canonical_uri.clone();
-            let query_uri = query_uri.clone();
-            let req_sem = req_sem.clone();
-            let disk_write_tx = disk_write_tx.clone();
-            let cc_sender = cc_sender_retry.clone();
-            async move {
-                http_layer::download::get_file(snow_context, file_info, &pool_client, canonical_uri, &query_uri, req_sem, disk_write_tx, cc_sender).await
-            }
-        }, cc_sender.clone(), |e: &anyhow::Error| {
-            if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
-                return snow_error.is_retryable();
-            }
-            false
-        }, format!("Downloading {}", object.key)).await;
+        let integrity_result = download_full_file_and_check_integrity(pool_client.clone(), snow_context.clone(), object.clone(), req_sem.clone(), cc_sender.clone(), disk_write_tx.clone(), file_info.clone(), canonical_uri.clone(), query_uri.clone()).await;
+        if let Err(e) = integrity_result {
+            cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, e))).expect("Failed to send message. This should never happen.");
 
-        if let Err(e) = result {
-            cc_sender.send(CommandCenterEvent::Log(format!("Failed to download {}: {}", object.key, e))).unwrap();
+            let integrity_result = download_full_file_and_check_integrity(pool_client, snow_context, object.clone(), req_sem, cc_sender.clone(), disk_write_tx, file_info, canonical_uri, query_uri).await;
+
+            if let Err(e) = integrity_result {
+                cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Its likely that there is something with the metadata, the network or the s3 storage system.", object.key, e))).expect("Failed to send message. This should never happen.");
+                //TODO JON: exit with different exit code, when we are done. When we figure out how to cancel / exit the program. I would assume that we send this info to the command center
+            }
+
+            return;
         }
     }
+}
+
+async fn download_full_file_and_check_integrity(pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, disk_write_tx: Sender<WriteMsg>, file_info: Arc<FileInfo>, canonical_uri: Arc<String>, query_uri: String)  -> Result<(), Error> {
+    let cc_sender_retry = cc_sender.clone();
+    let result = retry_on_failure_async(move || {
+        let snow_context = snow_context.clone();
+        let file_info = file_info.clone();
+        let pool_client = pool_client.clone();
+        let canonical_uri = canonical_uri.clone();
+        let query_uri = query_uri.clone();
+        let req_sem = req_sem.clone();
+        let disk_write_tx = disk_write_tx.clone();
+        let cc_sender = cc_sender_retry.clone();
+        async move {
+            http_layer::download::get_file(snow_context, file_info, &pool_client, canonical_uri, &query_uri, req_sem, disk_write_tx, cc_sender).await
+        }
+    }, cc_sender.clone(), |e: &anyhow::Error| {
+        if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
+            return snow_error.is_retryable();
+        }
+        false
+    }, format!("Downloading {}", object.key)).await;
+
+    match result {
+        Ok(hash) => {
+            if let Some(sha256) = hash {
+                if object.sha256_checksum.is_some() {
+                    let sha256_expected = object.sha256_checksum.unwrap();
+                    if sha256_expected != sha256 {
+                        let error_msg = format!(
+                            "Integrity check failed for {}. Expected {}, got {}",
+                            object.key, sha256_expected, sha256
+                        );
+                        cc_sender.send(CommandCenterEvent::Log(error_msg.clone())).expect("Failed to send message");
+                        return Err(anyhow::anyhow!(error_msg));
+                    } else {
+                        cc_sender.send(CommandCenterEvent::FileIntegrityChecked(true)).expect("Failed to send message");
+                    }
+                } else {
+                    //silence, as we don't have info to do the check
+                }
+            }
+        }
+        Err(e) => {
+            cc_sender.send(CommandCenterEvent::Log(format!("Failed to download {}: {}", object.key, e))).expect("Failed to send message");
+            //TODO JON: Panic? we need to be sharp about how to deal with these irrecoverable errors
+        }
+    }
+
+    Ok(())
+}
+
+async fn download_files_in_part_and_check_integrity(pool_client: &Arc<PoolClient>, snow_context: &Arc<SnowContext>, object: &S3Object, req_sem: &Arc<Semaphore>, cc_sender: &UnboundedSender<CommandCenterEvent>, disk_write_tx: &Sender<WriteMsg>, multipart_integrity_verification: bool, bucket: &Arc<String>, key: &String, total_size: u64, file: Arc<File>, chunk_size: u64, num_parts: u64, hash_algo: IntegrityAlgorithm) -> Result<(), Error> {
+    let mut download_set = download_file_in_parts(&pool_client, &snow_context, &object, &req_sem, &cc_sender, &disk_write_tx, &bucket, &key, total_size, file, chunk_size, num_parts, hash_algo);
+
+    let mut part_hashes = vec![None; num_parts as usize];
+    while let Some(res) = download_set.join_next().await {
+        match res {
+            Ok(Ok((i, _bytes, hash))) => {
+                part_hashes[i as usize] = hash; //Maintain part order to ensure correct integrity verification
+            }
+            Ok(Err(e)) => {
+                panic!("Part download failed for {}: {}", key, e);
+            }
+            Err(e) => {
+                panic!("Join error for {}: {}", key, e);
+            }
+        }
+    }
+
+    if multipart_integrity_verification {
+        let part_md5s: Vec<Vec<u8>> = part_hashes
+            .into_iter()
+            .map(|h| {
+                hex::decode(h.expect("All parts must have a hash if integrity verification is enabled"))
+                    .expect("Hash should be valid hex")
+            })
+            .collect();
+
+        let reconstructed_etag = http_layer::integrity::reconstruct_multipart_etag(&part_md5s);
+        let expected_etag = object.etag.as_ref().map(|e| e.trim_matches('"')).unwrap_or("");
+
+        if reconstructed_etag != expected_etag {
+            let error_msg = format!(
+                "Integrity check failed for {}. Expected {}, got {}",
+                key, expected_etag, reconstructed_etag
+            );
+            cc_sender.send(CommandCenterEvent::Log(error_msg.clone())).expect("Failed to send message");
+            return Err(anyhow::anyhow!(error_msg));
+        } else {
+            cc_sender.send(CommandCenterEvent::FileIntegrityChecked(true)).expect("Failed to send message");
+        }
+    }
+    Ok(())
+}
+
+fn download_file_in_parts(pool_client: &Arc<PoolClient>, snow_context: &Arc<SnowContext>, object: &S3Object, req_sem: &Arc<Semaphore>, cc_sender: &UnboundedSender<CommandCenterEvent>, disk_write_tx: &Sender<WriteMsg>, bucket: &Arc<String>, key: &String, total_size: u64, file: Arc<File>, chunk_size: u64, num_parts: u64, hash_algo: IntegrityAlgorithm) -> JoinSet<Result<(u64, u64, Option<String>), Error>> {
+    let tracker = Arc::new(FileCompletionTracker {
+        pending_bytes_to_be_written: std::sync::atomic::AtomicU64::new(total_size),
+        mtime: object.modified_time,
+        total_size,
+        cc_sender: cc_sender.clone(),
+    });
+
+    let mut download_set = JoinSet::new();
+    let canonical_uri = Arc::new(format!("/{}/{}", &bucket, key));
+
+    for i in 0..num_parts {
+        let start = i * chunk_size;
+        let end = std::cmp::min(start + chunk_size - 1, total_size - 1);
+
+        let snow_context = snow_context.clone();
+        let pool_client = pool_client.clone();
+        let req_sem = req_sem.clone();
+        let canonical_uri = canonical_uri.clone();
+        //let query_uri = String::new(); //TODO JON: when would we need this?
+        let file = file.clone();
+        let disk_write_tx = disk_write_tx.clone();
+        let tracker = tracker.clone();
+        let hash_algo = hash_algo.clone();
+
+        let cc_sender = cc_sender.clone();
+        download_set.spawn(async move {
+            let res = retry_on_failure_async(|| {
+                let snow_context = snow_context.clone();
+                let pool_client = pool_client.clone();
+                let req_sem = req_sem.clone();
+                let canonical_uri = canonical_uri.clone();
+                let query_uri = String::new();
+                let file = file.clone();
+                let disk_write_tx = disk_write_tx.clone();
+                let tracker = tracker.clone();
+                let hash_algo = hash_algo.clone();
+
+                async move {
+                    http_layer::download::download_file_range(start, end, snow_context, &pool_client, req_sem, canonical_uri, &query_uri, file, disk_write_tx, tracker, hash_algo).await
+                }
+            }, cc_sender.clone(), |e: &anyhow::Error| {
+                if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
+                    return snow_error.is_retryable();
+                }
+                false
+            }, format!("Downloading part (bytes {} to {}) of {}", start, end, canonical_uri)).await;
+            res.map(|(bytes, hash)| (i, bytes, hash))
+        });
+    }
+    download_set
 }
 
 #[allow(dead_code)]

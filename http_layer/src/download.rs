@@ -16,11 +16,12 @@ use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender};
 use tokio::sync::Semaphore;
 use tokio::task;
 use util_layer::cc_util::{CcLoadAndTransfer, CommandCenterEvent};
-use util_layer::constants::{AWS_ALGORITHM, DOWNLOAD_CHUNK_SIZE, EMPTY_PAYLOAD_SHA256};
+use util_layer::constants::{AWS_ALGORITHM, DOWNLOAD_CHUNK_SIZE, DOWNLOAD_DIRECT_WRITE_FRAME_THRESHOLD, EMPTY_PAYLOAD_SHA256};
 use util_layer::download::{FileCompletionTracker, WriteMsg};
 use util_layer::{FileInfo, SnowContext};
+use crate::integrity::IntegrityAlgorithm;
 
-pub async fn download_file_range(start: u64, end: u64, snow_context: Arc<SnowContext>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, fd : Arc<File>, disk_write_tx: Sender<WriteMsg>, tracker: Arc<FileCompletionTracker>) -> std::result::Result<u64, Error> {
+pub async fn download_file_range(start: u64, end: u64, snow_context: Arc<SnowContext>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, fd : Arc<File>, disk_write_tx: Sender<WriteMsg>, tracker: Arc<FileCompletionTracker>, hash_algo : IntegrityAlgorithm) -> std::result::Result<(u64, Option<String>), Error> {
     let range = format!("bytes={}-{}", start, end);
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
@@ -40,47 +41,91 @@ pub async fn download_file_range(start: u64, end: u64, snow_context: Arc<SnowCon
 
     let mut body = resp.into_body();
 
-    //Here its important that we do not send mtime as we are part of a big parallel transfer, and it must be set as the last operation on the file.
-    let bytes_read = download_body_to_buffer_and_offload_to_disk_writers(start, fd, disk_write_tx, &mut body, tracker, (end - start + 1) as usize).await?;
+    let (bytes_read, hash) = download_body_to_buffer_and_offload_to_disk_writers(start, fd, disk_write_tx, &mut body, tracker, (end - start + 1) as usize, hash_algo).await?;
 
     if bytes_read != end - start + 1 {
         return Err(anyhow::anyhow!("Partial download failed. Expected {} bytes, got {}", end - start + 1, bytes_read));
     }
 
     drop(req_permit);
-    Ok(bytes_read)
+    Ok((bytes_read, hash))
 }
 
-async fn download_body_to_buffer_and_offload_to_disk_writers(start: u64, fd: Arc<File>, disk_write_tx: Sender<WriteMsg>, body: &mut Incoming, tracker: Arc<FileCompletionTracker>, file_size: usize) -> Result<u64, Error> {
+async fn download_body_to_buffer_and_offload_to_disk_writers(start: u64, fd: Arc<File>, disk_write_tx: Sender<WriteMsg>, body: &mut Incoming, tracker: Arc<FileCompletionTracker>, file_size: usize, hash_algo : IntegrityAlgorithm) -> Result<(u64, Option<String>), Error> {
     let mut bytes_read = 0u64;
 
     let mut buffer = Vec::with_capacity(cmp::min(DOWNLOAD_CHUNK_SIZE, file_size));
     let mut buffer_start = start;
 
+    let mut hasher = match hash_algo {
+        IntegrityAlgorithm::MD5 => Some(openssl::hash::Hasher::new(openssl::hash::MessageDigest::md5()).map_err(|e| Error::from(e))?),
+        IntegrityAlgorithm::SHA256 => Some(openssl::hash::Hasher::new(openssl::hash::MessageDigest::sha256()).map_err(|e| Error::from(e))?),
+        IntegrityAlgorithm::None => None,
+    };
+
     while let Some(frame) = body.frame().await {
         let frame = frame?;
+
         if let Ok(data) = frame.into_data() {
-            if buffer.is_empty() {
+            if let Some(ref mut h) = hasher {
+                h.update(&data).map_err(|e| Error::from(e))?;
+            }
+
+            //Large enough tcp frame that we can just pass it directly to disk writers
+            if data.len() >= DOWNLOAD_DIRECT_WRITE_FRAME_THRESHOLD { //we can save time by not copying data into buffer
+                if !buffer.is_empty() {
+                    //flush current buffer before new frame directly to disk writers
+                    let buffered = std::mem::replace(&mut buffer, Vec::with_capacity(cmp::min(DOWNLOAD_CHUNK_SIZE, file_size)));
+
+                    disk_write_tx
+                        .send((fd.clone(), buffer_start, Bytes::from(buffered), tracker.clone()))
+                        .await?;
+                }
+
+                let offset = start + bytes_read;
+                bytes_read += data.len() as u64;
+
+                disk_write_tx
+                    .send((fd.clone(), offset, data, tracker.clone()))
+                    .await?;
+
+                continue;
+            }
+
+            if buffer.is_empty() { //this is only empty when we have just flushed it, in that case we should set the start position for the next buffer
                 buffer_start = start + bytes_read;
             }
 
             buffer.extend_from_slice(&data);
             bytes_read += data.len() as u64;
 
-            // flush if large enough
             if buffer.len() >= DOWNLOAD_CHUNK_SIZE {
-                let data = std::mem::replace(&mut buffer, Vec::with_capacity(DOWNLOAD_CHUNK_SIZE));
-                disk_write_tx.send((fd.clone(), buffer_start, Bytes::from(data), tracker.clone()))
+                let data = std::mem::replace(
+                    &mut buffer,
+                    Vec::with_capacity(cmp::min(DOWNLOAD_CHUNK_SIZE, file_size)),
+                );
+
+                disk_write_tx
+                    .send((fd.clone(), buffer_start, Bytes::from(data), tracker.clone()))
                     .await?;
             }
         }
     }
 
-    // flush remainder
     if !buffer.is_empty() {
-        disk_write_tx.send((fd, buffer_start, Bytes::from(buffer), tracker)).await?;
+        disk_write_tx
+            .send((fd, buffer_start, Bytes::from(buffer), tracker))
+            .await?;
     }
-    Ok(bytes_read)
+
+    let hash_result = if let Some(mut h) = hasher {
+        let digest = h.finish().map_err(|e| Error::from(e))?;
+        Some(hex::encode(digest))
+    } else {
+        None
+    };
+
+    Ok((bytes_read, hash_result))
 }
 
 #[cfg(unix)]
@@ -93,7 +138,7 @@ fn write_at_offset(file: &File, data: &[u8], offset: u64) -> std::io::Result<usi
     file.seek_write(data, offset)
 }
 
-pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, disk_write_tx: Sender<WriteMsg>, cc_sender: UnboundedSender<CommandCenterEvent>) -> Result<(), Error> {
+pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, disk_write_tx: Sender<WriteMsg>, cc_sender: UnboundedSender<CommandCenterEvent>) -> Result<Option<String>, Error> {
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
 
@@ -111,23 +156,22 @@ pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
     let mut body = resp.into_body();
     let path = file_info.file_path.clone();
 
-    // Open file once in blocking pool
+    // Open file once
     let file = File::create(&path)?;
     let file_arc = Arc::new(file);
 
-    let num_chunks = (file_info.file_size as usize + DOWNLOAD_CHUNK_SIZE - 1) / DOWNLOAD_CHUNK_SIZE;
     let tracker = Arc::new(FileCompletionTracker {
-        pending_writes: std::sync::atomic::AtomicUsize::new(num_chunks),
+        pending_bytes_to_be_written: std::sync::atomic::AtomicU64::new(file_info.file_size),
         mtime: file_info.modified_time,
         total_size: file_info.file_size,
         cc_sender,
     });
 
-    download_body_to_buffer_and_offload_to_disk_writers(0, file_arc.clone(), disk_write_tx, &mut body, tracker, file_info.file_size as usize).await?;
+    let (_bytes_read, hash_value) = download_body_to_buffer_and_offload_to_disk_writers(0, file_arc.clone(), disk_write_tx, &mut body, tracker, file_info.file_size as usize, IntegrityAlgorithm::SHA256).await?;
 
     drop(req_permit);
 
-    Ok(())
+    Ok(hash_value)
 }
 
 pub fn spawn_global_writers(
@@ -154,7 +198,7 @@ pub fn spawn_global_writers(
                             eprintln!("write error: {}", e); //TODO JON: Should we just retry? But what kind of local IO error would benefit from that?
                             //probably panic?
                         } else {
-                            tracker.complete_write(&file);
+                            tracker.complete_write(&file, data.len());
 
                             let transfer_metrics = CcLoadAndTransfer { //TODO JON: cleaner metrics. Perhaps optional.
                                 amount: data.len() as u64,

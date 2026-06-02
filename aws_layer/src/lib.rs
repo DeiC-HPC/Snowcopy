@@ -1,24 +1,27 @@
 mod s3example_error;
 
+use aws_config::meta::region::RegionProviderChain;
 use aws_config::retry::RetryConfig;
 use aws_config::timeout::TimeoutConfig;
 use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3::config::{Builder, Credentials, ProvideCredentials, RequestChecksumCalculation, ResponseChecksumValidation};
 use aws_sdk_s3::operation::create_bucket::CreateBucketOutput;
+use aws_sdk_s3::operation::get_object::GetObjectOutput;
+use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
 use s3example_error::S3ExampleError;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::SystemTime;
-use aws_config::meta::region::RegionProviderChain;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::cc_util::Status::Transferring;
-use util_layer::constants;
+use util_layer::constants::{MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, PAYLOAD_SHA256_METADATA_KEY};
 use util_layer::time::float_string_to_time;
+use util_layer::{constants, S3Object};
 
 pub type AWSClient = Client;
 pub type CompletedPartAws = CompletedPart;
@@ -168,6 +171,8 @@ async fn list_bucket(
     Ok(())
 }
 
+
+
 pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: Arc<AWSClient>, sender: UnboundedSender<CommandCenterEvent>) ->  mpsc::Receiver<S3Object> {
     let (tx, rx) = mpsc::channel::<S3Object>(constants::DISCOVERY_LIMIT_DOWNLOAD as usize);
 
@@ -196,7 +201,10 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
                                 key: key.to_string(),
                                 local_path,
                                 size,
-                                modified_time : None //No fallback value. Either we have the one from s3 metadata or we dont care
+                                modified_time : None, //No fallback value. Either we have the one from s3 metadata or we dont care
+                                chunk_size: None,
+                                etag: None,
+                                sha256_checksum: None,
                             };
 
                             let _ = sender.send(CommandCenterEvent::FileDiscovered(size as u64));
@@ -222,19 +230,26 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
     rx
 }
 
-#[derive(Debug, Clone)]
-pub struct S3Object {
-    pub key: String,
-    pub local_path: PathBuf,
-    pub size: i64,
-    pub modified_time: Option<SystemTime>,
-}
-
-pub async fn get_s3_mtime(client: &AWSClient, bucket: &str, key: &str) -> (bool, Option<i64>, Option<SystemTime>) {
+pub async fn get_s3_metadata(client: &AWSClient, bucket: &str, key: &str) -> (bool, Option<i64>, Option<SystemTime>, Option<usize>, Option<String>, Option<String>) {
     match client.head_object().bucket(bucket).key(key).send().await {
         Ok(resp) => {
             let size = resp.content_length();
-            let mtime = if let Some(mtime_str) = resp.metadata().and_then(|m| m.get("mtime")) {
+            let option = resp.metadata();
+            let etag = resp.e_tag().map(|e| e.to_string());
+
+            let chunk_size = option
+                .and_then(|m| m.get(MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY))
+                .and_then(|chunk_size| chunk_size.parse::<usize>().ok());
+
+            //read sha256 checksum from response first and fall back on metadata
+            let mut sha256_checksum = resp.checksum_sha256().map(|c| c.to_string());
+            if sha256_checksum.is_none() {
+                sha256_checksum = option
+                    .and_then(|m| m.get(PAYLOAD_SHA256_METADATA_KEY))
+                    .map(|s| s.to_string());
+            }
+
+            let mtime = if let Some(mtime_str) = option.and_then(|m| m.get("mtime")) {
                 if let Ok(st) = float_string_to_time(mtime_str) {
                     Some(st)
                 } else {
@@ -243,10 +258,45 @@ pub async fn get_s3_mtime(client: &AWSClient, bucket: &str, key: &str) -> (bool,
             } else {
                 None
             };
-            (true, size, mtime)
+            (true, size, mtime, chunk_size, etag, sha256_checksum)
         }
-        Err(_) => (false, None, None),
+        Err(_) => (false, None, None, None, None, None),
     }
+}
+
+/*
+    TODO Jon: For endpoints that support get /key/partNumber=X, then we do not need to rely on our own metadata to reconstruct the etag.
+    The thing is that we do not know if all s3 clones support it, so it should be part of autodetection. Ceph does, so there is that. Minio, too.
+    It would be way more elegant since no extra metadata is needed. I'll leave this in for when we need it for autodetection.
+
+    let resp = get_object(&client.clone(), bucket.clone().as_str(), "BigFile-1.bin", Some(1)).await;
+    println!("{:?}", resp);
+
+*/
+pub async fn get_object(
+    client: &AWSClient,
+    bucket: &str,
+    key: &str,
+    part_number: Option<i32>,
+) -> std::result::Result<GetObjectOutput, S3ExampleError> {
+    let mut request = client.get_object().bucket(bucket).key(key);
+    if let Some(part) = part_number {
+        request = request.part_number(part);
+    }
+    request.send().await.map_err(S3ExampleError::from)
+}
+
+pub async fn head_object(
+    client: &AWSClient,
+    bucket: &str,
+    key: &str,
+    part_number: Option<i32>,
+) -> std::result::Result<HeadObjectOutput, S3ExampleError> {
+    let mut request = client.head_object().bucket(bucket).key(key);
+    if let Some(part) = part_number {
+        request = request.part_number(part);
+    }
+    request.send().await.map_err(S3ExampleError::from)
 }
 
 pub async fn load_aws_config_parts() -> (Credentials, Region, Option<String>) {

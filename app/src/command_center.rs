@@ -1,3 +1,4 @@
+use std::cmp::PartialEq;
 use crate::ui::{ProgressBarUi, Ui, UiEvent};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -18,6 +19,12 @@ enum UiSender {
     Noop(NoopUiSender),
 }
 
+#[derive(PartialEq, Eq, Clone)]
+pub enum Mode {
+    Upload,
+    Download,
+}
+
 impl UiSender {
     fn send(&self, event: UiEvent) -> Result<(), ()> {
         match self {
@@ -34,11 +41,12 @@ pub trait CC {
 pub struct CommandCenter {
     silent : bool,
     stats: bool,
+    mode: Mode,
 }
 
 impl CommandCenter {
-    pub fn new(silent : bool, stats: bool) -> Self {
-        CommandCenter { silent, stats }
+    pub fn new(silent : bool, stats: bool, mode: Mode) -> Self {
+        CommandCenter {silent, stats, mode}
     }
 
 }
@@ -55,9 +63,11 @@ impl CC for CommandCenter {
             (Some(ui), UiSender::Real(tx), Some(handle))
         };
 
+        let mode = self.mode.clone();
         let stats = self.stats;
         let handle = tokio::task::spawn(async move {
             let mut file_transferred_count = 0u64;
+            let mut total_integrity_checked_files = 0u64;
             let mut total_retries = 0u64;
             let mut total_file_permit_time = 0f64;
             let mut total_req_permit_time = 0f64;
@@ -106,8 +116,15 @@ impl CC for CommandCenter {
                         let delay = initial_delay * 2u32.pow(attempts - 1);
                         let _ = tx.send(delay);
                     }
+                    CommandCenterEvent::FileIntegrityChecked(checked) => { //TODO JON: This could be part of FileTransferred, but it have some issues with getting the information elegantly to the independent writer threads
+                        if checked{
+                            total_integrity_checked_files += 1;
+                        }
+                    }
                 }
             }
+
+            //We are out of the loop, the program is terminating:
 
             if stats {
                 ui_tx.send(UiEvent::Println(format!("Total files completed: {}", file_transferred_count))).expect("Should never fail");
@@ -123,6 +140,10 @@ impl CC for CommandCenter {
             }
             if let Some(ui) = ui {
                 ui.finish(&Status::Finished.to_string()); //This must be done after the UI thread is done, as we experienced incorrect reporting due to race conditions otherwise
+            }
+
+            if mode == Mode::Download && file_transferred_count > 0 && file_transferred_count != total_integrity_checked_files {
+                println!("Total files integrity checked: {}/{}", total_integrity_checked_files, file_transferred_count);
             }
             if total_retries > 0 { //TODO Jon: Should this just be part of UI bar? Yeeesss
                 println!("Total retries: {}", total_retries);
