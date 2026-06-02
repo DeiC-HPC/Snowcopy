@@ -59,7 +59,7 @@ impl SnowContext {
         &self.s3_region
     }
 
-    pub fn md5_checksum_itegrity_check(&self) -> bool {
+    pub fn md5_checksum_integrity_check(&self) -> bool {
         self.md5_checksum_upload
     }   
 }

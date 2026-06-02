@@ -215,7 +215,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     //TODO JON: Its very possible that we should wrap this in a spawn_blocking and use a single file descriptor for the upload.
     
-    let mut md5_hasher = if ctx.md5_checksum_itegrity_check() {
+    let mut md5_hasher = if ctx.md5_checksum_integrity_check() {
         Some(Hasher::new(MessageDigest::md5())?)
     } else {
         None

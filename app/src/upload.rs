@@ -110,7 +110,7 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
         create_multipart_upload = create_multipart_upload.metadata("mtime", util_layer::time::time_to_float_string(mtime));
     }
 
-    if ctx.md5_checksum_itegrity_check(){
+    if ctx.md5_checksum_integrity_check(){
         //TODO JON: chunk will increase if file is larger than 50GiB
         create_multipart_upload = create_multipart_upload.metadata(MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, CHUNK_SIZE.to_string());
     }

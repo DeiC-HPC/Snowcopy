@@ -89,7 +89,6 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
 }
 
 async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut object_channel: Receiver<S3Object>) -> Receiver<S3Object> {
-    //TODO JON in this PR: we should give a small warning if we find objects without enough metadata for verification
     let (download_tx, download_rx) = mpsc::channel::<S3Object>(METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD as usize);
 
     let checker_client = client.clone();
@@ -170,7 +169,7 @@ fn should_download_object(object: &mut S3Object) -> bool {
 }
 
 async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow_context: Arc<SnowContext>, object: S3Object,  req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, download_file_concurrency: usize, disk_write_tx: Sender<WriteMsg>) {
-    let multipart_integrity_verification = snow_context.md5_checksum_itegrity_check() && reconstructable_multipart_etag(&object);
+    let multipart_integrity_verification = snow_context.md5_checksum_integrity_check() && reconstructable_multipart_etag(&object);
 
     if object.size > DOWNLOAD_MULTIPART_THRESHOLD as i64 || multipart_integrity_verification {
         let file_path = object.local_path.clone();
@@ -299,7 +298,7 @@ async fn download_full_file_and_check_integrity(pool_client: Arc<PoolClient>, sn
     Ok(())
 }
 
-async fn download_files_in_part_and_check_integrity(pool_client: &Arc<PoolClient>, snow_context: &Arc<SnowContext>, object: &S3Object, req_sem: &Arc<Semaphore>, cc_sender: &UnboundedSender<CommandCenterEvent>, disk_write_tx: &Sender<WriteMsg>, multipart_integrity_verification: bool, bucket: &Arc<String>, key: &String, total_size: u64, file: Arc<File>, mut chunk_size: u64, num_parts: u64, hash_algo: IntegrityAlgorithm) -> Result<(), Error> {
+async fn download_files_in_part_and_check_integrity(pool_client: &Arc<PoolClient>, snow_context: &Arc<SnowContext>, object: &S3Object, req_sem: &Arc<Semaphore>, cc_sender: &UnboundedSender<CommandCenterEvent>, disk_write_tx: &Sender<WriteMsg>, multipart_integrity_verification: bool, bucket: &Arc<String>, key: &String, total_size: u64, file: Arc<File>, chunk_size: u64, num_parts: u64, hash_algo: IntegrityAlgorithm) -> Result<(), Error> {
     let mut download_set = download_file_in_parts(&pool_client, &snow_context, &object, &req_sem, &cc_sender, &disk_write_tx, &bucket, &key, total_size, file, chunk_size, num_parts, hash_algo);
 
     let mut part_hashes = vec![None; num_parts as usize];
@@ -343,7 +342,7 @@ async fn download_files_in_part_and_check_integrity(pool_client: &Arc<PoolClient
     Ok(())
 }
 
-fn download_file_in_parts(pool_client: &Arc<PoolClient>, snow_context: &Arc<SnowContext>, object: &S3Object, req_sem: &Arc<Semaphore>, cc_sender: &UnboundedSender<CommandCenterEvent>, disk_write_tx: &Sender<WriteMsg>, bucket: &Arc<String>, key: &String, total_size: u64, file: Arc<File>, mut chunk_size: u64, num_parts: u64, hash_algo: IntegrityAlgorithm) -> JoinSet<Result<(u64, u64, Option<String>), Error>> {
+fn download_file_in_parts(pool_client: &Arc<PoolClient>, snow_context: &Arc<SnowContext>, object: &S3Object, req_sem: &Arc<Semaphore>, cc_sender: &UnboundedSender<CommandCenterEvent>, disk_write_tx: &Sender<WriteMsg>, bucket: &Arc<String>, key: &String, total_size: u64, file: Arc<File>, chunk_size: u64, num_parts: u64, hash_algo: IntegrityAlgorithm) -> JoinSet<Result<(u64, u64, Option<String>), Error>> {
     let tracker = Arc::new(FileCompletionTracker {
         pending_bytes_to_be_written: std::sync::atomic::AtomicU64::new(total_size),
         mtime: object.modified_time,
