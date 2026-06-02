@@ -241,7 +241,7 @@ fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCen
                     let cc_tx = cc_tx_checker.clone();
 
                     checker_set.spawn(async move {
-                        let (_exists_at_target, size, s3_mtime, _chunk_size, _etag) = get_s3_metadata(&client, &bucket, &file_info.key).await;
+                        let (_exists_at_target, size, s3_mtime, _chunk_size, _etag, _sha256_checksum) = get_s3_metadata(&client, &bucket, &file_info.key).await;
 
                         if should_upload(&file_info, size, s3_mtime).await {
                             upload_tx.send(Ok(file_info)).await.expect("Should never fail.")

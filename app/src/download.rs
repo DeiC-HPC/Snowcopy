@@ -9,6 +9,7 @@ use std::fs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::sync::Semaphore;
 use util_layer::constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD;
@@ -97,6 +98,8 @@ async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String
     let cc_tx_checker = cc_tx.clone();
 
     tokio::spawn(async move {
+        let warning_has_been_sent = Arc::new(AtomicBool::new(false));;
+
         let mut checker_set = JoinSet::new();
         while let Some(object) = object_channel.recv().await {
             let client = checker_client.clone();
@@ -104,17 +107,26 @@ async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String
             let download_tx = download_tx.clone();
             let permit = checker_task_sem.clone().acquire_owned().await.unwrap();
             let cc_tx = cc_tx_checker.clone();
+            let warning_has_been_sent = warning_has_been_sent.clone();
 
             checker_set.spawn(async move {
-                let (_, _, mtime, chunk_size, etag) = get_s3_metadata(&client, &bucket, &object.key).await;
+                let (_, _, mtime, chunk_size, etag, sha256) = get_s3_metadata(&client, &bucket, &object.key).await;
                 let mut object = object;
                 object.modified_time = mtime;
                 object.chunk_size = chunk_size;
                 object.etag = etag;
+                object.sha256_checksum = sha256;
 
                 let should_download = should_download_object(&mut object);
 
                 if should_download {
+                    if object.chunk_size.is_none() && object.sha256_checksum.is_none() {
+                        let already_sent = warning_has_been_sent.swap(true, Ordering::Relaxed);
+                        if !already_sent {
+                            cc_tx.send(CommandCenterEvent::Log("Lack of Snowcopy file metadata detected for some files - file integrity checks are reduced".to_string())).expect("Failed to send message. This should never happen.");
+                        }
+                    }
+
                     if let Err(e) = download_tx.send(object).await {
                         cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to download queue: {}", e))).expect("Failed to send message. This should never happen.");
                     }
@@ -317,8 +329,23 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
             false
         }, format!("Downloading {}", object.key)).await;
 
-        if let Err(e) = result {
-            cc_sender.send(CommandCenterEvent::Log(format!("Failed to download {}: {}", object.key, e))).unwrap();
+        match result {
+            Ok(hash) => {
+                if let Some(sha256) = hash {
+                    if object.sha256_checksum.is_some() {
+                        if object.sha256_checksum.unwrap() != sha256 {
+                            cc_sender.send(CommandCenterEvent::Log(format!("Integrity check failed for {}", object.key))).unwrap();
+                        } else {
+                            cc_sender.send(CommandCenterEvent::Log(format!("Integrity check passed for {}", object.key))).unwrap();
+                        }
+                    } else {
+                        //silence, as we don't have info to do the check
+                    }
+                }
+            }
+            Err(e) => {
+                cc_sender.send(CommandCenterEvent::Log(format!("Failed to download {}: {}", object.key, e))).unwrap();
+            }
         }
     }
 }

@@ -59,6 +59,7 @@ mod tests {
             modified_time: None,
             chunk_size: Some(10),
             etag: Some("\"538c298069d27f8a718747f48170c8f1-2\"".to_string()),
+            sha256_checksum: None,
         };
         assert!(reconstructable_multipart_etag(&obj));
 

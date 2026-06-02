@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::cc_util::Status::Transferring;
-use util_layer::constants::MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY;
+use util_layer::constants::{MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, PAYLOAD_SHA256_METADATA_KEY};
 use util_layer::time::float_string_to_time;
 use util_layer::{constants, S3Object};
 
@@ -200,6 +200,7 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
                                 modified_time : None, //No fallback value. Either we have the one from s3 metadata or we dont care
                                 chunk_size: None,
                                 etag: None,
+                                sha256_checksum: None,
                             };
 
                             let _ = sender.send(CommandCenterEvent::FileDiscovered(size as u64));
@@ -225,15 +226,25 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
     rx
 }
 
-pub async fn get_s3_metadata(client: &AWSClient, bucket: &str, key: &str) -> (bool, Option<i64>, Option<SystemTime>, Option<usize>, Option<String>) {
+pub async fn get_s3_metadata(client: &AWSClient, bucket: &str, key: &str) -> (bool, Option<i64>, Option<SystemTime>, Option<usize>, Option<String>, Option<String>) {
     match client.head_object().bucket(bucket).key(key).send().await {
         Ok(resp) => {
             let size = resp.content_length();
             let option = resp.metadata();
             let etag = resp.e_tag().map(|e| e.to_string());
+
             let chunk_size = option
                 .and_then(|m| m.get(MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY))
                 .and_then(|chunk_size| chunk_size.parse::<usize>().ok());
+
+            //read sha256 checksum from response first and fall back on metadata
+            let mut sha256_checksum = resp.checksum_sha256().map(|c| c.to_string());
+            if sha256_checksum.is_none() {
+                sha256_checksum = option
+                    .and_then(|m| m.get(PAYLOAD_SHA256_METADATA_KEY))
+                    .map(|s| s.to_string());
+            }
+
             let mtime = if let Some(mtime_str) = option.and_then(|m| m.get("mtime")) {
                 if let Ok(st) = float_string_to_time(mtime_str) {
                     Some(st)
@@ -243,9 +254,9 @@ pub async fn get_s3_metadata(client: &AWSClient, bucket: &str, key: &str) -> (bo
             } else {
                 None
             };
-            (true, size, mtime, chunk_size, etag)
+            (true, size, mtime, chunk_size, etag, sha256_checksum)
         }
-        Err(_) => (false, None, None, None, None),
+        Err(_) => (false, None, None, None, None, None),
     }
 }
 

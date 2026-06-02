@@ -265,8 +265,10 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     header_map.insert("content-length".to_string(), amount.to_string());
     header_map.insert(
         signer::get_amz_content_header(AWS_ALGORITHM),
-        sha256_hex,
+        sha256_hex.clone(),
     );
+    header_map.insert("x-amz-checksum-sha256".to_string(), sha256_hex.clone()); //AWS and some clones will check against this
+    header_map.insert("x-amz-meta-checksum-sha256".to_string(), sha256_hex); //Store as metadata, since clones cannot be trusted
     if let Some(mtime_str) = mtime_str {
         header_map.insert("x-amz-meta-mtime".to_string(), mtime_str);
     }

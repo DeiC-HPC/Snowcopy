@@ -72,6 +72,7 @@ pub struct S3Object {
     pub modified_time: Option<SystemTime>,
     pub chunk_size: Option<usize>,
     pub etag: Option<String>,
+    pub sha256_checksum: Option<String>,
 }
 
 #[derive(Clone)]
