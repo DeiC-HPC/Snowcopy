@@ -55,7 +55,12 @@ async fn main() {
     let silent = matches.get_flag("silent");
     let download = matches.get_flag("download");
     let stats = matches.get_flag("stats");
-    let md5_checksum_integrity = matches.get_flag("disable_md5_checksum_integrity");
+    let md5_checksum_integrity = matches
+        .get_one::<bool>("md5_checksum_integrity")
+        .copied()
+        .unwrap_or(true);
+
+    println!("{}", md5_checksum_integrity);
 
     let path = Path::new(path_as_string);
     let arc_bucket = Arc::new(bucket.to_string());
@@ -205,10 +210,11 @@ fn parse_arguments() -> ArgMatches {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::new("disable_md5_checksum_integrity")
+            Arg::new("md5_checksum_integrity")
                 .long("disable-md5-checksum-integrity")
-                .help("Enable MD5 checksum validation during upload")
+                .help("Disable MD5 checksum validation")
                 .required(false)
+                .default_value("true")
                 .action(clap::ArgAction::SetFalse),
         )
         .after_help("Upload example:\n  snowplowRust -b bucket-name path/to/source")
