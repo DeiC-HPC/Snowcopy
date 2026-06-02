@@ -1,5 +1,5 @@
 use crate::auto_tuning::auto_tune_semaphores;
-use crate::command_center::{CommandCenter, CC};
+use crate::command_center::{CommandCenter, Mode, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 use anyhow::Error;
 use aws_layer::{async_head_objects_from_bucket, get_s3_metadata, AWSClient};
@@ -41,7 +41,7 @@ fn ensure_parent_dirs_exist(file_path: &Path, created_dirs: &mut HashSet<std::pa
 }
 
 pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &util_layer::Config, md5_checksum_integrity: bool) {
-    let cc = CommandCenter::new(silent, stats);
+    let cc = CommandCenter::new(silent, stats, Mode::Download);
     let (cc_tx, cc_handle) = cc.start();
 
     let client = Arc::new(aws_layer::create_client(config.s3_access_key.as_str(), config.s3_secret_key.as_str(), config.s3_url.as_str(), config.s3_region.as_str()).await);
@@ -98,7 +98,7 @@ async fn fetch_object_metadata_and_filter_already_downloaded(bucket: &Arc<String
     let cc_tx_checker = cc_tx.clone();
 
     tokio::spawn(async move {
-        let warning_has_been_sent = Arc::new(AtomicBool::new(false));;
+        let warning_has_been_sent = Arc::new(AtomicBool::new(false));
 
         let mut checker_set = JoinSet::new();
         while let Some(object) = object_channel.recv().await {
@@ -261,7 +261,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
         while let Some(res) = download_set.join_next().await {
             match res {
                 Ok(Ok((i, _bytes, hash))) => {
-                    part_hashes[i as usize] = hash;
+                    part_hashes[i as usize] = hash; //Maintain part order to ensure correct integrity verification
                 }
                 Ok(Err(e)) => {
                     panic!("Part download failed for {}: {}", key, e);
@@ -291,10 +291,7 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                 ))).expect("Failed to send message");
                 // TODO Jon: how to handle failure? Retry this download a single time and if it fails again, then something is probably wrong with the metadata. That I'm unsure how to handle
             } else {
-                cc_sender.send(CommandCenterEvent::Log(format!(
-                    "Integrity check passed for {}",
-                    key
-                ))).expect("Failed to send message");
+                cc_sender.send(CommandCenterEvent::FileIntegrityChecked(true)).expect("Failed to send message");
             }
         }
     } else {
@@ -334,9 +331,9 @@ async fn download_object(bucket: Arc<String>, pool_client: Arc<PoolClient>, snow
                 if let Some(sha256) = hash {
                     if object.sha256_checksum.is_some() {
                         if object.sha256_checksum.unwrap() != sha256 {
-                            cc_sender.send(CommandCenterEvent::Log(format!("Integrity check failed for {}", object.key))).unwrap();
+                            cc_sender.send(CommandCenterEvent::Log(format!("Integrity check failed for {}", object.key))).unwrap(); //TODO Jon: retry
                         } else {
-                            cc_sender.send(CommandCenterEvent::Log(format!("Integrity check passed for {}", object.key))).unwrap();
+                            cc_sender.send(CommandCenterEvent::FileIntegrityChecked(true)).expect("Failed to send message");
                         }
                     } else {
                         //silence, as we don't have info to do the check

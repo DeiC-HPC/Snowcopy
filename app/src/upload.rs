@@ -1,4 +1,4 @@
-use crate::command_center::{CommandCenter, CC};
+use crate::command_center::{CommandCenter, Mode, CC};
 use crate::{auto_tuning};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use walkdir::WalkDir;
 use util_layer::constants::{CHUNK_SIZE, MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY};
 
 pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &Config, md5_checksum_upload: bool) {
-    let cc = CommandCenter::new(silent, stats);
+    let cc = CommandCenter::new(silent, stats, Mode::Upload);
     let (cc_tx, cc_handle) = cc.start();
 
     let mut files_to_upload_channel = walk_directory(path.to_path_buf(), cc_tx.clone()).await;
