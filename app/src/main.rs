@@ -13,14 +13,12 @@ use clap::{Arg, ArgMatches, Command};
 use std::path::Path;
 use std::sync::Arc;
 use tokio;
-use tokio::sync::Semaphore;
 use tracing_subscriber::{fmt, EnvFilter};
-use util_layer::{constants, Config, TrailingInfo};
+use util_layer::{constants, Config};
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
 #[cfg(not(target_env = "msvc"))]
 use jemallocator::Jemalloc;
-use util_layer::constants::{OPEN_FILE_LIMIT, STREAMING_READ_BUFFER_SIZE};
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -62,14 +60,8 @@ async fn main() -> Result<()> {
             TransferMethod::TransferManager => transfer_manager::download(arc_bucket, path, silent, stats, &config, req_limit).await,
         }
     } else {
-        let trailing_info = TrailingInfo {
-            trailing_chunk_size: trailing_chunk_size.unwrap_or(STREAMING_READ_BUFFER_SIZE as usize) as u64 * 1024,
-            trailing,
-            trailing_small,
-            open_file_sem_limit: Arc::new(Semaphore::new(open_file_sem_limit.unwrap_or(OPEN_FILE_LIMIT))),
-        };
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive, trailing_info).await,
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive, trailing, trailing_small, open_file_sem_limit, trailing_chunk_size).await,
             TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config, req_limit).await,
         };
     }

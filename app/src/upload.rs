@@ -1,5 +1,5 @@
 use crate::command_center::{CommandCenter, CC};
-use crate::{auto_tuning};
+use crate::auto_tuning;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -12,12 +12,13 @@ use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use util_layer::cc_util::{CommandCenterEvent, Status};
-use util_layer::snow_errors::SnowCopyError;
+use util_layer::constants::STREAMING_READ_BUFFER_SIZE;
 use util_layer::retry::retry_on_failure_async;
+use util_layer::snow_errors::SnowCopyError;
 use util_layer::{build_context, constants, Config, FileInfo, SnowContext, TrailingInfo};
 use walkdir::WalkDir;
 
-pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool, config: &Config, destructive: bool, trailing_info: TrailingInfo) {
+pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool, config: &Config, destructive: bool, trailing: bool, trailing_small: bool, open_file_sem_limit: Option<usize>, trailing_chunk_size: Option<usize>) {
     let cc = CommandCenter::new(silent, stats);
     let (cc_tx, cc_handle) = cc.start();
 
@@ -27,7 +28,15 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
     let bucket_creation_handle = create_bucket_if_not_exist(&bucket, &client);
 
     let hyper_client = Arc::new(build_https_client());
-    let (file_sem, req_sem, buffer_pool_size) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, path, cc_tx.clone());
+    let (file_sem, req_sem, buffer_pool_size, open_file_sem) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, open_file_sem_limit, path, cc_tx.clone());
+
+    let trailing_info = TrailingInfo {
+        trailing_chunk_size: trailing_chunk_size.unwrap_or(STREAMING_READ_BUFFER_SIZE as usize) as u64 * 1024,
+        trailing,
+        trailing_small,
+        open_file_sem_limit: open_file_sem,
+    };
+
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, constants::CHUNK_SIZE as usize));
     let context_arc = Arc::new(build_context(config.clone()));

@@ -45,7 +45,7 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
 
     let pool_client = Arc::new(http_layer::build_https_client());
     let snow_context = Arc::new(build_context(config.clone()));
-    let (file_sem, req_sem, buffer_pool_size) = auto_tune_semaphores(file_limit, req_limit, dest, cc_tx.clone());
+    let (file_sem, req_sem, buffer_pool_size, _) = auto_tune_semaphores(file_limit, req_limit, None, dest, cc_tx.clone());
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, DOWNLOAD_MULTIPART_THRESHOLD as usize));
 
