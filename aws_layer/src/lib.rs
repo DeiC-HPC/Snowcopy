@@ -17,6 +17,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::task::JoinSet;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::cc_util::Status::Transferring;
 use util_layer::constants::{MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, PAYLOAD_SHA256_METADATA_KEY};
@@ -189,40 +190,47 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
             .into_paginator()
             .send();
 
+        let mut join_set = JoinSet::new();
+
         while let Some(result) = paginator.next().await {
             match result {
                 Ok(output) => {
-                    for object in output.contents() {
-                        if let (Some(key), Some(size)) = (object.key(), object.size) {
-                            // Map S3 key to local file path
-                            let local_path = util_layer::s3_key_to_path(dest_clone.as_path(), key);
+                    let tx_clone = tx.clone();
+                    let sender_clone = sender.clone();
+                    let dest_clone_inner = dest_clone.clone();
 
-                            let s3_object = S3Object {
-                                key: key.to_string(),
-                                local_path,
-                                size,
-                                modified_time : None, //No fallback value. Either we have the one from s3 metadata or we dont care
-                                chunk_size: None,
-                                etag: None,
-                                sha256_checksum: None,
-                            };
+                    join_set.spawn(async move {
+                        for object in output.contents() {
+                            if let (Some(key), Some(size)) = (object.key(), object.size) {
+                                // Map S3 key to local file path
+                                let local_path = util_layer::s3_key_to_path(dest_clone_inner.as_path(), key);
 
-                            let _ = sender.send(CommandCenterEvent::FileDiscovered(size as u64));
-                            // Send object through channel
-                            if tx.send(s3_object).await.is_err() {
-                                eprintln!("Receiver dropped, stopping scan");
-                                return;
+                                let s3_object = S3Object {
+                                    key: key.to_string(),
+                                    local_path,
+                                    size,
+                                    modified_time : None, //No fallback value. Either we have the one from s3 metadata or we dont care
+                                    chunk_size: None,
+                                    etag: None,
+                                    sha256_checksum: None,
+                                };
+
+                                let _ = sender_clone.send(CommandCenterEvent::FileDiscovered(size as u64));
+                                // Send object through channel
+                                tx_clone.send(s3_object).await.expect("Failed to send S3 object to channel");
                             }
-
                         }
-                    }
+                    });
                 }
                 Err(e) => {
-                    eprintln!("Error listing objects: {:?}", e);
+                    eprintln!("Error listing objects: {:?}", e); //TODO JON: we should stop the transfer here
                     break;
                 }
             }
         }
+
+        // Wait for all processing tasks to complete
+        while let Some(_) = join_set.join_next().await {}
 
         let _ = sender.send(CommandCenterEvent::StatusChanged(Transferring));
     });
