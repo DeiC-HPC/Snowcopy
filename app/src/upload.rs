@@ -1,9 +1,9 @@
-use crate::command_center::{CommandCenter, CC};
+use crate::command_center::{CommandCenter, Mode, CC};
 use crate::auto_tuning;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use aws_layer::{get_s3_mtime, AWSClient, CompletedPartAws};
+use aws_layer::{get_s3_metadata, AWSClient, CompletedPartAws};
 use futures::future::join_all;
 use http_layer::{build_https_client, BufferPool, PoolClient};
 use std::sync::Arc;
@@ -17,9 +17,10 @@ use util_layer::retry::retry_on_failure_async;
 use util_layer::snow_errors::SnowCopyError;
 use util_layer::{build_context, constants, Config, FileInfo, SnowContext, TrailingInfo};
 use walkdir::WalkDir;
+use util_layer::constants::{CHUNK_SIZE, MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY};
 
-pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, silent: bool, stats: bool, config: &Config, destructive: bool, trailing: bool, trailing_small: bool, open_file_sem_limit: Option<usize>, trailing_chunk_size: Option<usize>) {
-    let cc = CommandCenter::new(silent, stats);
+pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Option<usize>, req_limit: Option<usize>, download_concurrency: Option<usize>, silent: bool, stats: bool, config: &Config, md5_checksum_upload: bool, trailing: bool, trailing_small: bool, open_file_sem_limit: Option<usize>, trailing_chunk_size: Option<usize>) {
+    let cc = CommandCenter::new(silent, stats, Mode::Upload);
     let (cc_tx, cc_handle) = cc.start();
 
     let mut files_to_upload_channel = walk_directory(path.to_path_buf(), cc_tx.clone()).await;
@@ -28,7 +29,7 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
     let bucket_creation_handle = create_bucket_if_not_exist(&bucket, &client);
 
     let hyper_client = Arc::new(build_https_client());
-    let (file_sem, req_sem, buffer_pool_size, open_file_sem) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, open_file_sem_limit, path, cc_tx.clone());
+    let (file_sem, req_sem, open_file_sem, buffer_pool_size, _) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, open_file_sem_limit, download_concurrency, path, cc_tx.clone(), false);
 
     let trailing_info = TrailingInfo {
         trailing_chunk_size: trailing_chunk_size.unwrap_or(STREAMING_READ_BUFFER_SIZE as usize) as u64 * 1024,
@@ -39,14 +40,14 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
 
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, constants::CHUNK_SIZE as usize));
-    let context_arc = Arc::new(build_context(config.clone()));
+    let context_arc = Arc::new(build_context(config.clone(), md5_checksum_upload));
     let mut handles = Vec::new();
 
     let bucket_created = bucket_creation_handle.await.unwrap();
 
     if !bucket_created {
         //We did not create the bucket, so check for already uploaded files
-        files_to_upload_channel = check_already_exists(&bucket, &cc_tx, client.clone(), files_to_upload_channel, req_sem.clone(), destructive);
+        files_to_upload_channel = check_already_exists(&bucket, &cc_tx, client.clone(), files_to_upload_channel, req_sem.clone());
     }
     while let Some(result) = files_to_upload_channel.recv().await {
         upload_file_async_and_add_to_handles(result, context_arc.clone(), bucket.clone(), client.clone(), hyper_client.clone(), file_sem.clone(), req_sem.clone(), task_sem.clone(), buffer_pool.clone(), cc_tx.clone(), &mut handles, trailing_info.clone()).await;
@@ -117,6 +118,11 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
 
     if let Some(mtime) = file_info.modified_time {
         create_multipart_upload = create_multipart_upload.metadata("mtime", util_layer::time::time_to_float_string(mtime));
+    }
+
+    if ctx.md5_checksum_integrity_check(){
+        //TODO JON: chunk will increase if file is larger than 50GiB
+        create_multipart_upload = create_multipart_upload.metadata(MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, CHUNK_SIZE.to_string());
     }
 
     let create_multipart_upload_output = create_multipart_upload.send().await.unwrap();
@@ -236,7 +242,7 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
     }
 }
 
-fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, _req_sem: Arc<Semaphore>, destructive: bool) -> Receiver<Result<FileInfo, io::Error>> {
+fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, _req_sem: Arc<Semaphore>) -> Receiver<Result<FileInfo, io::Error>> {
     let (upload_tx, upload_rx) = mpsc::channel::<Result<FileInfo, io::Error>>(constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_UPLOAD as usize);
 
     let checker_client = client.clone();
@@ -256,14 +262,10 @@ fn check_already_exists(bucket: &Arc<String>, cc_tx: &UnboundedSender<CommandCen
                     let cc_tx = cc_tx_checker.clone();
 
                     checker_set.spawn(async move {
-                        let (exists_at_target, size, s3_mtime) = get_s3_mtime(&client, &bucket, &file_info.key).await;
+                        let (_exists_at_target, size, s3_mtime, _chunk_size, _etag, _sha256_checksum) = get_s3_metadata(&client, &bucket, &file_info.key).await;
 
                         if should_upload(&file_info, size, s3_mtime).await {
-                            if exists_at_target && !destructive {
-                                cc_tx.send(CommandCenterEvent::NonDestructiveMode(format!("Skipping upload of already existing file {:?}", file_info.file_path))).expect("Failed to send message to command center. Should never happen.");
-                            } else {
-                                upload_tx.send(Ok(file_info)).await.expect("Should never fail.")
-                            }
+                            upload_tx.send(Ok(file_info)).await.expect("Should never fail.")
                         } else {
                             // Already uploaded, just let CC and ui know. We are done with the file
                             cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(file_info.file_size)).expect("Should never fail.");

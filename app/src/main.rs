@@ -4,8 +4,6 @@ mod ui;
 mod download;
 mod command_center;
 
-use serde_json::Result;
-
 use std::time::Instant;
 
 use clap::{Arg, ArgMatches, Command};
@@ -26,21 +24,43 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
     let start_time = Instant::now();
     init_logging();
 
     // Read Commandline Arguments
     let matches = parse_arguments();
-    let bucket = matches.get_one::<String>("bucket").expect("required");
-    let path_as_string = matches.get_one::<String>("path").expect("required");
+
+    if let Some(("config", _)) = matches.subcommand() {
+        if let Err(e) = config::run_tui() {
+            eprintln!("Error running config TUI: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let bucket = matches.get_one::<String>("bucket").ok_or_else(|| {
+        eprintln!("error: the following required arguments were not provided:\n  --bucket <NAME>\n\nUsage: snowplowRust --bucket <NAME> <PATH>\n\nFor more information, try '--help'.");
+        std::process::exit(2);
+    }).unwrap();
+
+    let path_as_string = matches.get_one::<String>("path").ok_or_else(|| {
+        eprintln!("error: the following required arguments were not provided:\n  <PATH>\n\nUsage: snowplowRust --bucket <NAME> <PATH>\n\nFor more information, try '--help'.");
+        std::process::exit(2);
+    }).unwrap();
     let transfer_method = matches.get_one::<String>("o").expect("required");
     let file_limit = matches.get_one::<usize>("file_limit").copied();
     let req_limit = matches.get_one::<usize>("req_limit").copied();
+    let download_concurrency = matches.get_one::<usize>("download_concurrency").copied();
     let silent = matches.get_flag("silent");
     let download = matches.get_flag("download");
     let stats = matches.get_flag("stats");
-    let destructive = matches.get_flag("destructive");
+    let md5_checksum_integrity = matches
+        .get_one::<bool>("md5_checksum_integrity")
+        .copied()
+        .unwrap_or(true);
+
+    println!("{}", md5_checksum_integrity);
     let trailing = matches.get_flag("trailing");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
     let trailing_small = matches.get_flag("trailing-small");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
     let trailing_chunk_size = matches.get_one::<usize>("trailing-chunk-size").copied(); // TODO LND: Possibly a temporary flag
@@ -56,12 +76,12 @@ async fn main() -> Result<()> {
 
     if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
         match method {
-            TransferMethod::CephS3Tokio => download::download(arc_bucket, "", path, file_limit, req_limit, silent, stats, &config, destructive).await,
+            TransferMethod::CephS3Tokio => download::download(arc_bucket, "", path, file_limit, req_limit, download_concurrency, silent, stats, &config, md5_checksum_integrity).await,
             TransferMethod::TransferManager => transfer_manager::download(arc_bucket, path, silent, stats, &config, req_limit).await,
         }
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, silent, stats, &config, destructive, trailing, trailing_small, open_file_sem_limit, trailing_chunk_size).await,
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, download_concurrency, silent, stats, &config, md5_checksum_integrity, trailing, trailing_small, open_file_sem_limit, trailing_chunk_size).await,
             TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config, req_limit).await,
         };
     }
@@ -70,8 +90,6 @@ async fn main() -> Result<()> {
     if !silent {
         println!("Program execution time: {:.2?}", elapsed);
     }
-
-    Ok(())
 }
 
 async fn gather_credentials() -> Config {
@@ -106,19 +124,23 @@ fn parse_arguments() -> ArgMatches {
     let matches = Command::new("snowplowRust")
         .version("0.1.0")
         .about("Parses a -b argument and a path")
+        .subcommand(
+            Command::new("config")
+                .about("Open the TUI for configuration management")
+        )
         .arg(
             Arg::new("bucket")
                 .short('b')                 // allows -b
                 .long("bucket")             // also allows --bucket
                 .value_name("NAME")
                 .help("Bucket (e.g., 'some-bucket-name')")
-                .required(true)
+                .required(false)
                 .num_args(1),
         )
         .arg(
             Arg::new("path")
                 .help("Input path")
-                .required(true)
+                .required(false)
                 .value_name("PATH")
             //.index(1),
         )
@@ -151,6 +173,16 @@ fn parse_arguments() -> ArgMatches {
                 .num_args(1),
         )
         .arg(
+            Arg::new("download_concurrency")
+                .short('c')
+                .long("download-concurrency")
+                .value_name("NUMBER")
+                .help("Maximum number of concurrent downloads per file")
+                .required(false)
+                .value_parser(clap::value_parser!(usize))
+                .num_args(1),
+        )
+        .arg(
             Arg::new("silent")
                 .short('q')
                 .long("silent")
@@ -174,20 +206,12 @@ fn parse_arguments() -> ArgMatches {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
-            Arg::new("non-destructive") //TODO Jon: this exists because we might want to be able to change a configured --destructive mode to a --non-destructive mode in the future.
-                .long("non-destructive")
-                .help("Non-destructive mode (do not override files already present in the destination directory, default if no other mode is specified)")
+            Arg::new("md5_checksum_integrity")
+                .long("disable-md5-checksum-integrity")
+                .help("Disable MD5 checksum validation")
                 .required(false)
-                .action(clap::ArgAction::SetTrue)
-                .conflicts_with("destructive"),
-        )
-        .arg(
-            Arg::new("destructive")
-                .long("destructive")
-                .help("Destructive mode (override files already present in the destination directory)")
-                .required(false)
-                .action(clap::ArgAction::SetTrue)
-                .conflicts_with("non-destructive"),
+                .default_value("true")
+                .action(clap::ArgAction::SetFalse),
         )
         .arg(
             Arg::new("trailing")

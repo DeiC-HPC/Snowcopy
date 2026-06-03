@@ -12,6 +12,7 @@ pub mod cc_util;
 pub mod time;
 pub mod retry;
 pub mod snow_errors;
+pub mod download;
 
 fn default_region() -> String { "us-east-1".to_string() }
 
@@ -24,12 +25,13 @@ pub struct Config {
     pub s3_region: String,
 }
 
-pub fn build_context(config: Config) -> SnowContext {
+pub fn build_context(config: Config, md5_checksum_upload: bool) -> SnowContext {
     let ctx = SnowContext {
         s3_access_key: config.s3_access_key,
         s3_secret_key: config.s3_secret_key,
         s3_host: Url::parse(config.s3_url.as_str()).unwrap().host_str().unwrap().to_string(),
         s3_region: config.s3_region,
+        md5_checksum_upload,
     };
     ctx
 }
@@ -39,6 +41,7 @@ pub struct SnowContext {
     s3_secret_key: String,
     s3_host: String,
     s3_region: String,
+    md5_checksum_upload: bool,
 }
 
 impl SnowContext {
@@ -57,6 +60,21 @@ impl SnowContext {
     pub fn s3_region(&self) -> &str {
         &self.s3_region
     }
+
+    pub fn md5_checksum_integrity_check(&self) -> bool {
+        self.md5_checksum_upload
+    }   
+}
+
+#[derive(Debug, Clone)]
+pub struct S3Object {
+    pub key: String,
+    pub local_path: PathBuf,
+    pub size: i64,
+    pub modified_time: Option<SystemTime>,
+    pub chunk_size: Option<usize>,
+    pub etag: Option<String>,
+    pub sha256_checksum: Option<String>,
 }
 
 #[derive(Clone)]

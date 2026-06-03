@@ -45,6 +45,7 @@ where
             Ok(value) => return Ok(value),
             Err(err) => {
                 if !should_retry(&err) {
+                    cc_tx.send(CommandCenterEvent::Log(format!("{}: Error: {}. Not retrying.", message, err))).expect("Failed to send message to command center.");
                     return Err(err);
                 }
 

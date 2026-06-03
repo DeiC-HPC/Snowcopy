@@ -1,7 +1,8 @@
 pub const CONFIG_PATH: &str = "config.json";
-//pub const DEFAULT_REGION:&str = "us-east-1"; //TODO: should exist somewhere that aws_layer can access
-pub const CHUNK_SIZE: u64 = 5 * 1024 * 1024; 
-pub const DOWNLOAD_MULTIPART_THRESHOLD: i64 = 4 * 1024 * 1024;
+pub const DEFAULT_REGION: &str = "us-east-1";
+pub const CHUNK_SIZE: u64 = 5 * 1024 * 1024;
+pub const DOWNLOAD_CHUNK_SIZE: usize = 1 * 1024 * 1024;
+pub const DOWNLOAD_MULTIPART_THRESHOLD: u64 = (2 * DOWNLOAD_CHUNK_SIZE) as u64;
 pub const PRESIGN_LIFETIME: u64 = 900;
 
 pub const MAX_REQUEST_AMOUNT: usize = 400;
@@ -15,7 +16,10 @@ pub const METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD: u64 = 1000;
 pub const DISCOVERY_LIMIT_UPLOAD: u64 = 5000;
 pub const METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_UPLOAD: u64 = 1000;
 pub const MAX_RETRY: u32 = 10;
+pub const DOWNLOAD_DIRECT_WRITE_FRAME_THRESHOLD: usize = 128 * 1024;
 
+pub const MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY: &str = "uniform-chunk-size";
+pub const PAYLOAD_SHA256_METADATA_KEY: &str = "checksum-sha256";
 
 //Trailing header
 pub const AWS_CHUNK_PAYLOAD_ALGORITHM: &str = "AWS4-HMAC-SHA256-PAYLOAD";

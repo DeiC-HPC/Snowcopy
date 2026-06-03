@@ -1,5 +1,7 @@
 mod logging;
 mod signer;
+pub mod download;
+pub mod integrity;
 
 use crate::signer::{sha256_hex, ChunkSigner, CredentialScope};
 use anyhow::Result;
@@ -14,6 +16,8 @@ use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::TokioExecutor,
 };
+use openssl::hash::{Hasher, MessageDigest};
+use openssl::base64 as base64_md5;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::io::Write;
@@ -21,7 +25,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
@@ -335,22 +339,39 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     let mut total_read = 0usize;
     let chunk_size = READ_BUFFER_SIZE.min(amount as usize);
 
-    let mut hasher = signer::create_sha256_hasher();
+    //TODO JON: Its very possible that we should wrap this in a spawn_blocking and use a single file descriptor for the upload.
 
-    while total_read < amount as usize {
+    let mut md5_hasher = if ctx.md5_checksum_integrity_check() {
+        Some(Hasher::new(MessageDigest::md5())?)
+    } else {
+        None
+    };
+    let mut sha_hasher = signer::create_sha256_hasher();
+
+    while total_read < amount as usize { //read small chunks, so the block is less significant when hashing.
         let remaining = amount as usize - total_read;
         let to_read = remaining.min(chunk_size);
         let chunk = &mut buffer[total_read..total_read + to_read];
 
         file.read_exact(chunk).await?;
-        hasher.update(chunk).expect("Failed to update SHA256 hasher");
+        sha_hasher.update(chunk).expect("Failed to update SHA256 hasher");
+        if let Some(ref mut md5_hasher) = md5_hasher {
+            md5_hasher.update(chunk).expect("Failed to update MD5 hasher");
+        }
+
         total_read += to_read;
     }
     drop(file);
     let file_work_elapsed = file_work_start.elapsed();
     drop(file_lock);
 
-    let sha256_hex = signer::finish_sha256_hex(hasher);
+    let sha256_hex = signer::finish_sha256_hex(sha_hasher);
+    let md5_base64 = if let Some(mut md5_hasher) = md5_hasher {
+        let md5 = md5_hasher.finish()?;
+        Some(base64_md5::encode_block(&md5))
+    } else {
+        None
+    };
 
     let mtime_str = file_info.modified_time.map(util_layer::time::time_to_float_string);
 
@@ -360,13 +381,19 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         len: amount as usize,
     };
 
-    let mut header_map: HashMap<String, String> = HashMap::new();
+    let mut header_map : HashMap<String, String> = HashMap::new();
+
+    if let Some(md5_base64) = md5_base64 {
+        header_map.insert("content-md5".to_string(), md5_base64);
+    }
     header_map.insert("content-type".to_string(), "application/octet-stream".to_string());
     header_map.insert("content-length".to_string(), amount.to_string());
     header_map.insert(
         signer::get_amz_content_header(AWS_ALGORITHM),
-        sha256_hex,
+        sha256_hex.clone(),
     );
+    header_map.insert("x-amz-checksum-sha256".to_string(), sha256_hex.clone()); //AWS and some clones will check against this
+    header_map.insert("x-amz-meta-checksum-sha256".to_string(), sha256_hex); //Store as metadata, since clones cannot be trusted
     if let Some(mtime_str) = mtime_str {
         header_map.insert("x-amz-meta-mtime".to_string(), mtime_str);
     }
@@ -375,38 +402,6 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     let req = create_and_sign_req(ctx, canonical_uri, query_uri, Some(&bytes), Method::PUT, &header_map)?;
 
     Ok((req, file_work_elapsed, file_permit_elapsed))
-}
-
-pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>) -> Result<()> {
-    let mut header_map : HashMap<String, String> = HashMap::new();
-    header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
-
-    let req = create_and_sign_req(ctx, canonical_uri, query_uri, None, Method::GET, &header_map)?;
-
-    let req_permit = req_sem.acquire().await.expect("Should never fail");
-    let resp = client.request(req).await?;
-    
-    let status = resp.status();
-    if !status.is_success() {
-        let s3_err = map_s3_error(resp).await;
-        return Err(s3_err.into());
-    }
-
-    let file_permit = file_sem.acquire().await.expect("Should never fail");
-    let mut file = File::create(&file_info.file_path).await?;
-    let mut body = resp.into_body();
-
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| anyhow::anyhow!("Body error: {}", e))?;
-        if let Some(data) = frame.data_ref() {
-            file.write_all(data).await?;
-        }
-    }
-    file.flush().await?;
-    drop(file_permit);
-    drop(req_permit);
-
-    Ok(())
 }
 
 pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, start: u64, end: u64) -> Result<PooledBuffer> {
@@ -457,14 +452,8 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
                 if let Some(data) = frame.data_ref() {
                     let offset = (sub_start - start) as usize + sub_data_len;
                     // SAFETY: each spawn writes to a unique non-overlapping range in the buffer.
-                    //TODO JON: This is something we should consider carefully. But I think the functionality is nice
-                    //and I trust that it is very testable. Thus we should be confident that there are no memory leaks and that
-                    // we don't write into wrong memory.
-                    //Ideally we can rewrite the code in some way where there is no copying. Perhaps just do 1MB slices?
-                    //Dunno, having less writers running simultaneously, I think, is to our benefit. We are faster than the
-                    //golang implementation where each file is split up into 5MB chunks and a goroutine is assigned the transfer
-                    //and disk writing for each chunk. I like the idea here better, where one disk writer is supported by multiple
-                    //networking threads
+                    //TODO JON: I believe we don't need the unsafe. If we decide to go this direction, then slices should be used instead
+
                     unsafe {
                         let dst = (buffer_ptr as *mut u8).add(offset);
                         std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
