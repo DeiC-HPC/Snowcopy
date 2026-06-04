@@ -13,18 +13,21 @@ use ratatui::{
     Terminal,
 };
 use std::io;
+use crossterm::terminal::{Clear, ClearType};
 
 pub fn run() -> Result<()> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, Clear(ClearType::All), EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
 
     // create app and run it
     let res = run_app(&mut terminal);
 
+    terminal.clear()?;
     // restore terminal
     disable_raw_mode()?;
     execute!(
