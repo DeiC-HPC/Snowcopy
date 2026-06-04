@@ -324,8 +324,8 @@ where
                         app.save_edit()?;
                     }
                     KeyCode::Esc => {
-                        app.save_edit()?;
                         app.input_mode = InputMode::Normal;
+                        app.edit_buffer.clear();
                     }
                     KeyCode::Left => {
                         app.save_edit()?;
