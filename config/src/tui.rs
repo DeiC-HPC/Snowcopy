@@ -41,18 +41,18 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-enum InputMode {
+pub(crate) enum InputMode {
     Normal,
     Editing,
     ConfirmDelete,
 }
 
-enum Focus {
+pub(crate) enum Focus {
     Endpoints,
     Fields,
 }
 
-enum Field {
+pub(crate) enum Field {
     Name,
     AccessKey,
     SecretKey,
@@ -60,18 +60,18 @@ enum Field {
     Region,
 }
 
-struct App {
-    config: AppConfig,
-    list_state: ListState,
-    input_mode: InputMode,
-    focus: Focus,
-    selected_field: Field,
-    edit_buffer: String,
-    show_help: bool,
+pub(crate) struct App {
+    pub(crate) config: AppConfig,
+    pub(crate) list_state: ListState,
+    pub(crate) input_mode: InputMode,
+    pub(crate) focus: Focus,
+    pub(crate) selected_field: Field,
+    pub(crate) edit_buffer: String,
+    pub(crate) show_help: bool,
 }
 
 impl App {
-    fn new(config: AppConfig) -> App {
+    pub(crate) fn new(config: AppConfig) -> App {
         let mut list_state = ListState::default();
         if !config.endpoints.is_empty() {
             list_state.select(Some(0));
@@ -87,7 +87,7 @@ impl App {
         }
     }
 
-    fn next_endpoint(&mut self) {
+    pub(crate) fn next_endpoint(&mut self) {
         let i = match self.list_state.selected() {
             Some(i) => {
                 if i >= self.config.endpoints.len().saturating_sub(1) {
@@ -173,7 +173,7 @@ impl App {
         Ok(())
     }
 
-    fn start_editing(&mut self) {
+    pub(crate) fn start_editing(&mut self) {
         if let Some(i) = self.list_state.selected() {
             let endpoint = &self.config.endpoints[i];
             self.edit_buffer = match self.selected_field {
@@ -187,7 +187,7 @@ impl App {
         }
     }
 
-    fn save_edit(&mut self) -> Result<()> {
+    pub(crate) fn save_edit(&mut self) -> Result<()> {
         if let Some(i) = self.list_state.selected() {
             match self.selected_field {
                 Field::Name => {
@@ -255,11 +255,9 @@ where
             match app.input_mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('q') => {
-                        app.save_edit()?;
                         return Ok(());
                     }
                     KeyCode::Char('a') => {
-                        app.save_edit()?;
                         app.add_endpoint()?;
                         app.focus = Focus::Fields;
                         app.selected_field = Field::Name;
@@ -267,14 +265,12 @@ where
                         app.input_mode = InputMode::Editing;
                     }
                     KeyCode::Char('d') => {
-                        app.save_edit()?;
                         app.delete_endpoint()?;
                     }
                     KeyCode::Char('h') => app.show_help = !app.show_help,
                     KeyCode::Down => {
                         match app.focus {
                             Focus::Endpoints => {
-                                app.save_edit()?;
                                 app.next_endpoint();
                             }
                             Focus::Fields => {
@@ -286,7 +282,6 @@ where
                     KeyCode::Up => {
                         match app.focus {
                             Focus::Endpoints => {
-                                app.save_edit()?;
                                 app.previous_endpoint();
                             }
                             Focus::Fields => {
@@ -298,7 +293,6 @@ where
                     KeyCode::Right => {
                         match app.focus {
                             Focus::Endpoints => {
-                                app.save_edit()?;
                                 app.focus = Focus::Fields;
                                 app.start_editing();
                             }
@@ -309,7 +303,6 @@ where
                         match app.focus {
                             Focus::Endpoints => {}
                             Focus::Fields => {
-                                app.save_edit()?;
                                 app.focus = Focus::Endpoints;
                             }
                         }
