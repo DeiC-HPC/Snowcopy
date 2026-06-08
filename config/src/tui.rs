@@ -1,7 +1,7 @@
 use crate::{load_config, save_config, AppConfig, Endpoint, EndpointConfig};
 use anyhow::Result;
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -255,6 +255,9 @@ where
         terminal.draw(|f| ui(f, &mut app))?;
 
         if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             match app.input_mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('q') => {
