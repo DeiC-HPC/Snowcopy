@@ -432,8 +432,7 @@ Navigation:
     let endpoint_list_style = match app.focus {
         Focus::Endpoints => Style::default()
             .bg(Color::White)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD),
+            .fg(Color::Black),
         Focus::Fields => Style::default()
             .bg(Color::White)
             .fg(Color::Black),
