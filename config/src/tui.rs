@@ -440,7 +440,7 @@ Navigation:
     };
 
     let list = List::new(items)
-        .block(Block::default().title("Endpoints (Data storage servers)").borders(Borders::ALL))
+        .block(Block::default().title("S3 servers").borders(Borders::ALL))
         .highlight_style(endpoint_list_style)
         .highlight_symbol(">> ");
     f.render_stateful_widget(list, body_chunks[0], &mut app.list_state);
@@ -549,8 +549,8 @@ Navigation:
 
     let footer_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::Endpoints => "q: quit | a: add endpoint | d: delete endpoint | Down/Up: navigate endpoints | Right: focus fields | h: help",
-            Focus::Fields => "q: quit | a: add endpoint | d: delete endpoint | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
+            Focus::Endpoints => "q: quit | a: add server | d: delete server | Down/Up: navigate endpoints | Right: focus fields | h: help",
+            Focus::Fields => "q: quit | a: add server | d: delete server | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
         },
         InputMode::Editing => "Enter: save | Esc: cancel | Up/Down/Left: save & move | Ctrl-k: clear",
         InputMode::ConfirmDelete => "Are you sure you want to delete this endpoint? (y/n)",
