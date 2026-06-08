@@ -435,7 +435,7 @@ Navigation:
             .fg(Color::Black)
             .add_modifier(Modifier::BOLD),
         Focus::Fields => Style::default()
-            .bg(Color::DarkGray)
+            .bg(Color::White)
             .fg(Color::White),
     };
 
@@ -468,7 +468,7 @@ Navigation:
                 (Field::AccessKey, "S3 Access Key", endpoint.config.as_ref().map(|c| c.s3_access_key.as_str()).unwrap_or("")),
                 (Field::SecretKey, "S3 Secret Key", endpoint.config.as_ref().map(|c| c.s3_secret_key.as_str()).unwrap_or("")),
                 (Field::Url, "S3 URL", endpoint.config.as_ref().map(|c| c.s3_url.as_str()).unwrap_or("")),
-                (Field::Region, "S3 Region (Optional: non-aws s3's endpoints commonly use us-east-1)", endpoint.config.as_ref().and_then(|c| c.s3_region.as_deref()).unwrap_or("")),
+                (Field::Region, "S3 Region (non-aws s3's endpoints commonly use us-east-1)", endpoint.config.as_ref().and_then(|c| c.s3_region.as_deref()).unwrap_or("")),
             ];
 
             for (idx, (field, label, value)) in fields.iter().enumerate() {
@@ -489,23 +489,6 @@ Navigation:
                     false
                 };
 
-                if is_selected {
-                    match app.focus {
-                        Focus::Fields => style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                        _ => {
-                            if let InputMode::Editing = app.input_mode {
-                                style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
-                            } else {
-                                style = style.fg(Color::DarkGray);
-                            }
-                        }
-                    }
-                }
-
-                if is_duplicate_name {
-                    style = style.fg(Color::Red);
-                }
-
                 let display_value: &str = if is_selected {
                     match app.input_mode {
                         InputMode::Editing => app.edit_buffer.as_str(),
@@ -515,9 +498,36 @@ Navigation:
                     *value
                 };
 
+                let is_incomplete = match field {
+                    Field::Name => display_value.trim().is_empty(),
+                    Field::AccessKey | Field::SecretKey | Field::Url => {
+                        display_value.trim().is_empty()
+                    }
+                    Field::Region => false,
+                };
+
+                if is_selected {
+                    match app.focus {
+                        Focus::Fields => style = style.fg(Color::Green).add_modifier(Modifier::BOLD),
+                        _ => {
+                            if let InputMode::Editing = app.input_mode {
+                                style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+                            }
+                        }
+                    }
+                }
+
+                if is_duplicate_name {
+                    style = style.fg(Color::Red);
+                } else if is_incomplete {
+                    style = style.fg(Color::Yellow);
+                }
+
                 let mut block = Block::default().title(*label).borders(Borders::ALL);
                 if is_duplicate_name {
-                    block = block.title(format!("{} - Name already exists!", *label));
+                    block = block.title("Duplicate!");
+                } else if is_incomplete {
+                    block = block.title("⚠");
                 }
 
                 let p = Paragraph::new(display_value)
