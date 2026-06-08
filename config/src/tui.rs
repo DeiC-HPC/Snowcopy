@@ -431,16 +431,16 @@ Navigation:
         .collect();
     let endpoint_list_style = match app.focus {
         Focus::Endpoints => Style::default()
-            .bg(Color::LightBlue)
+            .bg(Color::White)
             .fg(Color::Black)
             .add_modifier(Modifier::BOLD),
         Focus::Fields => Style::default()
             .bg(Color::White)
-            .fg(Color::White),
+            .fg(Color::Black),
     };
 
     let list = List::new(items)
-        .block(Block::default().title("Endpoints").borders(Borders::ALL))
+        .block(Block::default().title("Endpoints (Data storage servers)").borders(Borders::ALL))
         .highlight_style(endpoint_list_style)
         .highlight_symbol(">> ");
     f.render_stateful_widget(list, body_chunks[0], &mut app.list_state);
@@ -525,7 +525,7 @@ Navigation:
 
                 let mut block = Block::default().title(*label).borders(Borders::ALL);
                 if is_duplicate_name {
-                    block = block.title("Duplicate!");
+                    block = block.title(" Change! Names must be unique.");
                 } else if is_incomplete {
                     block = block.title("⚠");
                 }
@@ -549,8 +549,8 @@ Navigation:
 
     let footer_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::Endpoints => "q: quit | a: add | d: delete | Down/Up: navigate endpoints | Right: focus fields | h: help",
-            Focus::Fields => "q: quit | a: add | d: delete | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
+            Focus::Endpoints => "q: quit | a: add endpoint | d: delete endpoint | Down/Up: navigate endpoints | Right: focus fields | h: help",
+            Focus::Fields => "q: quit | a: add endpoint | d: delete endpoint | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
         },
         InputMode::Editing => "Enter: save | Esc: cancel | Up/Down/Left: save & move | Ctrl-k: clear",
         InputMode::ConfirmDelete => "Are you sure you want to delete this endpoint? (y/n)",
