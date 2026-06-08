@@ -468,7 +468,7 @@ Navigation:
                 (Field::AccessKey, "S3 Access Key", endpoint.config.as_ref().map(|c| c.s3_access_key.as_str()).unwrap_or("")),
                 (Field::SecretKey, "S3 Secret Key", endpoint.config.as_ref().map(|c| c.s3_secret_key.as_str()).unwrap_or("")),
                 (Field::Url, "S3 URL", endpoint.config.as_ref().map(|c| c.s3_url.as_str()).unwrap_or("")),
-                (Field::Region, "S3 Region (Optional)", endpoint.config.as_ref().and_then(|c| c.s3_region.as_deref()).unwrap_or("")),
+                (Field::Region, "S3 Region (Optional: non-aws s3's endpoints commonly use us-east-1)", endpoint.config.as_ref().and_then(|c| c.s3_region.as_deref()).unwrap_or("")),
             ];
 
             for (idx, (field, label, value)) in fields.iter().enumerate() {
@@ -542,7 +542,7 @@ Navigation:
             Focus::Endpoints => "q: quit | a: add | d: delete | Down/Up: navigate endpoints | Right: focus fields | h: help",
             Focus::Fields => "q: quit | a: add | d: delete | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
         },
-        InputMode::Editing => "Enter: save | Esc: cancel | Up/Down: save & move | Ctrl-k: clear",
+        InputMode::Editing => "Enter: save | Esc: cancel | Up/Down/Left: save & move | Ctrl-k: clear",
         InputMode::ConfirmDelete => "Are you sure you want to delete this endpoint? (y/n)",
     };
     let footer = Paragraph::new(footer_text)
