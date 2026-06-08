@@ -1,13 +1,14 @@
 use crate::{load_config, save_config, AppConfig, Endpoint, EndpointConfig};
 use anyhow::Result;
+use crossterm::terminal::{Clear, ClearType};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
@@ -18,13 +19,15 @@ pub fn run() -> Result<()> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, Clear(ClearType::All), EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
 
     // create app and run it
     let res = run_app(&mut terminal);
 
+    terminal.clear()?;
     // restore terminal
     disable_raw_mode()?;
     execute!(
@@ -41,18 +44,19 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-enum InputMode {
+pub(crate) enum InputMode {
     Normal,
     Editing,
     ConfirmDelete,
 }
 
-enum Focus {
+pub(crate) enum Focus {
     Endpoints,
     Fields,
 }
 
-enum Field {
+#[derive(Clone, PartialEq)]
+pub(crate) enum Field {
     Name,
     AccessKey,
     SecretKey,
@@ -60,18 +64,21 @@ enum Field {
     Region,
 }
 
-struct App {
-    config: AppConfig,
-    list_state: ListState,
-    input_mode: InputMode,
-    focus: Focus,
-    selected_field: Field,
-    edit_buffer: String,
-    show_help: bool,
+pub(crate) struct App {
+    pub(crate) config: AppConfig,
+    pub(crate) list_state: ListState,
+    pub(crate) input_mode: InputMode,
+    pub(crate) focus: Focus,
+    pub(crate) selected_field: Field,
+    pub(crate) edit_buffer: String,
+    pub(crate) show_help: bool,
+    pub(crate) endpoint_areas: Vec<Rect>,
+    pub(crate) field_areas: Vec<(Field, Rect)>,
+    pub(crate) button_areas: std::collections::HashMap<String, Rect>,
 }
 
 impl App {
-    fn new(config: AppConfig) -> App {
+    pub(crate) fn new(config: AppConfig) -> App {
         let mut list_state = ListState::default();
         if !config.endpoints.is_empty() {
             list_state.select(Some(0));
@@ -84,10 +91,13 @@ impl App {
             selected_field: Field::Name,
             edit_buffer: String::new(),
             show_help: false,
+            endpoint_areas: Vec::new(),
+            field_areas: Vec::new(),
+            button_areas: std::collections::HashMap::new(),
         }
     }
 
-    fn next_endpoint(&mut self) {
+    pub(crate) fn next_endpoint(&mut self) {
         let i = match self.list_state.selected() {
             Some(i) => {
                 if i >= self.config.endpoints.len().saturating_sub(1) {
@@ -140,8 +150,15 @@ impl App {
     }
 
     fn add_endpoint(&mut self) -> Result<()> {
+        let mut name = "name".to_string();
+        let mut i = 1;
+        while self.config.endpoints.iter().any(|e| e.name == name) {
+            name = format!("name{}", i);
+            i += 1;
+        }
+
         let new_endpoint = Endpoint {
-            name: "name".to_string(),
+            name,
             config: Some(EndpointConfig::default()),
             settings: None,
         };
@@ -173,7 +190,7 @@ impl App {
         Ok(())
     }
 
-    fn start_editing(&mut self) {
+    pub(crate) fn start_editing(&mut self) {
         if let Some(i) = self.list_state.selected() {
             let endpoint = &self.config.endpoints[i];
             self.edit_buffer = match self.selected_field {
@@ -187,12 +204,12 @@ impl App {
         }
     }
 
-    fn save_edit(&mut self) -> Result<()> {
+    pub(crate) fn save_edit(&mut self) -> Result<()> {
         if let Some(i) = self.list_state.selected() {
             match self.selected_field {
                 Field::Name => {
                     let new_name = self.edit_buffer.trim().to_string();
-                    if new_name.is_empty() {
+                    if new_name.is_empty() || !new_name.chars().all(|c| c.is_ascii_alphanumeric()) {
                         return Ok(()); // Or handle error
                     }
                     // Check for duplicate names (excluding current endpoint)
@@ -244,37 +261,37 @@ where
         app.add_endpoint()?;
         app.focus = Focus::Fields;
         app.selected_field = Field::Name;
-        app.edit_buffer = "name".to_string();
+        app.edit_buffer = app.config.endpoints.last().unwrap().name.clone();
         app.input_mode = InputMode::Editing;
     }
 
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
-        if let Event::Key(key) = event::read()? {
+        let event = event::read()?;
+        if let Event::Key(key) = event {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
             match app.input_mode {
                 InputMode::Normal => match key.code {
                     KeyCode::Char('q') => {
-                        app.save_edit()?;
                         return Ok(());
                     }
                     KeyCode::Char('a') => {
-                        app.save_edit()?;
                         app.add_endpoint()?;
                         app.focus = Focus::Fields;
                         app.selected_field = Field::Name;
-                        app.edit_buffer = "name".to_string();
+                        app.edit_buffer = app.config.endpoints.last().unwrap().name.clone();
                         app.input_mode = InputMode::Editing;
                     }
                     KeyCode::Char('d') => {
-                        app.save_edit()?;
                         app.delete_endpoint()?;
                     }
                     KeyCode::Char('h') => app.show_help = !app.show_help,
                     KeyCode::Down => {
                         match app.focus {
                             Focus::Endpoints => {
-                                app.save_edit()?;
                                 app.next_endpoint();
                             }
                             Focus::Fields => {
@@ -286,7 +303,6 @@ where
                     KeyCode::Up => {
                         match app.focus {
                             Focus::Endpoints => {
-                                app.save_edit()?;
                                 app.previous_endpoint();
                             }
                             Focus::Fields => {
@@ -298,7 +314,6 @@ where
                     KeyCode::Right => {
                         match app.focus {
                             Focus::Endpoints => {
-                                app.save_edit()?;
                                 app.focus = Focus::Fields;
                                 app.start_editing();
                             }
@@ -309,7 +324,6 @@ where
                         match app.focus {
                             Focus::Endpoints => {}
                             Focus::Fields => {
-                                app.save_edit()?;
                                 app.focus = Focus::Endpoints;
                             }
                         }
@@ -331,8 +345,8 @@ where
                         app.save_edit()?;
                     }
                     KeyCode::Esc => {
-                        app.save_edit()?;
                         app.input_mode = InputMode::Normal;
+                        app.edit_buffer.clear();
                     }
                     KeyCode::Left => {
                         app.save_edit()?;
@@ -353,7 +367,13 @@ where
                         app.edit_buffer.clear();
                     }
                     KeyCode::Char(c) => {
-                        app.edit_buffer.push(c);
+                        if app.selected_field == Field::Name {
+                            if c.is_ascii_alphanumeric() {
+                                app.edit_buffer.push(c);
+                            }
+                        } else {
+                            app.edit_buffer.push(c);
+                        }
                     }
                     KeyCode::Backspace => {
                         app.edit_buffer.pop();
@@ -361,11 +381,105 @@ where
                     _ => {}
                 },
             }
+        } else if let Event::Mouse(mouse) = event {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                // Check footer buttons
+                let mut button_clicked = None;
+                for (id, area) in &app.button_areas {
+                    if mouse.column >= area.x && mouse.column < area.x + area.width &&
+                       mouse.row >= area.y && mouse.row < area.y + area.height {
+                        button_clicked = Some(id.clone());
+                        break;
+                    }
+                }
+
+                if let Some(id) = button_clicked {
+                    match id.as_str() {
+                        "quit" => return Ok(()),
+                        "add" => {
+                            app.add_endpoint()?;
+                            app.focus = Focus::Fields;
+                            app.selected_field = Field::Name;
+                            app.edit_buffer = app.config.endpoints.last().unwrap().name.clone();
+                            app.input_mode = InputMode::Editing;
+                        }
+                        "delete" => {
+                            app.delete_endpoint()?;
+                        }
+                        "enter" => {
+                            if let InputMode::Editing = app.input_mode {
+                                app.save_edit()?;
+                            } else {
+                                app.start_editing();
+                            }
+                        }
+                        "cancel" => {
+                            if let InputMode::Editing = app.input_mode {
+                                app.input_mode = InputMode::Normal;
+                                app.edit_buffer.clear();
+                            }
+                        }
+                        "clear" => {
+                            if let InputMode::Editing = app.input_mode {
+                                app.edit_buffer.clear();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                    // Check endpoints
+                if !app.show_help {
+                    let mut endpoint_to_select = None;
+                    let offset = app.list_state.offset();
+                    for (idx, area) in app.endpoint_areas.iter().enumerate() {
+                        if mouse.column >= area.x && mouse.column < area.x + area.width &&
+                           mouse.row >= area.y && mouse.row < area.y + area.height {
+                            endpoint_to_select = Some(idx + offset);
+                            break;
+                        }
+                    }
+
+                    if let Some(idx) = endpoint_to_select {
+                        if idx < app.config.endpoints.len() {
+                            if let InputMode::Editing = app.input_mode {
+                                app.save_edit()?;
+                            }
+                            app.list_state.select(Some(idx));
+                            app.focus = Focus::Endpoints;
+                            app.input_mode = InputMode::Normal;
+                        }
+                    }
+
+                    // Check fields
+                    let mut field_to_edit = None;
+                    for (field, area) in &app.field_areas {
+                        if mouse.column >= area.x && mouse.column < area.x + area.width &&
+                           mouse.row >= area.y && mouse.row < area.y + area.height {
+                            field_to_edit = Some(field.clone());
+                            break;
+                        }
+                    }
+
+                    if let Some(field) = field_to_edit {
+                        if let InputMode::Editing = app.input_mode {
+                            app.save_edit()?;
+                        }
+                        app.selected_field = field;
+                        app.focus = Focus::Fields;
+                        app.start_editing();
+                    }
+                }
+            }
         }
     }
 }
 
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
+    app.endpoint_areas.clear();
+    app.field_areas.clear();
+    app.button_areas.clear();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
@@ -406,12 +520,27 @@ Navigation:
             .split(chunks[1]);
 
     // Endpoints List
+    let list_area = body_chunks[0];
+    let list_height = list_area.height.saturating_sub(2); // Subtract borders
+    let offset = app.list_state.offset();
+
     let items: Vec<ListItem> = app
         .config
         .endpoints
         .iter()
         .enumerate()
         .map(|(idx, e)| {
+            // Calculate if item is visible and its position
+            if idx >= offset && idx < offset + list_height as usize {
+                let item_rect = Rect {
+                    x: list_area.x + 1,
+                    y: list_area.y + 1 + (idx - offset) as u16,
+                    width: list_area.width.saturating_sub(2),
+                    height: 1,
+                };
+                app.endpoint_areas.push(item_rect);
+            }
+
             let mut label = e.name.clone();
             let mut style = Style::default();
             
@@ -432,16 +561,15 @@ Navigation:
         .collect();
     let endpoint_list_style = match app.focus {
         Focus::Endpoints => Style::default()
-            .bg(Color::LightBlue)
-            .fg(Color::Black)
-            .add_modifier(Modifier::BOLD),
+            .bg(Color::White)
+            .fg(Color::Black),
         Focus::Fields => Style::default()
-            .bg(Color::DarkGray)
-            .fg(Color::White),
+            .bg(Color::White)
+            .fg(Color::Black),
     };
 
     let list = List::new(items)
-        .block(Block::default().title("Endpoints").borders(Borders::ALL))
+        .block(Block::default().title("S3 servers").borders(Borders::ALL))
         .highlight_style(endpoint_list_style)
         .highlight_symbol(">> ");
     f.render_stateful_widget(list, body_chunks[0], &mut app.list_state);
@@ -459,6 +587,7 @@ Navigation:
                         Constraint::Length(3),
                         Constraint::Length(3),
                         Constraint::Length(3),
+                        Constraint::Min(0),
                     ]
                     .as_ref(),
                 )
@@ -469,7 +598,7 @@ Navigation:
                 (Field::AccessKey, "S3 Access Key", endpoint.config.as_ref().map(|c| c.s3_access_key.as_str()).unwrap_or("")),
                 (Field::SecretKey, "S3 Secret Key", endpoint.config.as_ref().map(|c| c.s3_secret_key.as_str()).unwrap_or("")),
                 (Field::Url, "S3 URL", endpoint.config.as_ref().map(|c| c.s3_url.as_str()).unwrap_or("")),
-                (Field::Region, "S3 Region (Optional)", endpoint.config.as_ref().and_then(|c| c.s3_region.as_deref()).unwrap_or("")),
+                (Field::Region, "S3 Region (non-aws s3's endpoints commonly use us-east-1)", endpoint.config.as_ref().and_then(|c| c.s3_region.as_deref()).unwrap_or("")),
             ];
 
             for (idx, (field, label, value)) in fields.iter().enumerate() {
@@ -490,23 +619,6 @@ Navigation:
                     false
                 };
 
-                if is_selected {
-                    match app.focus {
-                        Focus::Fields => style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                        _ => {
-                            if let InputMode::Editing = app.input_mode {
-                                style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
-                            } else {
-                                style = style.fg(Color::DarkGray);
-                            }
-                        }
-                    }
-                }
-
-                if is_duplicate_name {
-                    style = style.fg(Color::Red);
-                }
-
                 let display_value: &str = if is_selected {
                     match app.input_mode {
                         InputMode::Editing => app.edit_buffer.as_str(),
@@ -516,15 +628,44 @@ Navigation:
                     *value
                 };
 
+                let is_incomplete = match field {
+                    Field::Name => display_value.trim().is_empty(),
+                    Field::AccessKey | Field::SecretKey | Field::Url => {
+                        display_value.trim().is_empty()
+                    }
+                    Field::Region => false,
+                };
+
+                if is_selected {
+                    match app.focus {
+                        Focus::Fields => style = style.fg(Color::Green).add_modifier(Modifier::BOLD),
+                        _ => {
+                            if let InputMode::Editing = app.input_mode {
+                                style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+                            }
+                        }
+                    }
+                }
+
+                if is_duplicate_name {
+                    style = style.fg(Color::Red);
+                } else if is_incomplete {
+                    style = style.fg(Color::Yellow);
+                }
+
                 let mut block = Block::default().title(*label).borders(Borders::ALL);
                 if is_duplicate_name {
-                    block = block.title(format!("{} - Name already exists!", *label));
+                    block = block.title(" Change! Names must be unique.");
+                } else if is_incomplete {
+                    block = block.title("⚠");
                 }
 
                 let p = Paragraph::new(display_value)
                     .style(style)
                     .block(block);
-                f.render_widget(p, details_chunks[idx]);
+                let area = details_chunks[idx];
+                app.field_areas.push((field.clone(), area));
+                f.render_widget(p, area);
 
                 if is_selected {
                     if let InputMode::Editing = app.input_mode {
@@ -535,18 +676,93 @@ Navigation:
                     }
                 }
             }
+
+            //Show example for up and down
+            let name = if matches!(app.selected_field, Field::Name) && matches!(app.input_mode, InputMode::Editing) {
+                app.edit_buffer.as_str()
+            } else {
+                endpoint.name.as_str()
+            };
+            let example_text = format!(
+                "Examples\nup:   snowcopy my-local-folder {}:/my-s3-bucket\ndown: snowcopy {}:/my-s3-bucket my-local-folder",
+                name, name
+            );
+            let example = Paragraph::new(example_text)
+                .style(Style::default().fg(Color::DarkGray))
+                .block(Block::default().borders(Borders::NONE));
+            
+            let example_area = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(3), Constraint::Length(1)].as_ref())
+                .split(details_chunks[5])[1];
+            
+            let example_area = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(1), Constraint::Min(0)].as_ref())
+                .split(example_area)[1];
+
+            f.render_widget(example, example_area);
         }
     }
 
     let footer_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::Endpoints => "q: quit | a: add | d: delete | Down/Up: navigate endpoints | Right: focus fields | h: help",
-            Focus::Fields => "q: quit | a: add | d: delete | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
+            Focus::Endpoints => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate endpoints | Right: focus fields | h: help",
+            Focus::Fields => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
         },
-        InputMode::Editing => "Enter: save | Esc: cancel | Up/Down: save & move | Ctrl-k: clear",
+        InputMode::Editing => "🖱️ Enter: save | 🖱️ Esc: cancel | Up/Down/Left: save & move | 🖱️ Ctrl-k: clear",
         InputMode::ConfirmDelete => "Are you sure you want to delete this endpoint? (y/n)",
     };
-    let footer = Paragraph::new(footer_text)
+
+    // Store button areas for the footer
+        
+    let footer_area = chunks[2];
+    
+    // Parse footer_text to calculate exact button positions
+    let options: Vec<&str> = footer_text.split(" | ").collect();
+    let mut x_offset = footer_area.x + 1;
+
+    for option in options {
+        // Only process options with mouse icon
+        if option.contains("🖱️") {
+            // Extract button ID from pattern like "🖱️ q: quit" or "🖱️ Enter: save"
+            let id = if let Some(colon_pos) = option.find(':') {
+                let before_colon = &option[..colon_pos];
+                if let Some(space_pos) = before_colon.rfind(' ') {
+                    before_colon[space_pos + 1..].trim()
+                } else {
+                    ""
+                }
+            } else {
+                ""
+            };
+
+            if !id.is_empty() {
+                let button_id = match id {//TODO JON: This can all be refactored by having a list of commands, that then generate a footnote and clickable areas.
+                    "q" => "quit",
+                    "a" => "add",
+                    "d" => "delete",
+                    "Enter" => "enter",
+                    "Esc" => "cancel",
+                    "Ctrl-k" => "clear",
+                    //TODO JON: add yes/no confirmation. Perhaps a popup?
+                    _ => id,
+                };
+
+                let width = option.chars().count() as u16;
+                app.button_areas.insert(button_id.to_string(), Rect {
+                    x: x_offset,
+                    y: footer_area.y + 1,
+                    width,
+                    height: 1,
+                });
+            }
+        }
+        // Move offset for next option (including " | " separator which is 3 chars)
+        x_offset += option.chars().count() as u16 + 3;
+    }
+
+        let footer = Paragraph::new(footer_text)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, chunks[2]);
     }
