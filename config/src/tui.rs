@@ -2,13 +2,13 @@ use crate::{load_config, save_config, AppConfig, Endpoint, EndpointConfig};
 use anyhow::Result;
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
@@ -55,6 +55,7 @@ pub(crate) enum Focus {
     Fields,
 }
 
+#[derive(Clone, PartialEq)]
 pub(crate) enum Field {
     Name,
     AccessKey,
@@ -71,6 +72,9 @@ pub(crate) struct App {
     pub(crate) selected_field: Field,
     pub(crate) edit_buffer: String,
     pub(crate) show_help: bool,
+    pub(crate) endpoint_areas: Vec<Rect>,
+    pub(crate) field_areas: Vec<(Field, Rect)>,
+    pub(crate) button_areas: std::collections::HashMap<String, Rect>,
 }
 
 impl App {
@@ -87,6 +91,9 @@ impl App {
             selected_field: Field::Name,
             edit_buffer: String::new(),
             show_help: false,
+            endpoint_areas: Vec::new(),
+            field_areas: Vec::new(),
+            button_areas: std::collections::HashMap::new(),
         }
     }
 
@@ -143,8 +150,15 @@ impl App {
     }
 
     fn add_endpoint(&mut self) -> Result<()> {
+        let mut name = "name".to_string();
+        let mut i = 1;
+        while self.config.endpoints.iter().any(|e| e.name == name) {
+            name = format!("name{}", i);
+            i += 1;
+        }
+
         let new_endpoint = Endpoint {
-            name: "name".to_string(),
+            name,
             config: Some(EndpointConfig::default()),
             settings: None,
         };
@@ -195,7 +209,7 @@ impl App {
             match self.selected_field {
                 Field::Name => {
                     let new_name = self.edit_buffer.trim().to_string();
-                    if new_name.is_empty() {
+                    if new_name.is_empty() || !new_name.chars().all(|c| c.is_ascii_alphanumeric()) {
                         return Ok(()); // Or handle error
                     }
                     // Check for duplicate names (excluding current endpoint)
@@ -247,14 +261,15 @@ where
         app.add_endpoint()?;
         app.focus = Focus::Fields;
         app.selected_field = Field::Name;
-        app.edit_buffer = "name".to_string();
+        app.edit_buffer = app.config.endpoints.last().unwrap().name.clone();
         app.input_mode = InputMode::Editing;
     }
 
     loop {
         terminal.draw(|f| ui(f, &mut app))?;
 
-        if let Event::Key(key) = event::read()? {
+        let event = event::read()?;
+        if let Event::Key(key) = event {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
@@ -267,7 +282,7 @@ where
                         app.add_endpoint()?;
                         app.focus = Focus::Fields;
                         app.selected_field = Field::Name;
-                        app.edit_buffer = "name".to_string();
+                        app.edit_buffer = app.config.endpoints.last().unwrap().name.clone();
                         app.input_mode = InputMode::Editing;
                     }
                     KeyCode::Char('d') => {
@@ -352,7 +367,13 @@ where
                         app.edit_buffer.clear();
                     }
                     KeyCode::Char(c) => {
-                        app.edit_buffer.push(c);
+                        if app.selected_field == Field::Name {
+                            if c.is_ascii_alphanumeric() {
+                                app.edit_buffer.push(c);
+                            }
+                        } else {
+                            app.edit_buffer.push(c);
+                        }
                     }
                     KeyCode::Backspace => {
                         app.edit_buffer.pop();
@@ -360,11 +381,105 @@ where
                     _ => {}
                 },
             }
+        } else if let Event::Mouse(mouse) = event {
+            if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                // Check footer buttons
+                let mut button_clicked = None;
+                for (id, area) in &app.button_areas {
+                    if mouse.column >= area.x && mouse.column < area.x + area.width &&
+                       mouse.row >= area.y && mouse.row < area.y + area.height {
+                        button_clicked = Some(id.clone());
+                        break;
+                    }
+                }
+
+                if let Some(id) = button_clicked {
+                    match id.as_str() {
+                        "quit" => return Ok(()),
+                        "add" => {
+                            app.add_endpoint()?;
+                            app.focus = Focus::Fields;
+                            app.selected_field = Field::Name;
+                            app.edit_buffer = app.config.endpoints.last().unwrap().name.clone();
+                            app.input_mode = InputMode::Editing;
+                        }
+                        "delete" => {
+                            app.delete_endpoint()?;
+                        }
+                        "enter" => {
+                            if let InputMode::Editing = app.input_mode {
+                                app.save_edit()?;
+                            } else {
+                                app.start_editing();
+                            }
+                        }
+                        "cancel" => {
+                            if let InputMode::Editing = app.input_mode {
+                                app.input_mode = InputMode::Normal;
+                                app.edit_buffer.clear();
+                            }
+                        }
+                        "clear" => {
+                            if let InputMode::Editing = app.input_mode {
+                                app.edit_buffer.clear();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                    // Check endpoints
+                if !app.show_help {
+                    let mut endpoint_to_select = None;
+                    let offset = app.list_state.offset();
+                    for (idx, area) in app.endpoint_areas.iter().enumerate() {
+                        if mouse.column >= area.x && mouse.column < area.x + area.width &&
+                           mouse.row >= area.y && mouse.row < area.y + area.height {
+                            endpoint_to_select = Some(idx + offset);
+                            break;
+                        }
+                    }
+
+                    if let Some(idx) = endpoint_to_select {
+                        if idx < app.config.endpoints.len() {
+                            if let InputMode::Editing = app.input_mode {
+                                app.save_edit()?;
+                            }
+                            app.list_state.select(Some(idx));
+                            app.focus = Focus::Endpoints;
+                            app.input_mode = InputMode::Normal;
+                        }
+                    }
+
+                    // Check fields
+                    let mut field_to_edit = None;
+                    for (field, area) in &app.field_areas {
+                        if mouse.column >= area.x && mouse.column < area.x + area.width &&
+                           mouse.row >= area.y && mouse.row < area.y + area.height {
+                            field_to_edit = Some(field.clone());
+                            break;
+                        }
+                    }
+
+                    if let Some(field) = field_to_edit {
+                        if let InputMode::Editing = app.input_mode {
+                            app.save_edit()?;
+                        }
+                        app.selected_field = field;
+                        app.focus = Focus::Fields;
+                        app.start_editing();
+                    }
+                }
+            }
         }
     }
 }
 
 fn ui(f: &mut ratatui::Frame, app: &mut App) {
+    app.endpoint_areas.clear();
+    app.field_areas.clear();
+    app.button_areas.clear();
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints(
@@ -405,12 +520,27 @@ Navigation:
             .split(chunks[1]);
 
     // Endpoints List
+    let list_area = body_chunks[0];
+    let list_height = list_area.height.saturating_sub(2); // Subtract borders
+    let offset = app.list_state.offset();
+
     let items: Vec<ListItem> = app
         .config
         .endpoints
         .iter()
         .enumerate()
         .map(|(idx, e)| {
+            // Calculate if item is visible and its position
+            if idx >= offset && idx < offset + list_height as usize {
+                let item_rect = Rect {
+                    x: list_area.x + 1,
+                    y: list_area.y + 1 + (idx - offset) as u16,
+                    width: list_area.width.saturating_sub(2),
+                    height: 1,
+                };
+                app.endpoint_areas.push(item_rect);
+            }
+
             let mut label = e.name.clone();
             let mut style = Style::default();
             
@@ -533,7 +663,9 @@ Navigation:
                 let p = Paragraph::new(display_value)
                     .style(style)
                     .block(block);
-                f.render_widget(p, details_chunks[idx]);
+                let area = details_chunks[idx];
+                app.field_areas.push((field.clone(), area));
+                f.render_widget(p, area);
 
                 if is_selected {
                     if let InputMode::Editing = app.input_mode {
@@ -575,13 +707,62 @@ Navigation:
 
     let footer_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::Endpoints => "q: quit | a: add server | d: delete server | Down/Up: navigate endpoints | Right: focus fields | h: help",
-            Focus::Fields => "q: quit | a: add server | d: delete server | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
+            Focus::Endpoints => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate endpoints | Right: focus fields | h: help",
+            Focus::Fields => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
         },
-        InputMode::Editing => "Enter: save | Esc: cancel | Up/Down/Left: save & move | Ctrl-k: clear",
+        InputMode::Editing => "🖱️ Enter: save | 🖱️ Esc: cancel | Up/Down/Left: save & move | 🖱️ Ctrl-k: clear",
         InputMode::ConfirmDelete => "Are you sure you want to delete this endpoint? (y/n)",
     };
-    let footer = Paragraph::new(footer_text)
+
+    // Store button areas for the footer
+        
+    let footer_area = chunks[2];
+    
+    // Parse footer_text to calculate exact button positions
+    let options: Vec<&str> = footer_text.split(" | ").collect();
+    let mut x_offset = footer_area.x + 1;
+
+    for option in options {
+        // Only process options with mouse icon
+        if option.contains("🖱️") {
+            // Extract button ID from pattern like "🖱️ q: quit" or "🖱️ Enter: save"
+            let id = if let Some(colon_pos) = option.find(':') {
+                let before_colon = &option[..colon_pos];
+                if let Some(space_pos) = before_colon.rfind(' ') {
+                    before_colon[space_pos + 1..].trim()
+                } else {
+                    ""
+                }
+            } else {
+                ""
+            };
+
+            if !id.is_empty() {
+                let button_id = match id {//TODO JON: This can all be refactored by having a list of commands, that then generate a footnote and clickable areas.
+                    "q" => "quit",
+                    "a" => "add",
+                    "d" => "delete",
+                    "Enter" => "enter",
+                    "Esc" => "cancel",
+                    "Ctrl-k" => "clear",
+                    //TODO JON: add yes/no confirmation. Perhaps a popup?
+                    _ => id,
+                };
+
+                let width = option.chars().count() as u16;
+                app.button_areas.insert(button_id.to_string(), Rect {
+                    x: x_offset,
+                    y: footer_area.y + 1,
+                    width,
+                    height: 1,
+                });
+            }
+        }
+        // Move offset for next option (including " | " separator which is 3 chars)
+        x_offset += option.chars().count() as u16 + 3;
+    }
+
+        let footer = Paragraph::new(footer_text)
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, chunks[2]);
     }
