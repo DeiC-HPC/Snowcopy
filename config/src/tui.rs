@@ -1,5 +1,6 @@
 use crate::{load_config, save_config, AppConfig, Endpoint, EndpointConfig};
 use anyhow::Result;
+use crossterm::terminal::{Clear, ClearType};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -13,7 +14,6 @@ use ratatui::{
     Terminal,
 };
 use std::io;
-use crossterm::terminal::{Clear, ClearType};
 
 pub fn run() -> Result<()> {
     // setup terminal
@@ -458,6 +458,7 @@ Navigation:
                         Constraint::Length(3),
                         Constraint::Length(3),
                         Constraint::Length(3),
+                        Constraint::Min(0),
                     ]
                     .as_ref(),
                 )
@@ -544,6 +545,32 @@ Navigation:
                     }
                 }
             }
+
+            //Show example for up and down
+            let name = if matches!(app.selected_field, Field::Name) && matches!(app.input_mode, InputMode::Editing) {
+                app.edit_buffer.as_str()
+            } else {
+                endpoint.name.as_str()
+            };
+            let example_text = format!(
+                "Examples\nup:   snowcopy my-local-folder {}:/my-s3-bucket\ndown: snowcopy {}:/my-s3-bucket my-local-folder",
+                name, name
+            );
+            let example = Paragraph::new(example_text)
+                .style(Style::default().fg(Color::DarkGray))
+                .block(Block::default().borders(Borders::NONE));
+            
+            let example_area = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(3), Constraint::Length(1)].as_ref())
+                .split(details_chunks[5])[1];
+            
+            let example_area = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(1), Constraint::Min(0)].as_ref())
+                .split(example_area)[1];
+
+            f.render_widget(example, example_area);
         }
     }
 
