@@ -163,7 +163,7 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, bucket: Arc<String>, aws_c
                 let query_uri = query_uri.clone();
                 async move {
                     if ctx.trailing_info().trailing {
-                        http_layer::upload_trailing::put_file_range_streaming(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri).await
+                        http_layer::upload_trailing::put_file_streaming(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri).await
                     } else {
                         http_layer::put_file_range(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
                     }
@@ -207,6 +207,7 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
 
     let result = retry_on_failure_async(|| {
         let ctx = ctx.clone();
+        let amount = file_info.file_size;
         let file_info = file_info.clone();
         let hyper_client = hyper_client.clone();
         let file_sem = file_sem.clone();
@@ -216,7 +217,7 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
         let query_uri = query_uri.clone();
         async move {
             if ctx.trailing_info().trailing_small {
-                http_layer::upload_trailing::put_file_streaming(ctx, file_info, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri).await
+                http_layer::upload_trailing::put_file_streaming(ctx, file_info, 0, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri).await
             } else {
                 http_layer::put_file(ctx, file_info, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
             }
@@ -231,7 +232,7 @@ async fn small_file_upload(ctx: Arc<SnowContext>, bucket: Arc<String>, hyper_cli
     match result {
         Ok(metrics) => {
             let file_size = file_info.file_size;
-            sender.send(CommandCenterEvent::PartTransferred(metrics)).unwrap();
+            sender.send(CommandCenterEvent::PartTransferred(metrics.1)).unwrap();
             sender.send(CommandCenterEvent::FileTransferred(file_size)).unwrap();
         },
         Err(e) => panic!("Error uploading file {}: {}", file_info.file_path.to_str().unwrap(), e),

@@ -92,7 +92,7 @@ pub fn build_https_client() -> PoolClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri : Arc<String>, query_uri : &String) -> Result<CcLoadAndTransfer> {
+pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri : Arc<String>, query_uri : &String) -> Result<(String, CcLoadAndTransfer)> {
     let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(0, None, ctx, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let req_permit_start = Instant::now();
@@ -111,6 +111,12 @@ pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
         return Err(s3_err.into());
     }
 
+    let etag = resp // TODO LND: Unused currently
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     //drain body so the connection can be returned to the pool.
     resp.into_body().collect().await?;
     drop(permit);
@@ -122,7 +128,7 @@ pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
         req_sem_work_time_secs: req_work_elapsed.as_secs_f64(),
         req_sem_acquire_time_secs: req_permit_elapsed.as_secs_f64(),
     };
-    Ok(transfer_metrics)
+    Ok((etag.unwrap(), transfer_metrics))
 }
 
 pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {

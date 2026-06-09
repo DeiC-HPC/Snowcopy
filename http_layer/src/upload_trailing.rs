@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::SystemTime;
 use tokio::sync::Semaphore;
 use tokio::time::Instant;
 use tokio::fs::File;
@@ -18,58 +19,8 @@ use util_layer::snow_errors::SnowCopyError;
 use crate::{signer, PoolClient, StreamingBody};
 use crate::signer::{sha256_hex, ChunkSigner, CredentialScope};
 
-pub async fn put_file_streaming(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String) -> anyhow::Result<CcLoadAndTransfer> {
-    let file_permit_start = Instant::now();
-    let open_file_lock = ctx.trailing_info().open_file_sem_limit.acquire().await?;
-    let file_permit_elapsed = file_permit_start.elapsed();
-
-    let file_work_start = Instant::now();
-    let file = File::open(&*file_info.file_path).await?;
-
-    let req = create_streaming_req_trailing_checksum(
-        ctx.clone(),
-        canonical_uri.clone(),
-        query_uri,
-        file,
-        file_info.file_size,
-        file_sem,
-        ctx.trailing_info().trailing_chunk_size,
-    )?;
-
-    let file_work_elapsed = file_work_start.elapsed();
-
-    let req_permit_start = Instant::now();
-    let permit = req_sem.acquire().await?;
-    let req_permit_elapsed = req_permit_start.elapsed();
-
-    let req_work_start = Instant::now();
-    let resp = client.request(req).await?;
-    let req_work_elapsed = req_work_start.elapsed();
-
-    drop(permit);
-    drop(open_file_lock);
-
-    let status = resp.status();
-
-    if !status.is_success() {
-        let s3_err = crate::map_s3_error(resp).await;
-        return Err(s3_err.into());
-    }
-
-    resp.into_body().collect().await?;
-
-    let transfer_metrics = CcLoadAndTransfer {
-        amount : file_info.file_size,
-        file_sem_work_time_secs: file_work_elapsed.as_secs_f64(),
-        file_sem_acquire_time_secs: file_permit_elapsed.as_secs_f64(),
-        req_sem_work_time_secs: req_work_elapsed.as_secs_f64(),
-        req_sem_acquire_time_secs: req_permit_elapsed.as_secs_f64(),
-    };
-    Ok(transfer_metrics)
-}
-
-/// Upload a file range using streaming for trailing headers.
-pub async fn put_file_range_streaming(
+/// Upload a file using streaming for trailing headers.
+pub async fn put_file_streaming(
     ctx: Arc<SnowContext>,
     file_info: Arc<FileInfo>,
     from: u64,
@@ -97,6 +48,7 @@ pub async fn put_file_range_streaming(
         query_uri,
         file,
         amount,
+        file_info.modified_time,
         file_sem,
         ctx.trailing_info().trailing_chunk_size
     )?;
@@ -147,6 +99,7 @@ fn create_streaming_req_trailing_checksum(
     query_uri: &String,
     file: File,
     file_size: u64,
+    modified_time: Option<SystemTime>,
     file_sem: Arc<Semaphore>,
     chunk_size: u64,
 ) -> anyhow::Result<Request<StreamingBody>> {
@@ -164,11 +117,16 @@ fn create_streaming_req_trailing_checksum(
         credential_scope.region
     );
 
+    let mtime_str = modified_time.map(util_layer::time::time_to_float_string);
+
     let mut signed_headers: HashMap<String, String> = HashMap::new();
     signed_headers.insert("host".to_string(), ctx.s3_host().to_string());
     signed_headers.insert("x-amz-date".to_string(), amz_date.clone());
     signed_headers.insert("content-encoding".to_string(), "aws-chunked".to_string());
     signed_headers.insert("content-type".to_string(), "application/octet-stream".to_string());
+    if let Some(mtime_str) = mtime_str {
+        signed_headers.insert("x-amz-meta-mtime".to_string(), mtime_str);
+    }
     signed_headers.insert(
         signer::get_amz_content_header(AWS_ALGORITHM),
         AMZ_STREAMING_TRAILER.to_string(),
@@ -266,6 +224,7 @@ pub struct StreamingFileChunkedBodyInner {
 
 impl StreamingFileChunkedBodyInner {
     /// Formats the data chunk on read_buf in the following order: Length of data sent, chunk signature, and then the data of the chunk.
+    /// Data is put in the middle to avoid copying the data twice.
     fn format_data_chunk(&mut self, data_index: usize, bytes_read: usize) {
         let chunk_data = &self.read_buf[data_index..data_index + bytes_read];
         let chunk_hash = sha256_hex(chunk_data);
@@ -282,7 +241,7 @@ impl StreamingFileChunkedBodyInner {
         let mut pos = 0;
 
         // Write hex length of chunk data
-        pos += write_hex_to_slice(&mut self.read_buf[pos..], bytes_read);
+        pos += find_length_of_chunk_data_as_hex(&mut self.read_buf[pos..], bytes_read);
 
         // Write ";chunk-signature="
         self.read_buf[pos] = b';';
@@ -509,7 +468,7 @@ enum StreamingChunkedState {
 
 /// Writes a usize as lowercase hex into a byte slice, returns bytes written
 #[inline]
-fn write_hex_to_slice(buf: &mut [u8], mut n: usize) -> usize {
+fn find_length_of_chunk_data_as_hex(buf: &mut [u8], mut n: usize) -> usize {
     if n == 0 {
         buf[0] = b'0';
         return 1;
