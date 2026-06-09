@@ -29,4 +29,5 @@ pub const AMZ_CHUNK_SIGNATURE_HEADER: &str = "chunk-signature";
 pub const AMZ_CHECKSUM_SHA256: &str = "x-amz-checksum-sha256";
 pub const AMZ_TRAILER_SIGNATURE: &str = "x-amz-trailer-signature";
 pub const STREAMING_READ_BUFFER_SIZE: u64 = 128; // In kB
-pub const CHUNKSIGNATURE_LENGTH: usize = 83;
+pub const CHUNKSIGNATURE_LENGTH: usize = 83; // The fixed length of chars for a chunk signature for trailing headers (Sha256)
+pub const TRAILER_HASH_LENGTH: usize = 44;  // The fixed length of a trailer hash (Sha256)

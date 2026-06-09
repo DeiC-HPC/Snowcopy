@@ -5,7 +5,7 @@ use openssl::sha::sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use util_layer::constants::{AMZ_CHUNK_SIGNATURE_HEADER, AMZ_TRAILER_SIGNATURE, AWS_CHUNK_PAYLOAD_ALGORITHM, AWS_CHUNK_TRAILER_ALGORITHM, EMPTY_PAYLOAD_SHA256};
-use util_layer::SnowContext;
+use util_layer::{SnowContext};
 
 pub struct CredentialScope {
     pub(crate) timestamp: chrono::DateTime<chrono::Utc>,
@@ -231,7 +231,6 @@ pub fn s3_signing_key(
     hmac_sha256(&k_service, b"aws4_request")
 }
 
-// TODO LND: This can be compressed - no need to show our work, just give us the number
 /// Calculates the total encoded Content-Length for aws-chunked + SigV4 streaming with trailing headers
 pub fn aws_chunked_trailer_encoded_length(
     decoded_len: u64,
