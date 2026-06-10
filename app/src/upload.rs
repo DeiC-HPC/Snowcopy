@@ -12,7 +12,7 @@ use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use util_layer::cc_util::{CommandCenterEvent, Status};
-use util_layer::constants::STREAMING_READ_BUFFER_SIZE;
+use util_layer::constants::STREAMING_READ_BUFFER_SIZE_IN_KB;
 use util_layer::retry::retry_on_failure_async;
 use util_layer::snow_errors::SnowCopyError;
 use util_layer::{build_context, constants, Config, FileInfo, SnowContext, TrailingInfo};
@@ -32,7 +32,7 @@ pub async fn run_s3_ceph_tokio(bucket: Arc<String>, path: &Path, file_limit: Opt
     let (file_sem, req_sem, open_file_sem, buffer_pool_size, _) = auto_tuning::auto_tune_semaphores(file_limit, req_limit, open_file_sem_limit, download_concurrency, path, cc_tx.clone(), false);
 
     let trailing_info = TrailingInfo {
-        trailing_chunk_size: trailing_chunk_size.unwrap_or(STREAMING_READ_BUFFER_SIZE as usize) as u64 * 1024,
+        trailing_chunk_size: trailing_chunk_size.unwrap_or(STREAMING_READ_BUFFER_SIZE_IN_KB as usize) as u64 * 1024,
         trailing,
         trailing_small,
         open_file_sem_limit: open_file_sem,
