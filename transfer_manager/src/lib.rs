@@ -1,15 +1,15 @@
-use std::path::Path;
 use std::sync::Arc;
 use aws_sdk_s3_transfer_manager::{Client};
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_config::Region;
 
-pub async fn upload(bucket: Arc<String>, path: &Path, silent: bool, _stats: bool, config: &util_layer::Config, concurrency: Option<usize>) {
-    let region = Region::new(config.s3_region.clone());
+use util_layer::SnowContext;
+pub async fn upload(ctx: Arc<SnowContext>) {
+    let region = Region::new(ctx.s3_region().to_string());
     let creds = Credentials::new(
-        &config.s3_access_key,
-        &config.s3_secret_key,
+        ctx.s3_access_key(),
+        ctx.s3_secret_key(),
         None,
         None,
         "manual",
@@ -18,7 +18,7 @@ pub async fn upload(bucket: Arc<String>, path: &Path, silent: bool, _stats: bool
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
         .credentials_provider(creds)
         .region(region)
-        .endpoint_url(&config.s3_url)
+        .endpoint_url(ctx.s3_url())
         .load()
         .await;
 
@@ -29,7 +29,7 @@ pub async fn upload(bucket: Arc<String>, path: &Path, silent: bool, _stats: bool
     let mut tm_config_builder = aws_sdk_s3_transfer_manager::Config::builder()
         .client(s3_client);
 
-    if let Some(c) = concurrency {
+    if let Some(c) = ctx.req_limit {
         tm_config_builder = tm_config_builder.concurrency(aws_sdk_s3_transfer_manager::types::ConcurrencyMode::Explicit(c));
     } else {
         tm_config_builder = tm_config_builder.concurrency(aws_sdk_s3_transfer_manager::types::ConcurrencyMode::Explicit(200));
@@ -38,11 +38,11 @@ pub async fn upload(bucket: Arc<String>, path: &Path, silent: bool, _stats: bool
     let tm_config = tm_config_builder.build();
     let client = Client::new(tm_config);
 
-    if path.is_dir() {
+    if ctx.local_path.is_dir() {
         let handle = match client
             .upload_objects()
-            .bucket(bucket.as_str())
-            .source(path.to_string_lossy().to_string())
+            .bucket(ctx.bucket.as_str())
+            .source(ctx.local_path.to_string_lossy().to_string())
             .recursive(true)
             .send()
             .await {
@@ -53,8 +53,8 @@ pub async fn upload(bucket: Arc<String>, path: &Path, silent: bool, _stats: bool
             }
         };
 
-        if !silent {
-            println!("Uploading directory: {:?}", path);
+        if !ctx.silent {
+            println!("Uploading directory: {:?}", ctx.local_path);
         }
 
         if let Err(e) = handle.join().await {
@@ -62,26 +62,26 @@ pub async fn upload(bucket: Arc<String>, path: &Path, silent: bool, _stats: bool
             return;
         }
     } else {
-        let key = match path.file_name()
+        let key = match ctx.local_path.file_name()
             .and_then(|n| n.to_str()) {
             Some(k) => k,
             None => {
-                eprintln!("Invalid file name: {:?}", path);
+                eprintln!("Invalid file name: {:?}", ctx.local_path);
                 return;
             }
         };
 
-        let stream = match aws_sdk_s3_transfer_manager::io::InputStream::from_path(path) {
+        let stream = match aws_sdk_s3_transfer_manager::io::InputStream::from_path(&ctx.local_path) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("Failed to open file {:?}: {:?}", path, e);
+                eprintln!("Failed to open file {:?}: {:?}", ctx.local_path, e);
                 return;
             }
         };
 
         let handle = match client
             .upload()
-            .bucket(bucket.as_str())
+            .bucket(ctx.bucket.as_str())
             .key(key)
             .body(stream)
             .initiate() {
@@ -92,8 +92,8 @@ pub async fn upload(bucket: Arc<String>, path: &Path, silent: bool, _stats: bool
             }
         };
 
-        if !silent {
-            println!("Uploading file: {:?}", path);
+        if !ctx.silent {
+            println!("Uploading file: {:?}", ctx.local_path);
         }
 
         if let Err(e) = handle.join().await {
@@ -102,16 +102,17 @@ pub async fn upload(bucket: Arc<String>, path: &Path, silent: bool, _stats: bool
         }
     }
 
-    if !silent {
+    if !ctx.silent {
         println!("Upload completed successfully.");
     }
 }
 
-pub async fn download(bucket: Arc<String>, path: &Path, silent: bool, _stats: bool, config: &util_layer::Config, concurrency: Option<usize>) {
-    let region = Region::new(config.s3_region.clone());
+pub async fn download(ctx: Arc<SnowContext>) {
+    let bucket = &ctx.bucket;
+    let region = Region::new(ctx.s3_region().to_string());
     let creds = Credentials::new(
-        &config.s3_access_key,
-        &config.s3_secret_key,
+        ctx.s3_access_key(),
+        ctx.s3_secret_key(),
         None,
         None,
         "manual",
@@ -120,7 +121,7 @@ pub async fn download(bucket: Arc<String>, path: &Path, silent: bool, _stats: bo
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
         .credentials_provider(creds)
         .region(region)
-        .endpoint_url(&config.s3_url)
+        .endpoint_url(ctx.s3_url())
         .load()
         .await;
 
@@ -131,7 +132,7 @@ pub async fn download(bucket: Arc<String>, path: &Path, silent: bool, _stats: bo
     let mut tm_config_builder = aws_sdk_s3_transfer_manager::Config::builder()
         .client(s3_client);
 
-    if let Some(c) = concurrency {
+    if let Some(c) = ctx.req_limit {
         tm_config_builder = tm_config_builder.concurrency(aws_sdk_s3_transfer_manager::types::ConcurrencyMode::Explicit(c));
     } else {
         tm_config_builder = tm_config_builder.concurrency(aws_sdk_s3_transfer_manager::types::ConcurrencyMode::Explicit(200));
@@ -142,13 +143,13 @@ pub async fn download(bucket: Arc<String>, path: &Path, silent: bool, _stats: bo
 
     // We decide whether it's a directory download based on whether 'path' already exists as a directory
     // or if it ends with a separator.
-    let is_directory_download = path.is_dir() || path.to_string_lossy().ends_with('/') || path.to_string_lossy().ends_with('\\');
+    let is_directory_download = ctx.local_path.is_dir() || ctx.local_path.to_string_lossy().ends_with('/') || ctx.local_path.to_string_lossy().ends_with('\\');
 
     if is_directory_download {
         let handle = match client
             .download_objects()
             .bucket(bucket.as_str())
-            .destination(path.to_string_lossy().to_string())
+            .destination(ctx.local_path.to_string_lossy().to_string())
             .send()
             .await {
             Ok(h) => h,
@@ -158,8 +159,8 @@ pub async fn download(bucket: Arc<String>, path: &Path, silent: bool, _stats: bo
             }
         };
 
-        if !silent {
-            println!("Downloading from bucket {} to {:?}", bucket, path);
+        if !ctx.silent {
+            println!("Downloading from bucket {} to {:?}", bucket, ctx.local_path);
         }
 
         if let Err(e) = handle.join().await {
@@ -170,10 +171,10 @@ pub async fn download(bucket: Arc<String>, path: &Path, silent: bool, _stats: bo
         // Single file download
         // For a single file download, we assume 'path' is the local file path, 
         // and we use its file name as the S3 key.
-        let key = match path.file_name().and_then(|n| n.to_str()) {
+        let key = match ctx.local_path.file_name().and_then(|n| n.to_str()) {
             Some(k) => k,
             None => {
-                eprintln!("Invalid file name for download: {:?}", path);
+                eprintln!("Invalid file name for download: {:?}", ctx.local_path);
                 return;
             }
         };
@@ -190,15 +191,15 @@ pub async fn download(bucket: Arc<String>, path: &Path, silent: bool, _stats: bo
             }
         };
 
-        if !silent {
-            println!("Downloading file {} to {:?}", key, path);
+        if !ctx.silent {
+            println!("Downloading file {} to {:?}", key, ctx.local_path);
         }
 
         use tokio::io::AsyncWriteExt;
-        let mut file = match tokio::fs::File::create(path).await {
+        let mut file = match tokio::fs::File::create(&ctx.local_path).await {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("Failed to create file {:?}: {:?}", path, e);
+                eprintln!("Failed to create file {:?}: {:?}", ctx.local_path, e);
                 return;
             }
         };
@@ -207,7 +208,7 @@ pub async fn download(bucket: Arc<String>, path: &Path, silent: bool, _stats: bo
             match chunk_result {
                 Ok(chunk) => {
                     if let Err(e) = file.write_all(&chunk.data.into_bytes()).await {
-                        eprintln!("Error writing to file {:?}: {:?}", path, e);
+                        eprintln!("Error writing to file {:?}: {:?}", ctx.local_path, e);
                         return;
                     }
                 }
@@ -219,7 +220,7 @@ pub async fn download(bucket: Arc<String>, path: &Path, silent: bool, _stats: bo
         }
     }
 
-    if !silent {
+    if !ctx.silent {
         println!("Download completed successfully.");
     }
 }

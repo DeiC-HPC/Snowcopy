@@ -32,7 +32,7 @@ pub async fn put_file_streaming(
     query_uri: &String,
 ) -> anyhow::Result<(String, CcLoadAndTransfer)> {
     let file_permit_start = Instant::now();
-    let open_file_lock = ctx.trailing_info().open_file_sem_limit.acquire().await?;
+    let open_file_lock = ctx.open_file_sem_limit().acquire().await?;
     let file_permit_elapsed = file_permit_start.elapsed();
 
     let file_work_start = Instant::now();
@@ -50,7 +50,7 @@ pub async fn put_file_streaming(
         amount,
         file_info.modified_time,
         file_sem,
-        ctx.trailing_info().trailing_chunk_size
+        ctx.trailing_chunk_size()
     )?;
 
     let file_work_elapsed = file_work_start.elapsed();

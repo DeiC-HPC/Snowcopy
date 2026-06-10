@@ -1,4 +1,5 @@
-use crate::{load_config, save_config, AppConfig, Endpoint, EndpointConfig};
+use crate::{load_config, save_config, AppConfig};
+use util_layer::{Endpoint, EndpointConfig};
 use anyhow::Result;
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{
@@ -10,7 +11,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear as TuiClear, List, ListItem, ListState, Paragraph},
     Terminal,
 };
 use std::io;
@@ -598,7 +599,7 @@ Navigation:
                 (Field::AccessKey, "S3 Access Key", endpoint.config.as_ref().map(|c| c.s3_access_key.as_str()).unwrap_or("")),
                 (Field::SecretKey, "S3 Secret Key", endpoint.config.as_ref().map(|c| c.s3_secret_key.as_str()).unwrap_or("")),
                 (Field::Url, "S3 URL", endpoint.config.as_ref().map(|c| c.s3_url.as_str()).unwrap_or("")),
-                (Field::Region, "S3 Region (non-aws s3's endpoints commonly use us-east-1)", endpoint.config.as_ref().and_then(|c| c.s3_region.as_deref()).unwrap_or("")),
+                (Field::Region, "S3 Region (non-aws s3 endpoints commonly use us-east-1)", endpoint.config.as_ref().and_then(|c| c.s3_region.as_deref()).unwrap_or("")),
             ];
 
             for (idx, (field, label, value)) in fields.iter().enumerate() {
@@ -707,8 +708,8 @@ Navigation:
 
     let footer_text = match app.input_mode {
         InputMode::Normal => match app.focus {
-            Focus::Endpoints => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate endpoints | Right: focus fields | h: help",
-            Focus::Fields => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate fields | Left: focus endpoints | Enter: edit | h: help",
+            Focus::Endpoints => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate server | Right: focus fields | h: help",
+            Focus::Fields => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate fields | Left: focus server | Enter: edit | h: help",
         },
         InputMode::Editing => "🖱️ Enter: save | 🖱️ Esc: cancel | Up/Down/Left: save & move | 🖱️ Ctrl-k: clear",
         InputMode::ConfirmDelete => "Are you sure you want to delete this endpoint? (y/n)",
@@ -761,6 +762,7 @@ Navigation:
         // Move offset for next option (including " | " separator which is 3 chars)
         x_offset += option.chars().count() as u16 + 3;
     }
+        f.render_widget(TuiClear, footer_area); // Clear the footer area, so no artifacts remain
 
         let footer = Paragraph::new(footer_text)
         .block(Block::default().borders(Borders::ALL));

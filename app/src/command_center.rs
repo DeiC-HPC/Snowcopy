@@ -1,6 +1,7 @@
 use std::cmp::PartialEq;
 use crate::ui::{ProgressBarUi, Ui, UiEvent};
 use std::time::Duration;
+use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use util_layer::cc_util::{CommandCenterEvent, Status};
@@ -23,6 +24,8 @@ enum UiSender {
 pub enum Mode {
     Upload,
     Download,
+    Ls,
+    Rm,
 }
 
 impl UiSender {
@@ -45,10 +48,18 @@ pub struct CommandCenter {
 }
 
 impl CommandCenter {
-    pub fn new(silent : bool, stats: bool, mode: Mode) -> Self {
-        CommandCenter {silent, stats, mode}
+    pub fn new(ctx: Arc<util_layer::SnowContext>) -> Self {
+        CommandCenter {
+            silent: ctx.silent,
+            stats: ctx.stats,
+            mode: match ctx.mode {
+                util_layer::Mode::Upload => Mode::Upload,
+                util_layer::Mode::Download => Mode::Download,
+                util_layer::Mode::List => Mode::Ls,
+                util_layer::Mode::Remove => Mode::Rm,
+            },
+        }
     }
-
 }
 
 impl CC for CommandCenter {

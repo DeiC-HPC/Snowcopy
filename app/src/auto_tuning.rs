@@ -36,8 +36,13 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
     }
 }
 
-pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, open_file_limit_override: Option<usize>, download_file_concurrency_override: Option<usize>, path: &Path, cc_tx: UnboundedSender<CommandCenterEvent>, download : bool) -> (Arc<Semaphore>, Arc<Semaphore>, Arc<Semaphore>, usize, usize) {
-    let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, _filesystem) = detect(path);
+pub fn auto_tune_semaphores(ctx: Arc<util_layer::SnowContext>, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Arc<Semaphore>, Arc<Semaphore>, Arc<Semaphore>, usize, usize) {
+    let file_limit_override = ctx.file_limit;
+    let req_limit_override = ctx.req_limit;
+    let open_file_limit_override = Some(ctx.open_file_sem_limit().available_permits());
+    let download_file_concurrency_override = ctx.download_concurrency;
+    let download = ctx.mode == util_layer::Mode::Download;
+    let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, _filesystem) = detect(&ctx.local_path);
 
     let buffer_pool_size: usize = {
         if available_memory > 16 * 1024 * 1024 * 1024  {

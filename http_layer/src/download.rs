@@ -164,7 +164,6 @@ pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
         pending_bytes_to_be_written: std::sync::atomic::AtomicU64::new(file_info.file_size),
         mtime: file_info.modified_time,
         total_size: file_info.file_size,
-        cc_sender,
     });
 
     let (_bytes_read, hash_value) = download_body_to_buffer_and_offload_to_disk_writers(0, file_arc.clone(), disk_write_tx, &mut body, tracker, file_info.file_size as usize, IntegrityAlgorithm::SHA256).await?;
@@ -198,7 +197,7 @@ pub fn spawn_global_writers(
                             eprintln!("write error: {}", e); //TODO JON: Should we just retry? But what kind of local IO error would benefit from that?
                             //probably panic?
                         } else {
-                            tracker.complete_write(&file, data.len());
+                            tracker.complete_write(&file, data.len(), cc_sender.clone());
 
                             let transfer_metrics = CcLoadAndTransfer { //TODO JON: cleaner metrics. Perhaps optional.
                                 amount: data.len() as u64,

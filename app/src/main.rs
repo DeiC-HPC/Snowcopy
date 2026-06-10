@@ -3,21 +3,21 @@ mod auto_tuning;
 mod ui;
 mod download;
 mod command_center;
+mod config_and_parameter_parsing;
 
 use std::time::Instant;
 
 use clap::{Arg, ArgMatches, Command};
 
-use std::path::Path;
 use std::sync::Arc;
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
-use util_layer::{constants, Config};
+use util_layer::{constants, EndpointConfig, Mode};
+use util_layer::pattern::PathPattern;
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
 #[cfg(not(target_env = "msvc"))]
 use jemallocator::Jemalloc;
-
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
@@ -31,59 +31,130 @@ async fn main() {
     // Read Commandline Arguments
     let matches = parse_arguments();
 
-    if let Some(("config", _)) = matches.subcommand() {
-        if let Err(e) = config::run_tui() {
-            eprintln!("Error running config TUI: {}", e);
-            std::process::exit(1);
+    match matches.subcommand() {
+        Some(("config", _)) => {
+            if let Err(e) = config::run_tui() {
+                eprintln!("Error running config TUI: {}", e);
+                std::process::exit(1);
+            }
+            return;
         }
-        return;
+        Some(("rm", _)) => {
+            // Empty implementation as requested
+            return;
+        }
+        Some(("ls", _)) => {
+            // Empty implementation as requested
+            return;
+        }
+        Some(("engine", _)) => {
+            // Empty implementation as requested
+            return;
+        }
+        None => {} // Continue to upload/download logic
+        _ => unreachable!(),
     }
 
-    let bucket = matches.get_one::<String>("bucket").ok_or_else(|| {
-        eprintln!("error: the following required arguments were not provided:\n  --bucket <NAME>\n\nUsage: snowplowRust --bucket <NAME> <PATH>\n\nFor more information, try '--help'.");
-        std::process::exit(2);
-    }).unwrap();
+    let src_str = match matches.get_one::<String>("src") {
+        Some(s) => s,
+        None => {
+            eprintln!("Error: src and dest are required for upload/download.");
+            std::process::exit(1);
+        }
+    };
+    let dest_str = match matches.get_one::<String>("dest") {
+        Some(s) => s,
+        None => {
+            eprintln!("Error: src and dest are required for upload/download.");
+            std::process::exit(1);
+        }
+    };
 
-    let path_as_string = matches.get_one::<String>("path").ok_or_else(|| {
-        eprintln!("error: the following required arguments were not provided:\n  <PATH>\n\nUsage: snowplowRust --bucket <NAME> <PATH>\n\nFor more information, try '--help'.");
-        std::process::exit(2);
-    }).unwrap();
+    let src = PathPattern::parse(src_str);
+    let dest = PathPattern::parse(dest_str);
+
     let transfer_method = matches.get_one::<String>("o").expect("required");
     let file_limit = matches.get_one::<usize>("file_limit").copied();
     let req_limit = matches.get_one::<usize>("req_limit").copied();
     let download_concurrency = matches.get_one::<usize>("download_concurrency").copied();
     let silent = matches.get_flag("silent");
-    let download = matches.get_flag("download");
     let stats = matches.get_flag("stats");
     let md5_checksum_integrity = matches
         .get_one::<bool>("md5_checksum_integrity")
         .copied()
         .unwrap_or(true);
 
-    println!("{}", md5_checksum_integrity);
     let trailing = matches.get_flag("trailing");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
     let trailing_small = matches.get_flag("trailing-small");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
     let trailing_chunk_size = matches.get_one::<usize>("trailing-chunk-size").copied(); // TODO LND: Possibly a temporary flag
     let open_file_sem_limit = matches.get_one::<usize>("open-file-limit").copied();
+    let method = match_transfer_method(Some(transfer_method.as_str())).expect(format!("Transfer method {} unknown", transfer_method).as_str());
 
-    let path = Path::new(path_as_string);
-    let arc_bucket = Arc::new(bucket.to_string());
+    let (mode, profile, bucket, local_path) = match (&src, &dest) {
+        (
+            PathPattern::S3 {
+                profile, bucket, ..
+            },
+            PathPattern::Local(path),
+        ) => (Mode::Download, profile, bucket, path),
 
-    let method = match_transfer_method(Some(transfer_method)).expect(format!("Transfer method {} unknown", transfer_method).as_str());
+        (
+            PathPattern::Local(path),
+            PathPattern::S3 {
+                profile, bucket, ..
+            },
+        ) => (Mode::Upload, profile, bucket, path),
 
-    let config = gather_credentials().await;
-
-
-    if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
-        match method {
-            TransferMethod::CephS3Tokio => download::download(arc_bucket, "", path, file_limit, req_limit, download_concurrency, silent, stats, &config, md5_checksum_integrity).await,
-            TransferMethod::TransferManager => transfer_manager::download(arc_bucket, path, silent, stats, &config, req_limit).await,
+        _ => {
+            eprintln!("Error: One argument must be an S3 pattern (profile:bucket/path) and the other must be a local path.");
+            std::process::exit(1);
         }
-    } else {
-        match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, download_concurrency, silent, stats, &config, md5_checksum_integrity, trailing, trailing_small, open_file_sem_limit, trailing_chunk_size).await,
-            TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config, req_limit).await,
-        };
+    };
+
+    let endpoint = match gather_credentials(profile).await {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Error loading configuration for profile '{}': {}", profile, e);
+            std::process::exit(1);
+        }
+    };
+
+    let trailing_chunk_size = trailing_chunk_size.unwrap_or(8 * 1024 * 1024) as u64;
+    let open_file_sem_limit = Arc::new(tokio::sync::Semaphore::new(open_file_sem_limit.unwrap_or(100)));
+
+    let snow_context = Arc::new(util_layer::build_context(
+        endpoint,
+        md5_checksum_integrity,
+        transfer_method.clone(),
+        file_limit,
+        req_limit,
+        download_concurrency,
+        silent,
+        stats,
+        trailing_chunk_size,
+        trailing,
+        trailing_small,
+        open_file_sem_limit,
+        mode,
+        bucket.to_string(),
+        local_path.to_path_buf(),
+    ));
+
+    match mode {
+        Mode::Download => {
+            match method {
+                TransferMethod::CephS3Tokio => download::download(snow_context).await,
+                TransferMethod::TransferManager => transfer_manager::download(snow_context).await,
+            }
+        }
+        Mode::Upload => {
+            match method {
+                TransferMethod::CephS3Tokio => upload::upload(snow_context).await,
+                TransferMethod::TransferManager => transfer_manager::upload(snow_context).await,
+            };
+        }
+        Mode::List => {}
+        Mode::Remove => {}
     }
 
     let elapsed = start_time.elapsed();
@@ -92,27 +163,28 @@ async fn main() {
     }
 }
 
-async fn gather_credentials() -> Config {
-    // Attempt to read existing config file first
-    if let Ok(contents) = std::fs::read_to_string(&constants::CONFIG_PATH) {
-        if let Ok(mut cfg) = serde_json::from_str::<Config>(&contents) {
-            if cfg.s3_region.is_empty() {
-                cfg.s3_region = "us-east-1".to_string();
-            }
-            return cfg;
-        }
+async fn gather_credentials(profile_name: &str) -> anyhow::Result<EndpointConfig> {
+    let app_config = config::load_config()?;
+
+    let matches: Vec<_> = app_config
+        .endpoints
+        .iter()
+        .filter(|e| e.name == profile_name)
+        .collect();
+
+    if matches.is_empty() {
+        anyhow::bail!("Profile '{}' not found in configuration", profile_name);
     }
 
-    // Fallback: build config from AWS SDK defaults/environment
-    println!("No config file found. Building config from AWS SDK defaults/environment.");
-    let (credentials, region, endpoint) = aws_layer::load_aws_config_parts().await;
-
-    Config {
-        s3_access_key: credentials.access_key_id().to_string(),
-        s3_secret_key: credentials.secret_access_key().to_string(),
-        s3_url: endpoint.unwrap_or_default(),
-        s3_region: region.to_string(),
+    if matches.len() > 1 {
+        anyhow::bail!("Profile '{}' is not unique in configuration", profile_name);
     }
+
+    if let Some(endpoint_config) = &matches[0].config {
+        return Ok(endpoint_config.clone());
+    }
+
+    anyhow::bail!("Profile '{}' has no configuration", profile_name)
 }
 
 enum TransferMethod {
@@ -121,28 +193,40 @@ enum TransferMethod {
 }
 
 fn parse_arguments() -> ArgMatches {
-    let matches = Command::new("snowplowRust")
-        .version("0.1.0")
-        .about("Parses a -b argument and a path")
+    let matches = Command::new("snowcopy")
+        .version("0.1.0-alpha.1")
+        .about("Fast S3 copy tool")
+        .subcommand_required(false)
+        .arg_required_else_help(true)
         .subcommand(
             Command::new("config")
                 .about("Open the TUI for configuration management")
         )
-        .arg(
-            Arg::new("bucket")
-                .short('b')                 // allows -b
-                .long("bucket")             // also allows --bucket
-                .value_name("NAME")
-                .help("Bucket (e.g., 'some-bucket-name')")
-                .required(false)
-                .num_args(1),
+        .subcommand(
+            Command::new("rm")
+                .about("Remove a resource")
+                .arg(Arg::new("path").required(true).index(1))
+        )
+        .subcommand(
+            Command::new("ls")
+                .about("List resources")
+                .arg(Arg::new("path").required(true).index(1))
+        )
+        .subcommand(
+            Command::new("engine")
+                .about("Engine command")
         )
         .arg(
-            Arg::new("path")
-                .help("Input path")
+            Arg::new("src")
+                .help("Source path (local or profile:bucket/key)")
                 .required(false)
-                .value_name("PATH")
-            //.index(1),
+                .index(1),
+        )
+        .arg(
+            Arg::new("dest")
+                .help("Destination path (local or profile:bucket/key)")
+                .required(false)
+                .index(2),
         )
         .arg(
             Arg::new("o")
@@ -150,7 +234,6 @@ fn parse_arguments() -> ArgMatches {
                 .short('o')
                 .required(false)
                 .default_value("o1")
-            //.index(1),
         )
         .arg(
             Arg::new("file_limit")
@@ -187,14 +270,6 @@ fn parse_arguments() -> ArgMatches {
                 .short('q')
                 .long("silent")
                 .help("Suppress output messages")
-                .required(false)
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("download")
-                .short('d')
-                .long("download")
-                .help("Download mode")
                 .required(false)
                 .action(clap::ArgAction::SetTrue),
         )
@@ -245,7 +320,7 @@ fn parse_arguments() -> ArgMatches {
                 .value_parser(clap::value_parser!(usize))
                 .num_args(1),
         )
-        .after_help("Upload example:\n  snowplowRust -b bucket-name path/to/source")
+        .after_help("Examples:\n  up:   snowcopy file.txt profile:bucket\n  down: snowcopy profile:bucket/file.txt .")
         .get_matches();
     matches
 }

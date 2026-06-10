@@ -1,6 +1,6 @@
 [package]
-name = "snowplowRust"
-version = "0.1.0"
+name = "snowcopy"
+version = "0.1.0-alpha.1"
 edition = "2024"
 
 [dependencies]

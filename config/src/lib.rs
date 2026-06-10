@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use directories::ProjectDirs;
 use anyhow::{Result, Context};
 use std::fs;
+use util_layer::Endpoint;
+#[cfg(test)]
+use util_layer::EndpointConfig;
 
 pub mod tui;
 
@@ -15,7 +18,7 @@ pub struct AppConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GlobalConfig {
-    #[serde(default = "default_region")]
+    #[serde(default = "util_layer::default_region")]
     pub s3_region: String,
     #[serde(flatten)]
     pub additional_properties: HashMap<String, serde_json::Value>,
@@ -24,58 +27,8 @@ pub struct GlobalConfig {
 impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
-            s3_region: default_region(),
+            s3_region: util_layer::default_region(),
             additional_properties: HashMap::new(),
-        }
-    }
-}
-
-fn default_region() -> String {
-    "us-east-1".to_string()
-}
-
-fn default_region_option() -> Option<String> {
-    Some(default_region())
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Endpoint {
-    pub name: String,
-    pub config: Option<EndpointConfig>,
-    pub settings: Option<HashMap<String, serde_json::Value>>,
-}
-
-impl Endpoint {
-    pub fn is_complete(&self) -> bool {
-        if self.name.trim().is_empty() {
-            return false;
-        }
-        if let Some(config) = &self.config {
-            !config.s3_access_key.trim().is_empty()
-                && !config.s3_secret_key.trim().is_empty()
-                && !config.s3_url.trim().is_empty()
-        } else {
-            false
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct EndpointConfig {
-    pub s3_access_key: String,
-    pub s3_secret_key: String,
-    pub s3_url: String,
-    #[serde(default = "default_region_option")]
-    pub s3_region: Option<String>,
-}
-
-impl Default for EndpointConfig {
-    fn default() -> Self {
-        Self {
-            s3_access_key: String::new(),
-            s3_secret_key: String::new(),
-            s3_url: String::new(),
-            s3_region: default_region_option(),
         }
     }
 }
@@ -93,7 +46,7 @@ pub fn load_config() -> Result<AppConfig> {
         return Ok(AppConfig::default());
     }
     let content = fs::read_to_string(path)?;
-    let config = serde_json::from_str(&content)?;
+    let config: AppConfig = serde_json::from_str(&content)?;
     Ok(config)
 }
 
