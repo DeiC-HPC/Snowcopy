@@ -223,8 +223,8 @@ pub struct StreamingFileChunkedBodyInner {
 }
 
 impl StreamingFileChunkedBodyInner {
-    /// Formats the data chunk on read_buf in the following order: Length of data sent, chunk signature, and then the data of the chunk.
-    /// Data is put in the middle to avoid copying the data twice.
+    /// Formats the data chunk on read_buf in the following order: Length of data sent, chunk signature, and then the data of the chunk and a "\r\n".
+    /// Data is put in the middle during read to avoid copying the data twice.
     fn format_data_chunk(&mut self, data_index: usize, bytes_read: usize) {
         let chunk_data = &self.chunk_buf[data_index..data_index + bytes_read];
         let chunk_hash = sha256_hex(chunk_data);
@@ -257,11 +257,11 @@ impl StreamingFileChunkedBodyInner {
         self.chunk_buf[pos..pos + sig_bytes.len()].copy_from_slice(sig_bytes);
         pos += sig_bytes.len();
 
-        // Write "\r\n"
+        // Write "\r\n" before the chunk data section
         self.chunk_buf[pos] = b'\r';
         self.chunk_buf[pos + 1] = b'\n';
 
-        // Append "\r\n" after the chunk data
+        // Append "\r\n" after the chunk data section
         self.chunk_buf[data_index + bytes_read] = b'\r';
         self.chunk_buf[data_index + bytes_read + 1] = b'\n';
         self.prev_signature = chunk_sig;
