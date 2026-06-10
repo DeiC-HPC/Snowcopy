@@ -61,6 +61,10 @@ async fn main() {
         .unwrap_or(true);
 
     println!("{}", md5_checksum_integrity);
+    let trailing = matches.get_flag("trailing");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
+    let trailing_small = matches.get_flag("trailing-small");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
+    let trailing_chunk_size = matches.get_one::<usize>("trailing-chunk-size").copied(); // TODO LND: Possibly a temporary flag
+    let open_file_sem_limit = matches.get_one::<usize>("open-file-limit").copied();
 
     let path = Path::new(path_as_string);
     let arc_bucket = Arc::new(bucket.to_string());
@@ -77,7 +81,7 @@ async fn main() {
         }
     } else {
         match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, download_concurrency, silent, stats, &config, md5_checksum_integrity).await,
+            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, download_concurrency, silent, stats, &config, md5_checksum_integrity, trailing, trailing_small, open_file_sem_limit, trailing_chunk_size).await,
             TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config, req_limit).await,
         };
     }
@@ -114,14 +118,6 @@ async fn gather_credentials() -> Config {
 enum TransferMethod {
     CephS3Tokio,
     TransferManager,
-}
-
-fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
-    match method {
-        Some("o1") => Some(TransferMethod::CephS3Tokio),
-        Some("o2") => Some(TransferMethod::TransferManager),
-        _other => None,
-    }
 }
 
 fn parse_arguments() -> ArgMatches {
@@ -217,9 +213,49 @@ fn parse_arguments() -> ArgMatches {
                 .default_value("true")
                 .action(clap::ArgAction::SetFalse),
         )
+        .arg(
+            Arg::new("trailing")
+                .long("trailing")
+                .help("Trailing header mode (uses trailing headers for S3 operations)")
+                .required(false)
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("trailing-small")
+                .long("trailing-small")
+                .help("Trailing header mode for small files (uses trailing headers for S3 operations)")
+                .required(false)
+                .action(clap::ArgAction::SetTrue)
+        )
+        .arg(
+            Arg::new("trailing-chunk-size")
+                .long("trailing-chunk-size")
+                .value_name("NUMBER")
+                .help("Size of chunks used for trailing header operations in kB")
+                .required(false)
+                .value_parser(clap::value_parser!(usize))
+                .num_args(1),
+        )
+        .arg(
+            Arg::new("open-file-limit")
+                .long("open-file-limit")
+                .value_name("NUMBER")
+                .help("Limit of simultaneously open file descriptors")
+                .required(false)
+                .value_parser(clap::value_parser!(usize))
+                .num_args(1),
+        )
         .after_help("Upload example:\n  snowplowRust -b bucket-name path/to/source")
         .get_matches();
     matches
+}
+
+fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
+    match method {
+        Some("o1") => Some(TransferMethod::CephS3Tokio),
+        Some("o2") => Some(TransferMethod::TransferManager),
+        _other => None,
+    }
 }
 
 fn init_logging() {

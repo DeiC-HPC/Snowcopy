@@ -36,7 +36,7 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
     }
 }
 
-pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, download_file_concurrency_override: Option<usize>, path: &Path, cc_tx: UnboundedSender<CommandCenterEvent>, download : bool) -> (Arc<Semaphore>, Arc<Semaphore>, usize, usize) {
+pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_override: Option<usize>, open_file_limit_override: Option<usize>, download_file_concurrency_override: Option<usize>, path: &Path, cc_tx: UnboundedSender<CommandCenterEvent>, download : bool) -> (Arc<Semaphore>, Arc<Semaphore>, Arc<Semaphore>, usize, usize) {
     let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, _filesystem) = detect(path);
 
     let buffer_pool_size: usize = {
@@ -125,6 +125,7 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
         }
     };
 
+    let open_file_limit = open_file_limit_override.unwrap_or(req_limit + file_limit + 100); // TODO LND: This is not a permanent value - it should be using known ulimit constraints and adjusted based on other semaphores
     let download_file_concurrency = { //TODO JON: HDD, should have a lower number.
         if let Some(dc_override) = download_file_concurrency_override {
             dc_override
@@ -136,7 +137,7 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
 
     let file_sem = Arc::new(Semaphore::new(file_limit));
     let req_sem = Arc::new(Semaphore::new(req_limit));
-
+    let open_file_sem = Arc::new(Semaphore::new(open_file_limit));
 
     let _ = cc_tx.send(CommandCenterEvent::Log(format!(
         "<Hardware detected: CPU cores: {}, Disk type: {}, File system: {}, Available memory: {:.2} GiB, Network speed: {} Mbps>",
@@ -164,7 +165,8 @@ pub fn auto_tune_semaphores(file_limit_override: Option<usize>, req_limit_overri
         )));
     }
 
-    (file_sem, req_sem, buffer_pool_size, download_file_concurrency)
+
+    (file_sem, req_sem, open_file_sem, buffer_pool_size, download_file_concurrency)
 }
 
 fn canonicalize_for_compare(path: &Path) -> PathBuf {

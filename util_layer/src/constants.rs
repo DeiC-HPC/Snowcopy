@@ -20,3 +20,14 @@ pub const DOWNLOAD_DIRECT_WRITE_FRAME_THRESHOLD: usize = 128 * 1024;
 
 pub const MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY: &str = "uniform-chunk-size";
 pub const PAYLOAD_SHA256_METADATA_KEY: &str = "checksum-sha256";
+
+//Trailing header
+pub const AWS_CHUNK_PAYLOAD_ALGORITHM: &str = "AWS4-HMAC-SHA256-PAYLOAD";
+pub const AWS_CHUNK_TRAILER_ALGORITHM: &str = "AWS4-HMAC-SHA256-TRAILER";
+pub const AMZ_STREAMING_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
+pub const AMZ_CHUNK_SIGNATURE_HEADER: &str = "chunk-signature";
+pub const AMZ_CHECKSUM_SHA256: &str = "x-amz-checksum-sha256";
+pub const AMZ_TRAILER_SIGNATURE: &str = "x-amz-trailer-signature";
+pub const STREAMING_READ_BUFFER_SIZE: u64 = 128; // In kB
+pub const CHUNKSIGNATURE_LENGTH: usize = 83; // The fixed length of chars for a chunk signature for trailing headers (Sha256)
+pub const TRAILER_HASH_LENGTH: usize = 44;  // The fixed length of a trailer hash (Sha256)

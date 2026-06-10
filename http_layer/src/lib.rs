@@ -2,30 +2,28 @@ mod logging;
 mod signer;
 pub mod download;
 pub mod integrity;
+pub mod upload_trailing;
 
 use crate::signer::CredentialScope;
 use anyhow::Result;
 use bytes::Bytes;
-use futures_util::TryStreamExt;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full, StreamBody};
-use hyper::body::Frame;
-use hyper::{Method, Request, Uri};
+use http_body_util::{BodyExt, Full};
+use hyper::{Method, Request};
 use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::TokioExecutor,
 };
+use openssl::hash::{Hasher, MessageDigest};
+use openssl::base64;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
-use openssl::base64;
-use openssl::hash::{Hasher, MessageDigest};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
-use tokio_util::io::ReaderStream;
 use util_layer::cc_util::CcLoadAndTransfer;
 use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
 use util_layer::snow_errors::{S3Error, SnowCopyError};
@@ -94,7 +92,7 @@ pub fn build_https_client() -> PoolClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri : Arc<String>, query_uri : &String) -> Result<CcLoadAndTransfer> {
+pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri : Arc<String>, query_uri : &String) -> Result<(String, CcLoadAndTransfer)> {
     let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(0, None, ctx, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let req_permit_start = Instant::now();
@@ -113,6 +111,12 @@ pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
         return Err(s3_err.into());
     }
 
+    let etag = resp // TODO LND: Unused currently
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     //drain body so the connection can be returned to the pool.
     resp.into_body().collect().await?;
     drop(permit);
@@ -124,7 +128,7 @@ pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
         req_sem_work_time_secs: req_work_elapsed.as_secs_f64(),
         req_sem_acquire_time_secs: req_permit_elapsed.as_secs_f64(),
     };
-    Ok(transfer_metrics)
+    Ok((etag.unwrap(), transfer_metrics))
 }
 
 pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {
@@ -169,23 +173,6 @@ pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, fro
     Ok((etag.unwrap(), transfer_metrics))
 }
 
-#[allow(dead_code)]
-async fn create_streaming_body_put(amount: u64, uri: Uri, file: File) -> hyper::http::Result<Request<StreamingBody>> { //TODO Jon: use for trailer
-    // Take only the bytes in the range [from, to]
-    let limited_reader = file.take(amount);
-
-    // Convert to a stream of Frames
-    let byte_stream = ReaderStream::with_capacity(limited_reader, READ_BUFFER_SIZE).map_ok(Frame::data);
-    let body: StreamingBody = StreamBody::new(byte_stream).boxed();
-
-    Request::builder()
-        .method(Method::PUT)
-        .uri(uri)
-        .header("content-type", "application/octet-stream")
-        .header("content-length", amount.to_string())
-        .body(body)
-}
-
 async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
     let file_permit_start = Instant::now();
     let file_lock = file_sem.acquire().await?;
@@ -203,9 +190,9 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         file.seek(std::io::SeekFrom::Start(start)).await?;
     }
 
-    let mut buffer = buffer_pool.get().await;
-    // Ensure the buffer is large enough if amount > chunk_size, 
+    // Ensure the buffer is large enough if amount > chunk_size,
     // though in this app amount is expected to be <= CHUNK_SIZE.
+    let mut buffer = buffer_pool.get().await;
     if buffer.len() < amount as usize {
         buffer.resize(amount as usize, 0u8);
     }
@@ -214,7 +201,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     let chunk_size = READ_BUFFER_SIZE.min(amount as usize);
 
     //TODO JON: Its very possible that we should wrap this in a spawn_blocking and use a single file descriptor for the upload.
-    
+
     let mut md5_hasher = if ctx.md5_checksum_integrity_check() {
         Some(Hasher::new(MessageDigest::md5())?)
     } else {
@@ -381,11 +368,7 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
         &query_uri,
     );
 
-    let uri = if query_uri.is_empty() {
-        format!("https://{}{}", ctx.s3_host(), canonical_uri)
-    } else {
-        format!("https://{}{}?{}", ctx.s3_host(), canonical_uri, query_uri)
-    };
+    let uri = format_query(&ctx, canonical_uri, query_uri);
 
     let body : StreamingBody = match payload {
         None => {
@@ -412,6 +395,14 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
         .header("authorization", auth_header)
         .body(body).expect("Failed to create request. This should never happen.");
     Ok(req)
+}
+
+fn format_query(ctx: &Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String) -> String {
+    if query_uri.is_empty() {
+        format!("https://{}{}", ctx.s3_host(), canonical_uri)
+    } else {
+        format!("https://{}{}?{}", ctx.s3_host(), canonical_uri, query_uri)
+    }
 }
 
 pub struct PooledBuffer {

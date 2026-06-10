@@ -1,8 +1,10 @@
 pub mod ui;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Semaphore;
 use url::Url;
 
 pub mod constants;
@@ -23,22 +25,25 @@ pub struct Config {
     pub s3_region: String,
 }
 
-pub fn build_context(config: Config, md5_checksum_upload: bool) -> SnowContext {
+pub fn build_context(config: Config, md5_checksum_upload: bool, trailing_info: Option<TrailingInfo>) -> SnowContext {
     let ctx = SnowContext {
         s3_access_key: config.s3_access_key,
         s3_secret_key: config.s3_secret_key,
         s3_host: Url::parse(config.s3_url.as_str()).unwrap().host_str().unwrap().to_string(),
         s3_region: config.s3_region,
+        trailing_info,
         md5_checksum_upload,
     };
     ctx
 }
+
 #[derive(Clone)]
 pub struct SnowContext {
     s3_access_key: String,
     s3_secret_key: String,
     s3_host: String,
     s3_region: String,
+    trailing_info: Option<TrailingInfo>,
     md5_checksum_upload: bool,
 }
 
@@ -61,7 +66,11 @@ impl SnowContext {
 
     pub fn md5_checksum_integrity_check(&self) -> bool {
         self.md5_checksum_upload
-    }   
+    }
+
+    pub fn trailing_info(&self) -> &TrailingInfo {
+        &self.trailing_info.as_ref().unwrap()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +90,14 @@ pub struct FileInfo {
     pub key: String,
     pub file_size: u64,
     pub modified_time: Option<SystemTime>,
+}
+
+#[derive(Clone)]
+pub struct TrailingInfo {
+    pub trailing_chunk_size: u64,
+    pub trailing: bool,
+    pub trailing_small: bool,
+    pub open_file_sem_limit: Arc<Semaphore>,
 }
 
 pub fn path_to_s3_key(path: &str) -> String {

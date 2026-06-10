@@ -49,8 +49,8 @@ pub async fn download(bucket: Arc<String>, prefix: &str, dest: &Path, file_limit
     let mut download_rx = fetch_object_metadata_and_filter_already_downloaded(&bucket, &cc_tx, client, object_channel).await;
 
     let pool_client = Arc::new(http_layer::build_https_client());
-    let snow_context = Arc::new(build_context(config.clone(), md5_checksum_integrity));
-    let (file_sem, req_sem, _buffer_pool_size, download_file_concurrency) = auto_tune_semaphores(file_limit, req_limit, download_concurrency, dest, cc_tx.clone(), true);
+    let snow_context = Arc::new(build_context(config.clone(), md5_checksum_integrity, None));
+    let (file_sem, req_sem, _, _buffer_pool_size, download_file_concurrency) = auto_tune_semaphores(file_limit, req_limit, None, download_concurrency, dest, cc_tx.clone(), true);
     let task_sem = Arc::new(Semaphore::new(req_sem.available_permits() * 2));
 
     let mut created_dirs: HashSet<PathBuf> = HashSet::new();
