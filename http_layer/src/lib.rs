@@ -190,6 +190,8 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         file.seek(std::io::SeekFrom::Start(start)).await?;
     }
 
+    // Ensure the buffer is large enough if amount > chunk_size,
+    // though in this app amount is expected to be <= CHUNK_SIZE.
     let mut buffer = buffer_pool.get().await;
     if buffer.len() < amount as usize {
         buffer.resize(amount as usize, 0u8);
@@ -234,6 +236,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     let mtime_str = file_info.modified_time.map(util_layer::time::time_to_float_string);
 
+    // We use a custom struct to return the buffer to the pool when dropped
     let body_buffer = PooledBuffer {
         buffer: Some(buffer),
         pool: buffer_pool.clone(),
