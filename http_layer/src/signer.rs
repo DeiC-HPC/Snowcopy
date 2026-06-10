@@ -47,7 +47,7 @@ impl ChunkSigner {
         prev_signature: &str,
         chunk_hash: &str,
     ) -> String {
-        let capacity = AWS_CHUNK_PAYLOAD_ALGORITHM.len() + 1
+        let capacity = AWS_CHUNK_PAYLOAD_ALGORITHM.len() + 1    // Matches size + 1 for the newline
             + amz_date.len() + 1
             + credential_scope.len() + 1
             + prev_signature.len() + 1

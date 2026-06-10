@@ -214,8 +214,8 @@ pub struct StreamingFileChunkedBodyInner {
     checksum_hasher: Option<openssl::hash::Hasher>,
     /// Cached checksum
     final_checksum: Option<String>,
-    /// Buffer for holding read data
-    read_buf: Vec<u8>,
+    /// Buffer for holding the entirety of the chunk to be sent
+    chunk_buf: Vec<u8>,
     /// Current read position in buf
     state: StreamingChunkedState,
     /// Chunk size (in kB)
@@ -226,7 +226,7 @@ impl StreamingFileChunkedBodyInner {
     /// Formats the data chunk on read_buf in the following order: Length of data sent, chunk signature, and then the data of the chunk.
     /// Data is put in the middle to avoid copying the data twice.
     fn format_data_chunk(&mut self, data_index: usize, bytes_read: usize) {
-        let chunk_data = &self.read_buf[data_index..data_index + bytes_read];
+        let chunk_data = &self.chunk_buf[data_index..data_index + bytes_read];
         let chunk_hash = sha256_hex(chunk_data);
 
         let chunk_sig = self.chunk_signer.sign_chunk(
@@ -241,29 +241,29 @@ impl StreamingFileChunkedBodyInner {
         let mut pos = 0;
 
         // Write hex length of chunk data
-        pos += find_length_of_chunk_data_as_hex(&mut self.read_buf[pos..], bytes_read);
+        pos += find_length_of_chunk_data_as_hex(&mut self.chunk_buf[pos..], bytes_read);
 
         // Write ";chunk-signature="
-        self.read_buf[pos] = b';';
+        self.chunk_buf[pos] = b';';
         pos += 1;
         let header_bytes = AMZ_CHUNK_SIGNATURE_HEADER.as_bytes();
-        self.read_buf[pos..pos + header_bytes.len()].copy_from_slice(header_bytes);
+        self.chunk_buf[pos..pos + header_bytes.len()].copy_from_slice(header_bytes);
         pos += header_bytes.len();
-        self.read_buf[pos] = b'=';
+        self.chunk_buf[pos] = b'=';
         pos += 1;
 
         // Write signature (64 hex chars)
         let sig_bytes = chunk_sig.as_bytes();
-        self.read_buf[pos..pos + sig_bytes.len()].copy_from_slice(sig_bytes);
+        self.chunk_buf[pos..pos + sig_bytes.len()].copy_from_slice(sig_bytes);
         pos += sig_bytes.len();
 
         // Write "\r\n"
-        self.read_buf[pos] = b'\r';
-        self.read_buf[pos + 1] = b'\n';
+        self.chunk_buf[pos] = b'\r';
+        self.chunk_buf[pos + 1] = b'\n';
 
         // Append "\r\n" after the chunk data
-        self.read_buf[data_index + bytes_read] = b'\r';
-        self.read_buf[data_index + bytes_read + 1] = b'\n';
+        self.chunk_buf[data_index + bytes_read] = b'\r';
+        self.chunk_buf[data_index + bytes_read + 1] = b'\n';
         self.prev_signature = chunk_sig;
     }
 
@@ -283,7 +283,7 @@ impl StreamingFileChunkedBodyInner {
         self.prev_signature = empty_sig.clone();
 
         write!(
-            &mut self.read_buf,
+            &mut self.chunk_buf,
             "0;{}={}\r\n\r\n",
             AMZ_CHUNK_SIGNATURE_HEADER,
             empty_sig
@@ -303,7 +303,7 @@ impl StreamingFileChunkedBodyInner {
         );
 
         write!(
-            &mut self.read_buf,
+            &mut self.chunk_buf,
             "{}:{}\r\n{}:{}\r\n\r\n",
             self.trailer_name.to_lowercase(),
             checksum_b64,
@@ -326,7 +326,7 @@ impl Body for StreamingFileChunkedBody {
         loop {
             match inner.state {
                 StreamingChunkedState::Reading => {
-                    inner.read_buf.clear();
+                    inner.chunk_buf.clear();
                     if inner.remaining == 0 {
                         inner.state = StreamingChunkedState::FinalChunk;
                         continue;
@@ -338,8 +338,8 @@ impl Body for StreamingFileChunkedBody {
                     let to_read = std::cmp::min(inner.chunk_size, inner.remaining) as usize;
                     let to_read_digits = Self::extract_bytes_read_digits(to_read);
                     let data_index = to_read_digits + CHUNKSIGNATURE_LENGTH;            // "<data_index>;chunk-signature=<FixedLengthChunkSignature>\r\n"
-                    inner.read_buf.resize(data_index + to_read + 2, 0);     // Resize to ChunkSignature + Data length + "\r\n"
-                    let buf = &mut inner.read_buf[data_index..data_index + to_read];    // Buf is offset to reserve space for chunk signature
+                    inner.chunk_buf.resize(data_index + to_read + 2, 0);     // Resize to ChunkSignature + Data length + "\r\n"
+                    let buf = &mut inner.chunk_buf[data_index..data_index + to_read];    // Buf is offset to reserve space for chunk signature
                     let mut read_buf = tokio::io::ReadBuf::new(buf);
 
                     match file.poll_read(cx, &mut read_buf) {
@@ -362,7 +362,7 @@ impl Body for StreamingFileChunkedBody {
                             inner.remaining -= bytes_read as u64;
                             inner.format_data_chunk(data_index, bytes_read);
 
-                            let data = std::mem::take(&mut inner.read_buf);
+                            let data = std::mem::take(&mut inner.chunk_buf);
                             return Poll::Ready(Some(Ok(Frame::data(Bytes::from(data)))));
                         }
                         Poll::Ready(Err(e)) => {
@@ -377,14 +377,14 @@ impl Body for StreamingFileChunkedBody {
                 StreamingChunkedState::FinalChunk => {
                     inner.format_final_chunk();
                     inner.state = StreamingChunkedState::Trailers;
-                    let data = std::mem::take(&mut inner.read_buf);
+                    let data = std::mem::take(&mut inner.chunk_buf);
                     return Poll::Ready(Some(Ok(Frame::data(Bytes::from(data)))));
                 }
 
                 StreamingChunkedState::Trailers => {
                     inner.format_trailers();
                     inner.state = StreamingChunkedState::Done;
-                    let data = std::mem::take(&mut inner.read_buf);
+                    let data = std::mem::take(&mut inner.chunk_buf);
                     return Poll::Ready(Some(Ok(Frame::data(Bytes::from(data)))));
                 }
 
@@ -427,7 +427,7 @@ impl StreamingFileChunkedBody {
                 trailer_name,
                 checksum_hasher: Some(signer::create_sha256_hasher()),
                 final_checksum: None,
-                read_buf: Vec::with_capacity((chunk_size + 256) as usize),
+                chunk_buf: Vec::with_capacity((chunk_size) as usize + CHUNKSIGNATURE_LENGTH + 11),   // Size of chunk data + chunk signature + max digits size + "\r\n"
                 state: StreamingChunkedState::Reading,
                 chunk_size,
             }
@@ -466,7 +466,7 @@ enum StreamingChunkedState {
     Done,
 }
 
-/// Writes a usize as lowercase hex into a byte slice, returns bytes written
+/// Finds the number of digits in hex to represent the given length of a chunk of data.
 #[inline]
 fn find_length_of_chunk_data_as_hex(buf: &mut [u8], mut n: usize) -> usize {
     if n == 0 {
