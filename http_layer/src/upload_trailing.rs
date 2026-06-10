@@ -14,7 +14,7 @@ use hyper::body::{Body, Frame};
 use bytes::Bytes;
 use util_layer::{FileInfo, SnowContext};
 use util_layer::cc_util::CcLoadAndTransfer;
-use util_layer::constants::{AMZ_CHECKSUM_SHA256, AMZ_CHUNK_SIGNATURE_HEADER, AMZ_STREAMING_TRAILER, AMZ_TRAILER_SIGNATURE, AWS_ALGORITHM, CHUNKSIGNATURE_LENGTH, EMPTY_PAYLOAD_SHA256, TRAILER_HASH_LENGTH};
+use util_layer::constants::{AMZ_CHECKSUM_SHA256, AMZ_CHUNK_SIGNATURE_HEADER, AMZ_STREAMING_TRAILER, AMZ_TRAILER_SIGNATURE, AWS_ALGORITHM, CHUNK_SIGNATURE_LENGTH, EMPTY_PAYLOAD_SHA256, TRAILER_HASH_LENGTH};
 use util_layer::snow_errors::SnowCopyError;
 use crate::{signer, PoolClient, StreamingBody};
 use crate::signer::{sha256_hex, ChunkSigner, CredentialScope};
@@ -337,7 +337,7 @@ impl Body for StreamingFileChunkedBody {
 
                     let to_read = std::cmp::min(inner.chunk_size, inner.remaining) as usize;
                     let to_read_digits = Self::extract_bytes_read_digits(to_read);
-                    let data_index = to_read_digits + CHUNKSIGNATURE_LENGTH;            // "<data_index>;chunk-signature=<FixedLengthChunkSignature>\r\n"
+                    let data_index = to_read_digits + CHUNK_SIGNATURE_LENGTH;            // "<data_index>;chunk-signature=<FixedLengthChunkSignature>\r\n"
                     inner.chunk_buf.resize(data_index + to_read + 2, 0);     // Resize to ChunkSignature + Data length + "\r\n"
                     let buf = &mut inner.chunk_buf[data_index..data_index + to_read];    // Buf is offset to reserve space for chunk signature
                     let mut read_buf = tokio::io::ReadBuf::new(buf);
@@ -427,7 +427,7 @@ impl StreamingFileChunkedBody {
                 trailer_name,
                 checksum_hasher: Some(signer::create_sha256_hasher()),
                 final_checksum: None,
-                chunk_buf: Vec::with_capacity((chunk_size) as usize + CHUNKSIGNATURE_LENGTH + 11),   // Size of chunk data + chunk signature + max digits size + "\r\n"
+                chunk_buf: Vec::with_capacity((chunk_size) as usize + CHUNK_SIGNATURE_LENGTH + 11),   // Size of chunk data + chunk signature + max digits size + "\r\n"
                 state: StreamingChunkedState::Reading,
                 chunk_size,
             }
