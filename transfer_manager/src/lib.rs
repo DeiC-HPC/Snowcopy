@@ -4,12 +4,12 @@ use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_config::Region;
 
-use util_layer::SnowContext;
-pub async fn upload(ctx: Arc<SnowContext>) {
-    let region = Region::new(ctx.s3_region().to_string());
+use util_layer::{UploadConfig, DownloadConfig};
+pub async fn upload(ctx: Arc<UploadConfig>) {
+    let region = Region::new(ctx.endpoint.s3_region.clone());
     let creds = Credentials::new(
-        ctx.s3_access_key(),
-        ctx.s3_secret_key(),
+        ctx.endpoint.s3_access_key.clone(),
+        ctx.endpoint.s3_secret_key.clone(),
         None,
         None,
         "manual",
@@ -18,7 +18,7 @@ pub async fn upload(ctx: Arc<SnowContext>) {
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
         .credentials_provider(creds)
         .region(region)
-        .endpoint_url(ctx.s3_url())
+        .endpoint_url(ctx.endpoint.s3_url.clone())
         .load()
         .await;
 
@@ -29,7 +29,7 @@ pub async fn upload(ctx: Arc<SnowContext>) {
     let mut tm_config_builder = aws_sdk_s3_transfer_manager::Config::builder()
         .client(s3_client);
 
-    if let Some(c) = ctx.req_limit {
+    if let Some(c) = ctx.req_limit_overwrite {
         tm_config_builder = tm_config_builder.concurrency(aws_sdk_s3_transfer_manager::types::ConcurrencyMode::Explicit(c));
     } else {
         tm_config_builder = tm_config_builder.concurrency(aws_sdk_s3_transfer_manager::types::ConcurrencyMode::Explicit(200));
@@ -63,7 +63,7 @@ pub async fn upload(ctx: Arc<SnowContext>) {
         }
     } else {
         let key = match ctx.local_path.file_name()
-            .and_then(|n| n.to_str()) {
+            .and_then(|n: &std::ffi::OsStr| n.to_str()) {
             Some(k) => k,
             None => {
                 eprintln!("Invalid file name: {:?}", ctx.local_path);
@@ -107,12 +107,12 @@ pub async fn upload(ctx: Arc<SnowContext>) {
     }
 }
 
-pub async fn download(ctx: Arc<SnowContext>) {
+pub async fn download(ctx: Arc<DownloadConfig>) {
     let bucket = &ctx.bucket;
-    let region = Region::new(ctx.s3_region().to_string());
+    let region = Region::new(ctx.endpoint.s3_region.clone());
     let creds = Credentials::new(
-        ctx.s3_access_key(),
-        ctx.s3_secret_key(),
+        ctx.endpoint.s3_access_key.clone(),
+        ctx.endpoint.s3_secret_key.clone(),
         None,
         None,
         "manual",
@@ -121,7 +121,7 @@ pub async fn download(ctx: Arc<SnowContext>) {
     let sdk_config = aws_config::defaults(BehaviorVersion::latest())
         .credentials_provider(creds)
         .region(region)
-        .endpoint_url(ctx.s3_url())
+        .endpoint_url(ctx.endpoint.s3_url.clone())
         .load()
         .await;
 
@@ -132,7 +132,7 @@ pub async fn download(ctx: Arc<SnowContext>) {
     let mut tm_config_builder = aws_sdk_s3_transfer_manager::Config::builder()
         .client(s3_client);
 
-    if let Some(c) = ctx.req_limit {
+    if let Some(c) = ctx.req_limit_overwrite {
         tm_config_builder = tm_config_builder.concurrency(aws_sdk_s3_transfer_manager::types::ConcurrencyMode::Explicit(c));
     } else {
         tm_config_builder = tm_config_builder.concurrency(aws_sdk_s3_transfer_manager::types::ConcurrencyMode::Explicit(200));
@@ -171,7 +171,7 @@ pub async fn download(ctx: Arc<SnowContext>) {
         // Single file download
         // For a single file download, we assume 'path' is the local file path, 
         // and we use its file name as the S3 key.
-        let key = match ctx.local_path.file_name().and_then(|n| n.to_str()) {
+        let key = match ctx.local_path.file_name().and_then(|n: &std::ffi::OsStr| n.to_str()) {
             Some(k) => k,
             None => {
                 eprintln!("Invalid file name for download: {:?}", ctx.local_path);
@@ -196,7 +196,7 @@ pub async fn download(ctx: Arc<SnowContext>) {
         }
 
         use tokio::io::AsyncWriteExt;
-        let mut file = match tokio::fs::File::create(&ctx.local_path).await {
+        let mut file: tokio::fs::File = match tokio::fs::File::create(&ctx.local_path).await {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("Failed to create file {:?}: {:?}", ctx.local_path, e);

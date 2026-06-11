@@ -1,4 +1,3 @@
-use util_layer::constants::CHUNK_SIZE;
 use crate::constants::MAX_REQUEST_AMOUNT;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -6,6 +5,7 @@ use sysinfo::{Disks, Networks, System};
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Semaphore;
 use util_layer::cc_util::CommandCenterEvent;
+use util_layer::{DownloadConfig, UploadConfig};
 
 // Network speed detection is supported on Linux more easily than on Windows and MacOS. TODO: take a second look at this
 fn read_network_speed(_interface_name: &str) -> Option<u64> {
@@ -36,13 +36,57 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
     }
 }
 
-pub fn auto_tune_semaphores(ctx: Arc<util_layer::SnowContext>, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Arc<Semaphore>, Arc<Semaphore>, Arc<Semaphore>, usize, usize) {
-    let file_limit_override = ctx.file_limit;
-    let req_limit_override = ctx.req_limit;
-    let open_file_limit_override = Some(ctx.open_file_sem_limit().available_permits());
-    let download_file_concurrency_override = ctx.download_concurrency;
-    let download = ctx.mode == util_layer::Mode::Download;
-    let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, _filesystem) = detect(&ctx.local_path);
+pub fn auto_tune_upload(config: Arc<UploadConfig>, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Arc<Semaphore>, Arc<Semaphore>, Arc<Semaphore>, usize) {
+    let file_limit_override = config.file_limit_overwrite;
+    let req_limit_override = config.req_limit_overwrite;
+    let open_file_limit_override = Some(config.open_file_sem_limit.available_permits());
+    let download_file_concurrency_override = None;
+
+    let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, filesystem) = detect(&config.local_path);
+    let (file_sem, req_sem, open_files_sem, buffer_pool_size, _) = auto_tune_internal(file_limit_override, req_limit_override, open_file_limit_override, download_file_concurrency_override, cpu_cores, max_network_speed, disk_type, available_memory, total_memory, filesystem, cc_tx.clone());
+
+    let _ = cc_tx.send(CommandCenterEvent::Log(format!(
+        "<Init. tuning: file_limit: {}, req_limit: {}, buffer_pool_size: {:.2} GiB>",
+        file_sem.available_permits(),
+        req_sem.available_permits(),
+        buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0)
+    )));
+
+    (file_sem, req_sem, open_files_sem, buffer_pool_size)
+}
+
+pub fn auto_tune_download(config: Arc<DownloadConfig>, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Arc<Semaphore>, Arc<Semaphore>, usize) {
+    let file_limit_override = config.file_limit_overwrite;
+    let req_limit_override = config.req_limit_overwrite;
+    let open_file_limit_override = Some(config.open_file_sem_limit.available_permits());
+    let download_file_concurrency_override = config.download_concurrency_overwrite;
+
+    let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, filesystem) = detect(&config.local_path);
+    let (file_sem, req_sem, _, _buffer_pool_size, download_file_concurrency) = auto_tune_internal(file_limit_override, req_limit_override, open_file_limit_override, download_file_concurrency_override, cpu_cores, max_network_speed, disk_type, available_memory, total_memory, filesystem, cc_tx.clone());
+
+    let _ = cc_tx.send(CommandCenterEvent::Log(format!(
+        "<Init. tuning: file_limit: {}, req_limit: {}, download file concurrency: {}>",
+        file_sem.available_permits(),
+        req_sem.available_permits(),
+        download_file_concurrency
+    )));
+
+    (file_sem, req_sem, download_file_concurrency)
+}
+
+fn auto_tune_internal(
+    file_limit_override: Option<usize>,
+    req_limit_override: Option<usize>,
+    open_file_limit_override: Option<usize>,
+    download_file_concurrency_override: Option<usize>,
+    cpu_cores: usize,
+    max_network_speed: Option<u64>,
+    disk_type: Option<sysinfo::DiskKind>,
+    available_memory: u64,
+    total_memory: u64,
+    _filesystem: String,
+    cc_tx: UnboundedSender<CommandCenterEvent>,
+) -> (Arc<Semaphore>, Arc<Semaphore>, Arc<Semaphore>, usize, usize) {
 
     let buffer_pool_size: usize = {
         if available_memory > 16 * 1024 * 1024 * 1024  {
@@ -110,7 +154,7 @@ pub fn auto_tune_semaphores(ctx: Arc<util_layer::SnowContext>, cc_tx: UnboundedS
                     limit = (limit as f32 * 1.1) as usize;
                 }
 
-                let req_limit_by_buffer_size = buffer_pool_size / CHUNK_SIZE as usize;
+                let req_limit_by_buffer_size = buffer_pool_size / util_layer::constants::CHUNK_SIZE as usize;
                 if limit > req_limit_by_buffer_size {
                     limit = req_limit_by_buffer_size;
                 }
@@ -152,24 +196,6 @@ pub fn auto_tune_semaphores(ctx: Arc<util_layer::SnowContext>, cc_tx: UnboundedS
         available_memory as f64 / (1024.0 * 1024.0 * 1024.0),
         max_network_speed.map(|s| format!("{}", s)).unwrap_or_else(|| "N/A".to_string())
     )));
-
-    if download {
-        let _ = cc_tx.send(CommandCenterEvent::Log(format!(
-            "<Init. tuning: file_limit: {}, req_limit: {}, buffer pool size: {:.2} GiB, download file concurrency: {}>",
-            file_limit,
-            req_limit,
-            buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0),
-            download_file_concurrency
-        )));
-    } else {
-        let _ = cc_tx.send(CommandCenterEvent::Log(format!(
-            "<Init. tuning: file_limit: {}, req_limit: {}, buffer_pool_size: {:.2} GiB>",
-            file_limit,
-            req_limit,
-            buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0)
-        )));
-    }
-
 
     (file_sem, req_sem, open_file_sem, buffer_pool_size, download_file_concurrency)
 }

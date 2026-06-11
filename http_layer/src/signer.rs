@@ -5,7 +5,7 @@ use openssl::sha::sha256;
 use std::collections::HashMap;
 use std::sync::Arc;
 use util_layer::constants::{AMZ_CHUNK_SIGNATURE_HEADER, AMZ_TRAILER_SIGNATURE, AWS_CHUNK_PAYLOAD_ALGORITHM, AWS_CHUNK_TRAILER_ALGORITHM, EMPTY_PAYLOAD_SHA256};
-use util_layer::{SnowContext};
+use util_layer::{EndpointConfig};
 
 pub struct CredentialScope {
     pub(crate) timestamp: chrono::DateTime<chrono::Utc>,
@@ -105,7 +105,7 @@ pub fn finish_sha256_hex(mut hasher: Hasher) -> String {
 /// signed_headers map MUST contain "host", "x-amz-content-sha256", "x-amz-date".
 pub fn get_s3_auth_header_and_signature(
     method: &str,
-    credentials: Arc<SnowContext>,
+    config: &EndpointConfig,
     credential_scope: &CredentialScope,
     algorithm: &str,
     signed_headers_sorted: &HashMap<String, String>,
@@ -166,12 +166,12 @@ pub fn get_s3_auth_header_and_signature(
         hex_sha256
     );
 
-    let signing_key = s3_signing_key(credentials.s3_secret_key(), &date_y_m_d, credential_scope.region.as_str());
+    let signing_key = s3_signing_key(&config.s3_secret_key, &date_y_m_d, credential_scope.region.as_str());
     let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
 
     let auth_header = format!(
         "{} Credential={}/{}, SignedHeaders={}, Signature={}",
-        algorithm, credentials.s3_access_key(), credential_scope_str, signed_headers_str, signature
+        algorithm, config.s3_access_key, credential_scope_str, signed_headers_str, signature
     );
 
     (auth_header, signature)
@@ -179,7 +179,7 @@ pub fn get_s3_auth_header_and_signature(
 
 pub fn get_s3_auth_header(
     method: &str,
-    credentials: Arc<SnowContext>,
+    config: &EndpointConfig,
     credential_scope: &CredentialScope,
     algorithm: &str,
     signed_headers: &HashMap<String, String>,
@@ -187,7 +187,7 @@ pub fn get_s3_auth_header(
     query_uri: &String,
 ) -> String {
     let (auth, _) =
-        get_s3_auth_header_and_signature(method, credentials, credential_scope, algorithm, signed_headers, canonical_uri, query_uri);
+        get_s3_auth_header_and_signature(method, config, credential_scope, algorithm, signed_headers, canonical_uri, query_uri);
     auth
 }
 

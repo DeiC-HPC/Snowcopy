@@ -19,6 +19,7 @@ use openssl::base64;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
+use url::Url;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Semaphore};
@@ -27,7 +28,7 @@ use tokio::time::Instant;
 use util_layer::cc_util::CcLoadAndTransfer;
 use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
 use util_layer::snow_errors::{S3Error, SnowCopyError};
-use util_layer::{FileInfo, SnowContext};
+use util_layer::{FileInfo, UploadConfig, DownloadConfig, S3ConfigTrait};
 
 const READ_BUFFER_SIZE: usize = 256 * 1024;
 pub struct BufferPool {
@@ -92,7 +93,7 @@ pub fn build_https_client() -> PoolClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri : Arc<String>, query_uri : &String) -> Result<(String, CcLoadAndTransfer)> {
+pub async fn put_file(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {
     let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(0, None, ctx, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let req_permit_start = Instant::now();
@@ -131,7 +132,7 @@ pub async fn put_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &
     Ok((etag.unwrap(), transfer_metrics))
 }
 
-pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {
+pub async fn put_file_range(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {
     let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, file_info, file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let req_permit_start = Instant::now();
@@ -173,7 +174,7 @@ pub async fn put_file_range(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, fro
     Ok((etag.unwrap(), transfer_metrics))
 }
 
-async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
+async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
     let file_permit_start = Instant::now();
     let file_lock = file_sem.acquire().await?;
     let file_permit_elapsed = file_permit_start.elapsed();
@@ -202,7 +203,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     //TODO JON: Its very possible that we should wrap this in a spawn_blocking and use a single file descriptor for the upload.
 
-    let mut md5_hasher = if ctx.md5_checksum_integrity_check() {
+    let mut md5_hasher: Option<Hasher> = if ctx.md5_checksum_upload {
         Some(Hasher::new(MessageDigest::md5())?)
     } else {
         None
@@ -266,7 +267,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     Ok((req, file_work_elapsed, file_permit_elapsed))
 }
 
-pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, start: u64, end: u64) -> Result<PooledBuffer> {
+pub async fn get_file_range(ctx: Arc<DownloadConfig>, client: &PoolClient, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, start: u64, end: u64) -> Result<PooledBuffer> {
     let total_range_size = (end - start + 1) as usize;
     let mut buffer = buffer_pool.get().await;
     let buffer_ptr = buffer.as_mut_ptr() as usize;
@@ -343,15 +344,19 @@ pub async fn get_file_range(ctx: Arc<SnowContext>, client: &PoolClient, buffer_p
 }
 
 
-fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>) -> Result<Request<StreamingBody>> {
+fn create_and_sign_req<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: Arc<String>, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>) -> Result<Request<StreamingBody>> {
+    let endpoint = ctx.endpoint();
+    let url_parsed = Url::parse(&endpoint.s3_url).expect("Invalid S3 URL");
+    let host = url_parsed.host_str().unwrap_or("");
+
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
-        region: ctx.s3_region().to_string(),
+        region: endpoint.s3_region.clone(),
         service: "s3".to_string(),
     };
 
     let mut signed_headers : HashMap<String, String> = HashMap::new();
-    signed_headers.insert("host".to_string(), ctx.s3_host().to_string());
+    signed_headers.insert("host".to_string(), host.to_string());
     signed_headers.insert("x-amz-date".to_string(), credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string());
 
     for (key, value) in header_map {
@@ -360,7 +365,7 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
 
     let auth_header = signer::get_s3_auth_header(
         method.as_str(),
-        ctx.clone(),
+        endpoint,
         &credential_scope,
         AWS_ALGORITHM,
         &signed_headers,
@@ -368,7 +373,7 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
         &query_uri,
     );
 
-    let uri = format_query(&ctx, canonical_uri, query_uri);
+    let uri = format_query(ctx, canonical_uri, query_uri);
 
     let body : StreamingBody = match payload {
         None => {
@@ -397,11 +402,14 @@ fn create_and_sign_req(ctx: Arc<SnowContext>, canonical_uri: Arc<String>, query_
     Ok(req)
 }
 
-fn format_query(ctx: &Arc<SnowContext>, canonical_uri: Arc<String>, query_uri: &String) -> String {
+fn format_query<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: Arc<String>, query_uri: &String) -> String {
+    let endpoint = ctx.endpoint();
+    let url_parsed = Url::parse(&endpoint.s3_url).expect("Invalid S3 URL");
+    let host = url_parsed.host_str().unwrap_or("");
     if query_uri.is_empty() {
-        format!("https://{}{}", ctx.s3_host(), canonical_uri)
+        format!("https://{}{}", host, canonical_uri)
     } else {
-        format!("https://{}{}?{}", ctx.s3_host(), canonical_uri, query_uri)
+        format!("https://{}{}?{}", host, canonical_uri, query_uri)
     }
 }
 

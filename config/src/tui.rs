@@ -199,7 +199,7 @@ impl App {
                 Field::AccessKey => endpoint.config.as_ref().map(|c| c.s3_access_key.clone()).unwrap_or_default(),
                 Field::SecretKey => endpoint.config.as_ref().map(|c| c.s3_secret_key.clone()).unwrap_or_default(),
                 Field::Url => endpoint.config.as_ref().map(|c| c.s3_url.clone()).unwrap_or_default(),
-                Field::Region => endpoint.config.as_ref().and_then(|c| c.s3_region.clone()).unwrap_or_default(),
+                Field::Region => endpoint.config.as_ref().map(|c| c.s3_region.clone()).unwrap_or_default(),
             };
             self.input_mode = InputMode::Editing;
         }
@@ -242,7 +242,7 @@ impl App {
                 Field::Region => {
                     let endpoint = &mut self.config.endpoints[i];
                     if endpoint.config.is_none() { endpoint.config = Some(EndpointConfig::default()); }
-                    endpoint.config.as_mut().unwrap().s3_region = if self.edit_buffer.is_empty() { None } else { Some(self.edit_buffer.clone()) };
+                    endpoint.config.as_mut().unwrap().s3_region = self.edit_buffer.clone();
                 }
             }
         }
@@ -599,7 +599,7 @@ Navigation:
                 (Field::AccessKey, "S3 Access Key", endpoint.config.as_ref().map(|c| c.s3_access_key.as_str()).unwrap_or("")),
                 (Field::SecretKey, "S3 Secret Key", endpoint.config.as_ref().map(|c| c.s3_secret_key.as_str()).unwrap_or("")),
                 (Field::Url, "S3 URL", endpoint.config.as_ref().map(|c| c.s3_url.as_str()).unwrap_or("")),
-                (Field::Region, "S3 Region (non-aws s3 endpoints commonly use us-east-1)", endpoint.config.as_ref().and_then(|c| c.s3_region.as_deref()).unwrap_or("")),
+                (Field::Region, "S3 Region (non-aws s3 endpoints commonly use us-east-1)", endpoint.config.as_ref().map(|c| c.s3_region.as_str()).unwrap_or("")),
             ];
 
             for (idx, (field, label, value)) in fields.iter().enumerate() {

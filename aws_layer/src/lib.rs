@@ -22,7 +22,7 @@ use util_layer::cc_util::CommandCenterEvent;
 use util_layer::cc_util::Status::Transferring;
 use util_layer::constants::{MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, PAYLOAD_SHA256_METADATA_KEY};
 use util_layer::time::float_string_to_time;
-use util_layer::{constants, S3Object};
+use util_layer::{constants, EndpointConfig, S3Object};
 
 pub type AWSClient = Client;
 pub type CompletedPartAws = CompletedPart;
@@ -60,6 +60,9 @@ pub async fn complete_multipart_upload(
     }
 }
 
+pub async fn create_client_from_config_endpoint(config: &EndpointConfig) -> AWSClient {
+    create_client(&config.s3_secret_key, &config.s3_access_key, &config.s3_url, &config.s3_region).await
+}
 
 pub async fn create_client(access_key: &str, secret_key: &str, url: &str, region: &str) -> AWSClient {
     let region = Region::new(region.to_string());
@@ -141,7 +144,7 @@ pub async fn create_bucket(
 /// * `filename` - a reference to a path that will be read and uploaded to S3.
 /// * `key` - the string key that the object will be uploaded as inside the bucket.
 #[allow(dead_code)]
-async fn list_bucket(
+async fn list_bucket( //TODO JON: use for ls?
     client: &AWSClient,
     bucket: &str,
 ) -> std::result::Result<(), S3ExampleError> {
@@ -171,7 +174,6 @@ async fn list_bucket(
 
     Ok(())
 }
-
 
 
 pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: Arc<AWSClient>, sender: UnboundedSender<CommandCenterEvent>) ->  mpsc::Receiver<S3Object> {

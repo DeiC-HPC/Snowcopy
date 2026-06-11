@@ -14,22 +14,22 @@ use tokio::task::{JoinHandle, JoinSet};
 use util_layer::cc_util::{CommandCenterEvent, Status};
 use util_layer::retry::retry_on_failure_async;
 use util_layer::snow_errors::SnowCopyError;
-use util_layer::{FileInfo, SnowContext};
+use util_layer::{FileInfo, UploadConfig};
 use util_layer::constants;
 use walkdir::WalkDir;
 use util_layer::constants::{CHUNK_SIZE, MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY};
 
-pub async fn upload(ctx: Arc<SnowContext>) {
-    let cc = CommandCenter::new(ctx.clone());
+pub async fn upload(ctx: Arc<UploadConfig>) {
+    let cc = CommandCenter::new_upload(&ctx);
     let (cc_tx, cc_handle) = cc.start();
 
     let mut files_to_upload_channel = walk_directory(ctx.local_path.to_path_buf(), cc_tx.clone()).await;
 
-    let aws_sdk_client = Arc::new(aws_layer::create_client(ctx.s3_access_key(), ctx.s3_secret_key(), ctx.s3_url(), ctx.s3_region()).await);
+    let aws_sdk_client = Arc::new(aws_layer::create_client_from_config_endpoint(&ctx.endpoint).await);
     let bucket_creation_handle = create_bucket_if_not_exist(&ctx, &aws_sdk_client);
 
     let hyper_client = Arc::new(build_https_client());
-    let (file_sem, req_sem, open_files_sem, buffer_pool_size, _) = auto_tuning::auto_tune_semaphores(ctx.clone(), cc_tx.clone());
+    let (file_sem, req_sem, _open_files_sem, buffer_pool_size) = auto_tuning::auto_tune_upload(ctx.clone(), cc_tx.clone());
 
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, CHUNK_SIZE as usize));
@@ -50,7 +50,7 @@ pub async fn upload(ctx: Arc<SnowContext>) {
     cc_handle.await.unwrap();
 }
 
-fn create_bucket_if_not_exist(ctx: &Arc<SnowContext>, client: &Arc<AWSClient>) -> JoinHandle<bool> {
+fn create_bucket_if_not_exist(ctx: &Arc<UploadConfig>, client: &Arc<AWSClient>) -> JoinHandle<bool> {
     let bucket_creation_handle = {
         let client = client.clone();
         let bucket = ctx.bucket.clone();
@@ -69,7 +69,7 @@ fn create_bucket_if_not_exist(ctx: &Arc<SnowContext>, client: &Arc<AWSClient>) -
 
 async fn upload_file_async_and_add_to_handles(
     result: Result<FileInfo, io::Error>,
-    ctx: Arc<SnowContext>,
+    ctx: Arc<UploadConfig>,
     client: Arc<AWSClient>,
     hyper_client: Arc<PoolClient>,
     file_sem: Arc<Semaphore>,
@@ -95,7 +95,7 @@ async fn upload_file_async_and_add_to_handles(
     }
 }
 
-async fn upload_file(ctx: Arc<SnowContext>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
+async fn upload_file(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
     if file_info.file_size > CHUNK_SIZE {
         upload_with_multipart(ctx, aws_client, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender).await;
     } else {
@@ -103,14 +103,14 @@ async fn upload_file(ctx: Arc<SnowContext>, aws_client: Arc<AWSClient>, hyper_cl
     }
 }
 
-async fn upload_with_multipart(ctx: Arc<SnowContext>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
+async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
     let mut create_multipart_upload = aws_client.create_multipart_upload().bucket(&ctx.bucket).key(&*file_info.key);
 
     if let Some(mtime) = file_info.modified_time {
         create_multipart_upload = create_multipart_upload.metadata("mtime", util_layer::time::time_to_float_string(mtime));
     }
 
-    if ctx.md5_checksum_integrity_check(){
+    if ctx.md5_checksum_upload {
         //TODO JON: chunk will increase if file is larger than 50GiB
         create_multipart_upload = create_multipart_upload.metadata(MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, CHUNK_SIZE.to_string());
     }
@@ -153,7 +153,7 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, aws_client: Arc<AWSClient>
                 let canonical_uri = canonical_uri_cloned.clone();
                 let query_uri = query_uri.clone();
                 async move {
-                    if ctx.trailing() {
+                    if ctx.trailing {
                         http_layer::upload_trailing::put_file_streaming(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri).await
                     } else {
                         http_layer::put_file_range(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
@@ -192,7 +192,7 @@ async fn upload_with_multipart(ctx: Arc<SnowContext>, aws_client: Arc<AWSClient>
     let _ = sender.send(CommandCenterEvent::FileTransferred(file_info.file_size));
 }
 
-async fn small_file_upload(ctx: Arc<SnowContext>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
+async fn small_file_upload(ctx: Arc<UploadConfig>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.key));
     let query_uri = "".to_string();
 
@@ -207,7 +207,7 @@ async fn small_file_upload(ctx: Arc<SnowContext>, hyper_client: Arc<PoolClient>,
         let canonical_uri = canonical_uri.clone();
         let query_uri = query_uri.clone();
         async move {
-            if ctx.trailing_small() {
+            if ctx.trailing_small {
                 http_layer::upload_trailing::put_file_streaming(ctx, file_info, 0, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri).await
             } else {
                 http_layer::put_file(ctx, file_info, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
@@ -230,7 +230,7 @@ async fn small_file_upload(ctx: Arc<SnowContext>, hyper_client: Arc<PoolClient>,
     }
 }
 
-fn check_already_exists(ctx: &Arc<SnowContext>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, _req_sem: Arc<Semaphore>) -> Receiver<Result<FileInfo, io::Error>> {
+fn check_already_exists(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, _req_sem: Arc<Semaphore>) -> Receiver<Result<FileInfo, io::Error>> {
     let (upload_tx, upload_rx) = mpsc::channel::<Result<FileInfo, io::Error>>(constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_UPLOAD as usize);
 
     let checker_client = client.clone();
@@ -293,9 +293,7 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
         let file_size = metadata.len();
         let modified_time = metadata.modified().ok();
 
-        if cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).is_err() {
-            //TODO JON: print error? it should never fail.
-        }
+        cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).expect("Failed to send message to command center. Should never happen.");
 
         let key = base_path.file_name().unwrap().to_str().unwrap().to_string();
         let file_info = FileInfo { file_path : base_path, key, file_size, modified_time };

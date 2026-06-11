@@ -18,16 +18,16 @@ use tokio::task;
 use util_layer::cc_util::{CcLoadAndTransfer, CommandCenterEvent};
 use util_layer::constants::{AWS_ALGORITHM, DOWNLOAD_CHUNK_SIZE, DOWNLOAD_DIRECT_WRITE_FRAME_THRESHOLD, EMPTY_PAYLOAD_SHA256};
 use util_layer::download::{FileCompletionTracker, WriteMsg};
-use util_layer::{FileInfo, SnowContext};
+use util_layer::{FileInfo, DownloadConfig};
 use crate::integrity::IntegrityAlgorithm;
 
-pub async fn download_file_range(start: u64, end: u64, snow_context: Arc<SnowContext>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, fd : Arc<File>, disk_write_tx: Sender<WriteMsg>, tracker: Arc<FileCompletionTracker>, hash_algo : IntegrityAlgorithm) -> std::result::Result<(u64, Option<String>), Error> {
+pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfig>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, fd : Arc<File>, disk_write_tx: Sender<WriteMsg>, tracker: Arc<FileCompletionTracker>, hash_algo : IntegrityAlgorithm) -> std::result::Result<(u64, Option<String>), Error> {
     let range = format!("bytes={}-{}", start, end);
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
     header_map.insert("range".to_string(), range);
 
-    let req = create_and_sign_req(snow_context.clone(), canonical_uri.clone(), query_uri, None, Method::GET, &header_map)?;
+    let req = create_and_sign_req(config.clone(), canonical_uri.clone(), query_uri, None, Method::GET, &header_map)?;
 
     let req_permit = req_sem.acquire().await.expect("Should never fail");
     let resp = pool_client.request(req).await?;
@@ -138,11 +138,11 @@ fn write_at_offset(file: &File, data: &[u8], offset: u64) -> std::io::Result<usi
     file.seek_write(data, offset)
 }
 
-pub async fn get_file(ctx: Arc<SnowContext>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, disk_write_tx: Sender<WriteMsg>, cc_sender: UnboundedSender<CommandCenterEvent>) -> Result<Option<String>, Error> {
+pub async fn get_file(config: Arc<DownloadConfig>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, disk_write_tx: Sender<WriteMsg>) -> Result<Option<String>, Error> {
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
 
-    let req = create_and_sign_req(ctx, canonical_uri, query_uri,  None, Method::GET, &header_map)?;
+    let req = create_and_sign_req(config, canonical_uri, query_uri,  None, Method::GET, &header_map)?;
 
     let req_permit = req_sem.acquire().await.expect("Should never fail");
     let resp = client.request(req).await?;

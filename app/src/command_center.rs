@@ -1,7 +1,6 @@
 use std::cmp::PartialEq;
 use crate::ui::{ProgressBarUi, Ui, UiEvent};
 use std::time::Duration;
-use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use util_layer::cc_util::{CommandCenterEvent, Status};
@@ -24,8 +23,8 @@ enum UiSender {
 pub enum Mode {
     Upload,
     Download,
-    Ls,
-    Rm,
+    List,
+    Remove,
 }
 
 impl UiSender {
@@ -47,17 +46,39 @@ pub struct CommandCenter {
     mode: Mode,
 }
 
+
 impl CommandCenter {
-    pub fn new(ctx: Arc<util_layer::SnowContext>) -> Self {
+    pub fn new_upload(config: &util_layer::UploadConfig) -> Self {
         CommandCenter {
-            silent: ctx.silent,
-            stats: ctx.stats,
-            mode: match ctx.mode {
-                util_layer::Mode::Upload => Mode::Upload,
-                util_layer::Mode::Download => Mode::Download,
-                util_layer::Mode::List => Mode::Ls,
-                util_layer::Mode::Remove => Mode::Rm,
-            },
+            silent: config.silent,
+            stats: config.stats,
+            mode: Mode::Upload,
+        }
+    }
+
+    pub fn new_download(config: &util_layer::DownloadConfig) -> Self {
+        CommandCenter {
+            silent: config.silent,
+            stats: config.stats,
+            mode: Mode::Download,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_list(config: &util_layer::ListConfig) -> Self {
+        CommandCenter {
+            silent: config.silent,
+            stats: false,
+            mode: Mode::List,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_remove(config: &util_layer::RemoveConfig) -> Self {
+        CommandCenter {
+            silent: config.silent,
+            stats: false,
+            mode: Mode::Remove,
         }
     }
 }
