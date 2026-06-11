@@ -29,7 +29,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
     let bucket_creation_handle = create_bucket_if_not_exist(&ctx, &aws_sdk_client);
 
     let hyper_client = Arc::new(build_https_client());
-    let (file_sem, req_sem, _open_files_sem, buffer_pool_size) = auto_tuning::auto_tune_upload(ctx.clone(), cc_tx.clone());
+    let (file_sem, req_sem, open_files_sem, buffer_pool_size) = auto_tuning::auto_tune_upload(ctx.clone(), cc_tx.clone());
 
     let task_sem = Arc::new(Semaphore::new(500));
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, CHUNK_SIZE as usize));
@@ -42,7 +42,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
         files_to_upload_channel = check_already_exists(&ctx, &cc_tx, aws_sdk_client.clone(), files_to_upload_channel, req_sem.clone());
     }
     while let Some(result) = files_to_upload_channel.recv().await {
-        upload_file_async_and_add_to_handles(result, ctx.clone(), aws_sdk_client.clone(), hyper_client.clone(), file_sem.clone(), req_sem.clone(), task_sem.clone(), buffer_pool.clone(), cc_tx.clone(), &mut handles).await;
+        upload_file_async_and_add_to_handles(result, ctx.clone(), aws_sdk_client.clone(), hyper_client.clone(), file_sem.clone(), req_sem.clone(), task_sem.clone(), buffer_pool.clone(), cc_tx.clone(), &mut handles, open_files_sem.clone()).await;
     }
 
     join_all(handles).await;
@@ -78,13 +78,14 @@ async fn upload_file_async_and_add_to_handles(
     buffer_pool: Arc<BufferPool>,
     cc_tx: UnboundedSender<CommandCenterEvent>,
     handles: &mut Vec<JoinHandle<()>>,
+    open_file_limit: Arc<Semaphore>,
 ) {
     match result {
         Ok(file_info) => {
             let file_info_arc = Arc::new(file_info);
             let permit = task_sem.acquire_owned().await.unwrap();
             let handle = tokio::spawn(async move {
-                upload_file(ctx, client, hyper_client, file_info_arc, file_sem, req_sem, buffer_pool, cc_tx).await;
+                upload_file(ctx, client, hyper_client, file_info_arc, file_sem, req_sem, buffer_pool, cc_tx, open_file_limit).await;
                 drop(permit);
             });
             handles.push(handle);
@@ -95,15 +96,15 @@ async fn upload_file_async_and_add_to_handles(
     }
 }
 
-async fn upload_file(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
+async fn upload_file(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>, open_file_limit: Arc<Semaphore>) {
     if file_info.file_size > CHUNK_SIZE {
-        upload_with_multipart(ctx, aws_client, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender).await;
+        upload_with_multipart(ctx, aws_client, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender, open_file_limit).await;
     } else {
-        small_file_upload(ctx, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender).await;
+        small_file_upload(ctx, hyper_client, file_info, file_sem, req_sem, buffer_pool, sender, open_file_limit).await;
     }
 }
 
-async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
+async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>, open_file_limit: Arc<Semaphore>) {
     let mut create_multipart_upload = aws_client.create_multipart_upload().bucket(&ctx.bucket).key(&*file_info.key);
 
     if let Some(mtime) = file_info.modified_time {
@@ -139,6 +140,7 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
         let buffer_pool_clone = buffer_pool.clone();
         let completed_parts = completed_parts.clone();
         let sender_cloned = sender.clone();
+        let open_file_limit = open_file_limit.clone();
 
         let ctx_cloned = ctx.clone();
         let canonical_uri_cloned = canonical_uri.clone();
@@ -152,9 +154,11 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
                 let buffer_pool = buffer_pool_clone.clone();
                 let canonical_uri = canonical_uri_cloned.clone();
                 let query_uri = query_uri.clone();
+                let open_file_limit = open_file_limit.clone();
+
                 async move {
                     if ctx.trailing {
-                        http_layer::upload_trailing::put_file_streaming(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri).await
+                        http_layer::upload_trailing::put_file_streaming(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri, open_file_limit).await
                     } else {
                         http_layer::put_file_range(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
                     }
@@ -192,7 +196,7 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
     let _ = sender.send(CommandCenterEvent::FileTransferred(file_info.file_size));
 }
 
-async fn small_file_upload(ctx: Arc<UploadConfig>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>) {
+async fn small_file_upload(ctx: Arc<UploadConfig>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>, open_file_limit: Arc<Semaphore>) {
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.key));
     let query_uri = "".to_string();
 
@@ -206,9 +210,10 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, hyper_client: Arc<PoolClient>
         let buffer_pool = buffer_pool.clone();
         let canonical_uri = canonical_uri.clone();
         let query_uri = query_uri.clone();
+        let open_file_limit = open_file_limit.clone();
         async move {
             if ctx.trailing_small {
-                http_layer::upload_trailing::put_file_streaming(ctx, file_info, 0, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri).await
+                http_layer::upload_trailing::put_file_streaming(ctx, file_info, 0, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri, open_file_limit).await
             } else {
                 http_layer::put_file(ctx, file_info, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
             }

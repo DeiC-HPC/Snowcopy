@@ -77,13 +77,13 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
         Mode::Upload | Mode::Download => {
             let transfer_method_str = matches.get_one::<String>("o").map(|s| s.as_str()).unwrap_or("o1");
             let file_limit_overwrite = matches.get_one::<usize>("file_limit").copied();
-            let download_concurrency = matches.get_one::<usize>("download_concurrency").copied();
+            let download_concurrency_overwrite = matches.get_one::<usize>("download_concurrency").copied();
             let stats = matches.get_flag("stats");
             let md5_checksum_integrity = matches.get_one::<bool>("md5_checksum_integrity").copied().unwrap_or(true);
             let trailing = matches.get_flag("trailing");
             let trailing_small = matches.get_flag("trailing-small");
-            let trailing_chunk_size_val = matches.get_one::<usize>("trailing-chunk-size").copied().unwrap_or(8 * 1024 * 1024);
-            let open_file_sem_limit_val = matches.get_one::<usize>("open-file-limit").copied().unwrap_or(100);
+            let trailing_chunk_size_val = matches.get_one::<usize>("trailing-chunk-size").copied().unwrap_or(8 * 1024 * 1024); //TODO JON: We should not have this value here.
+            let open_file_limit_overwrite = matches.get_one::<usize>("open-file-limit").copied();
             let transfer_method = TransferMethod::from_str(transfer_method_str).expect(format!("Transfer method {} unknown", transfer_method_str).as_str());
 
             let src_str = matches.get_one::<String>("src").unwrap();
@@ -127,7 +127,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                     trailing_chunk_size: trailing_chunk_size_val as u64,
                     trailing,
                     trailing_small,
-                    open_file_sem_limit: Arc::new(tokio::sync::Semaphore::new(open_file_sem_limit_val)),
+                    open_file_limit_overwrite,
                     bucket,
                     local_path,
                 })
@@ -138,10 +138,10 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                     transfer_method,
                     file_limit_overwrite,
                     req_limit_overwrite,
-                    download_concurrency_overwrite: download_concurrency,
+                    download_concurrency_overwrite,
                     silent,
                     stats,
-                    open_file_sem_limit: Arc::new(tokio::sync::Semaphore::new(open_file_sem_limit_val)),
+                    open_file_limit_overwrite,
                     bucket,
                     local_path,
                 })

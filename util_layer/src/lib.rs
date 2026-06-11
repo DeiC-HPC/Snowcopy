@@ -97,7 +97,7 @@ pub struct UploadConfig {
     pub trailing_chunk_size: u64,
     pub trailing: bool,
     pub trailing_small: bool,
-    pub open_file_sem_limit: Arc<Semaphore>,
+    pub open_file_limit_overwrite: Option<usize>,
     pub bucket: String,
     pub local_path: PathBuf,
 }
@@ -112,7 +112,7 @@ pub struct DownloadConfig {
     pub download_concurrency_overwrite: Option<usize>,
     pub silent: bool,
     pub stats: bool,
-    pub open_file_sem_limit: Arc<Semaphore>,
+    pub open_file_limit_overwrite: Option<usize>,
     pub bucket: String,
     pub local_path: PathBuf,
 }
