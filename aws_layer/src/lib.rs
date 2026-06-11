@@ -61,7 +61,7 @@ pub async fn complete_multipart_upload(
 }
 
 pub async fn create_client_from_config_endpoint(config: &EndpointConfig) -> AWSClient {
-    create_client(&config.s3_secret_key, &config.s3_access_key, &config.s3_url, &config.s3_region).await
+    create_client(&config.s3_access_key, &config.s3_secret_key, &config.s3_url, &config.s3_region).await
 }
 
 pub async fn create_client(access_key: &str, secret_key: &str, url: &str, region: &str) -> AWSClient {
@@ -105,9 +105,9 @@ pub async fn create_client(access_key: &str, secret_key: &str, url: &str, region
 
 pub async fn create_bucket(
     client: &AWSClient,
-    bucket_name: Arc<String>,
+    bucket_name: &str,
 ) -> Result<Option<CreateBucketOutput>, S3Error> {
-    match client.head_bucket().bucket(bucket_name.as_str()).send().await {
+    match client.head_bucket().bucket(bucket_name).send().await {
         Ok(_) => {
             Ok(None)
         }
@@ -116,7 +116,7 @@ pub async fn create_bucket(
             if service_err.is_not_found() {
                 let create = client
                     .create_bucket()
-                    .bucket(bucket_name.as_str())
+                    .bucket(bucket_name)
                     .send()
                     .await;
 

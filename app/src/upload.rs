@@ -55,7 +55,7 @@ fn create_bucket_if_not_exist(ctx: &Arc<UploadConfig>, client: &Arc<AWSClient>) 
         let client = client.clone();
         let bucket = ctx.bucket.clone();
         tokio::spawn(async move {
-            match aws_layer::create_bucket(&client, Arc::new(bucket)).await {
+            match aws_layer::create_bucket(&client, &bucket).await {
                 Ok(Some(_)) => true, // Bucket created
                 Ok(None) => false, // Bucket already exists
                 Err(e) => {

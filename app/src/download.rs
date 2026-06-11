@@ -194,6 +194,8 @@ async fn download_object(pool_client: Arc<PoolClient>, config: Arc<DownloadConfi
         let mut chunk_size = std::cmp::max(ideal_chunk_size, DOWNLOAD_MULTIPART_THRESHOLD);
         if multipart_integrity_verification {
             chunk_size = object.chunk_size.unwrap() as u64;
+        } else {
+            cc_sender.send(CommandCenterEvent::Log(format!("Skipping integrity check for file: {}, etag: {}", key, object.etag.clone().unwrap()))).expect("Failed to send message"); //TODO JON: add a deeper log level
         }
         let num_parts = (total_size + chunk_size - 1) / chunk_size;
         //TODO JON: if we are validating integrity, then the etag suffix is the number of parts. We can fail early here if there is a mismatch between the number of parts and the expected number of parts based on the etag suffix. Not sure how we should handle that case, though
@@ -281,6 +283,7 @@ async fn download_full_file_and_check_integrity(pool_client: Arc<PoolClient>, co
                         cc_sender.send(CommandCenterEvent::FileIntegrityChecked(true)).expect("Failed to send message");
                     }
                 } else {
+                    cc_sender.send(CommandCenterEvent::Log("Skipping integrity check for file with no SHA256 checksum".to_string())).expect("Failed to send message"); //TODO JON: add a deeper log level
                     //silence, as we don't have info to do the check
                 }
             }
