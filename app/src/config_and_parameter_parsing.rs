@@ -7,7 +7,8 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
         Some(("config", m)) => (Mode::Config, Some(m)),
         Some(("rm", m)) => (Mode::Remove, Some(m)),
         Some(("ls", m)) => (Mode::List, Some(m)),
-        _ => {
+
+        _ => { //we are transferring files. Figure out if it's upload or download based on path patterns
             if matches.get_one::<String>("src").is_some() && matches.get_one::<String>("dest").is_some() {
                 // Determine if it's upload or download based on path patterns
                 let src_str = matches.get_one::<String>("src").unwrap();
