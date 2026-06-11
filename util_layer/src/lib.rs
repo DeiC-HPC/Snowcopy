@@ -7,12 +7,10 @@ pub mod pattern;
 pub mod snow_errors;
 pub mod download;
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::SystemTime;
-use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Mode {
