@@ -31,7 +31,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
     let hyper_client = Arc::new(build_https_client());
     let (file_sem, req_sem, open_files_sem, buffer_pool_size) = auto_tuning::auto_tune_upload(ctx.clone(), cc_tx.clone());
 
-    let task_sem = Arc::new(Semaphore::new(500));
+    let task_sem = Arc::new(Semaphore::new(500)); //TODO JON: should this just be open_file_sem?
     let buffer_pool = Arc::new(BufferPool::new(buffer_pool_size, CHUNK_SIZE as usize));
     let mut handles = Vec::new();  //TODO JON: should be a joinSet
 

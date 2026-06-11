@@ -37,8 +37,7 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
 }
 
 pub fn auto_tune_upload(config: Arc<UploadConfig>, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Arc<Semaphore>, Arc<Semaphore>, Arc<Semaphore>, usize) {
-    let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, filesystem) = detect(&config.local_path);
-    let (mut file_limit, mut req_limit, mut open_files_sem, buffer_pool_size, _) = auto_tune_internal(cpu_cores, max_network_speed, disk_type, available_memory, total_memory, filesystem, cc_tx.clone());
+    let (mut file_limit, mut req_limit, mut open_files_sem, buffer_pool_size, _) = auto_tune_internal(&config.local_path, cc_tx.clone());
 
     if let Some(override_value) = config.file_limit_overwrite {
         file_limit = override_value;
@@ -65,8 +64,7 @@ pub fn auto_tune_upload(config: Arc<UploadConfig>, cc_tx: UnboundedSender<Comman
 }
 
 pub fn auto_tune_download(config: Arc<DownloadConfig>, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Arc<Semaphore>, Arc<Semaphore>, usize) {
-    let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, filesystem) = detect(&config.local_path);
-    let (mut file_limit, mut req_limit, _, _buffer_pool_size, download_file_concurrency) = auto_tune_internal(cpu_cores, max_network_speed, disk_type, available_memory, total_memory, filesystem, cc_tx.clone());
+    let (mut file_limit, mut req_limit, _, _buffer_pool_size, download_file_concurrency) = auto_tune_internal(&config.local_path, cc_tx.clone());
 
     if let Some(override_value) = config.file_limit_overwrite {
         file_limit = override_value;
@@ -88,14 +86,10 @@ pub fn auto_tune_download(config: Arc<DownloadConfig>, cc_tx: UnboundedSender<Co
 }
 
 fn auto_tune_internal(
-    cpu_cores: usize,
-    max_network_speed: Option<u64>,
-    disk_type: Option<sysinfo::DiskKind>,
-    available_memory: u64,
-    total_memory: u64,
-    _filesystem: String,
+    path: &Path,
     cc_tx: UnboundedSender<CommandCenterEvent>,
 ) -> (usize, usize, usize, usize, usize) {
+    let (cpu_cores, max_network_speed, disk_type, available_memory, total_memory, filesystem) = detect(path);
 
     let buffer_pool_size: usize = {
         if available_memory > 16 * 1024 * 1024 * 1024  {
@@ -187,7 +181,7 @@ fn auto_tune_internal(
         "<Hardware detected: CPU cores: {}, Disk type: {}, File system: {}, Available memory: {:.2} GiB, Network speed: {} Mbps>",
         cpu_cores,
         disk_type.map(|dt| format!("{:?}", dt)).unwrap_or_else(|| "N/A".to_string()),
-        _filesystem,
+        filesystem,
         available_memory as f64 / (1024.0 * 1024.0 * 1024.0),
         max_network_speed.map(|s| format!("{}", s)).unwrap_or_else(|| "N/A".to_string())
     )));
