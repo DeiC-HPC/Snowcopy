@@ -23,6 +23,8 @@ enum UiSender {
 pub enum Mode {
     Upload,
     Download,
+    List,
+    Remove,
 }
 
 impl UiSender {
@@ -44,11 +46,41 @@ pub struct CommandCenter {
     mode: Mode,
 }
 
+
 impl CommandCenter {
-    pub fn new(silent : bool, stats: bool, mode: Mode) -> Self {
-        CommandCenter {silent, stats, mode}
+    pub fn new_upload(config: &util_layer::UploadConfig) -> Self {
+        CommandCenter {
+            silent: config.silent,
+            stats: config.stats,
+            mode: Mode::Upload,
+        }
     }
 
+    pub fn new_download(config: &util_layer::DownloadConfig) -> Self {
+        CommandCenter {
+            silent: config.silent,
+            stats: config.stats,
+            mode: Mode::Download,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_list(config: &util_layer::ListConfig) -> Self {
+        CommandCenter {
+            silent: config.silent,
+            stats: false,
+            mode: Mode::List,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_remove(config: &util_layer::RemoveConfig) -> Self {
+        CommandCenter {
+            silent: config.silent,
+            stats: false,
+            mode: Mode::Remove,
+        }
+    }
 }
 
 impl CC for CommandCenter {

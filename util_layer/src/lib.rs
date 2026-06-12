@@ -1,23 +1,32 @@
 pub mod ui;
-
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::SystemTime;
-use serde::{Deserialize, Serialize};
-use tokio::sync::Semaphore;
-use url::Url;
-
 pub mod constants;
 pub mod cc_util;
 pub mod time;
 pub mod retry;
+pub mod pattern;
 pub mod snow_errors;
 pub mod download;
 
-fn default_region() -> String { "us-east-1".to_string() }
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Config {
+#[derive(PartialEq, Eq, Clone, Copy, Debug)]
+pub enum Mode {
+    Upload,
+    Download,
+    List,
+    Remove,
+    Config,
+}
+
+pub fn default_region() -> String {
+    "us-east-1".to_string()
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct EndpointConfig {
     pub s3_access_key: String,
     pub s3_secret_key: String,
     pub s3_url: String,
@@ -25,52 +34,142 @@ pub struct Config {
     pub s3_region: String,
 }
 
-pub fn build_context(config: Config, md5_checksum_upload: bool, trailing_info: Option<TrailingInfo>) -> SnowContext {
-    let ctx = SnowContext {
-        s3_access_key: config.s3_access_key,
-        s3_secret_key: config.s3_secret_key,
-        s3_host: Url::parse(config.s3_url.as_str()).unwrap().host_str().unwrap().to_string(),
-        s3_region: config.s3_region,
-        trailing_info,
-        md5_checksum_upload,
-    };
-    ctx
+impl Default for EndpointConfig {
+    fn default() -> Self {
+        Self {
+            s3_access_key: String::new(),
+            s3_secret_key: String::new(),
+            s3_url: String::new(),
+            s3_region: default_region(),
+        }
+    }
 }
 
-#[derive(Clone)]
-pub struct SnowContext {
-    s3_access_key: String,
-    s3_secret_key: String,
-    s3_host: String,
-    s3_region: String,
-    trailing_info: Option<TrailingInfo>,
-    md5_checksum_upload: bool,
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Endpoint {
+    pub name: String,
+    pub config: Option<EndpointConfig>,
+    pub settings: Option<HashMap<String, serde_json::Value>>,
 }
 
-impl SnowContext {
-    pub fn s3_access_key(&self) -> &str {
-        &self.s3_access_key
+impl Endpoint {
+    pub fn is_complete(&self) -> bool {
+        if self.name.trim().is_empty() {
+            return false;
+        }
+        if let Some(config) = &self.config {
+            !config.s3_access_key.trim().is_empty()
+                && !config.s3_secret_key.trim().is_empty()
+                && !config.s3_url.trim().is_empty()
+        } else {
+            false
+        }
     }
+}
 
-    pub fn s3_secret_key(&self) -> &str {
-        &self.s3_secret_key
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferMethod {
+    TokioSelfMade,
+    TransferManager,
+}
 
-    pub fn s3_host(&self) -> &str {
-        &self.s3_host
+impl TransferMethod {
+    pub fn from_str(method: &str) -> Option<Self> {
+        match method {
+            "o1" => Some(TransferMethod::TokioSelfMade),
+            "o2" => Some(TransferMethod::TransferManager),
+            _ => None,
+        }
     }
+}
 
-    pub fn s3_region(&self) -> &str {
-        &self.s3_region
-    }
+#[derive(Debug, Clone)]
+pub struct UploadConfig {
+    pub endpoint: EndpointConfig,
+    pub md5_checksum_upload: bool,
+    pub transfer_method: TransferMethod,
+    pub file_limit_overwrite: Option<usize>,
+    pub req_limit_overwrite: Option<usize>,
+    pub silent: bool,
+    pub stats: bool,
+    pub trailing_chunk_size: u64,
+    pub trailing: bool,
+    pub trailing_small: bool,
+    pub open_file_limit_overwrite: Option<usize>,
+    pub bucket: String,
+    pub local_path: PathBuf,
+}
 
-    pub fn md5_checksum_integrity_check(&self) -> bool {
-        self.md5_checksum_upload
-    }
+#[derive(Debug, Clone)]
+pub struct DownloadConfig {
+    pub endpoint: EndpointConfig,
+    pub md5_checksum_integrity: bool,
+    pub transfer_method: TransferMethod,
+    pub file_limit_overwrite: Option<usize>,
+    pub req_limit_overwrite: Option<usize>,
+    pub download_concurrency_overwrite: Option<usize>,
+    pub silent: bool,
+    pub stats: bool,
+    pub open_file_limit_overwrite: Option<usize>,
+    pub bucket: String,
+    pub local_path: PathBuf,
+}
 
-    pub fn trailing_info(&self) -> &TrailingInfo {
-        &self.trailing_info.as_ref().unwrap()
+#[derive(Debug, Clone)]
+pub struct ListConfig {
+    pub endpoint: EndpointConfig,
+    pub bucket: String,
+    pub silent: bool,
+    pub req_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RemoveConfig {
+    pub endpoint: EndpointConfig,
+    pub bucket: String,
+    pub silent: bool,
+    pub req_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigModeConfig {
+    pub silent: bool,
+}
+
+pub trait S3ConfigTrait {
+    fn endpoint(&self) -> &EndpointConfig;
+}
+
+impl S3ConfigTrait for UploadConfig {
+    fn endpoint(&self) -> &EndpointConfig {
+        &self.endpoint
     }
+}
+
+impl S3ConfigTrait for DownloadConfig {
+    fn endpoint(&self) -> &EndpointConfig {
+        &self.endpoint
+    }
+}
+
+impl S3ConfigTrait for ListConfig {
+    fn endpoint(&self) -> &EndpointConfig {
+        &self.endpoint
+    }
+}
+
+impl S3ConfigTrait for RemoveConfig {
+    fn endpoint(&self) -> &EndpointConfig {
+        &self.endpoint
+    }
+}
+
+pub enum SnowConfig {
+    Upload(UploadConfig),
+    Download(DownloadConfig),
+    List(ListConfig),
+    Remove(RemoveConfig),
+    Config(ConfigModeConfig),
 }
 
 #[derive(Debug, Clone)]
@@ -92,13 +191,6 @@ pub struct FileInfo {
     pub modified_time: Option<SystemTime>,
 }
 
-#[derive(Clone)]
-pub struct TrailingInfo {
-    pub trailing_chunk_size: u64,
-    pub trailing: bool,
-    pub trailing_small: bool,
-    pub open_file_sem_limit: Arc<Semaphore>,
-}
 
 pub fn path_to_s3_key(path: &str) -> String {
     use std::path::Component;

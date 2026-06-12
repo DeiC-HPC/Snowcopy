@@ -4,20 +4,20 @@
 /// specific service errors, depending on what is needed by the scenario.
 /// It is used throughout the code examples for the AWS SDK for Rust.
 #[derive(Debug)]
-pub struct S3ExampleError(String);
-impl S3ExampleError {
+pub struct S3Error(String);
+impl S3Error {
     pub fn new(value: impl Into<String>) -> Self {
-        S3ExampleError(value.into())
+        S3Error(value.into())
     }
 
     pub fn add_message(self, message: impl Into<String>) -> Self {
-        S3ExampleError(format!("{}: {}", message.into(), self.0))
+        S3Error(format!("{}: {}", message.into(), self.0))
     }
 }
 
-impl<T: aws_sdk_s3::error::ProvideErrorMetadata> From<T> for S3ExampleError {
+impl<T: aws_sdk_s3::error::ProvideErrorMetadata> From<T> for S3Error {
     fn from(value: T) -> Self {
-        S3ExampleError(format!(
+        S3Error(format!(
             "{}: {}",
             value
                 .code()
@@ -30,9 +30,9 @@ impl<T: aws_sdk_s3::error::ProvideErrorMetadata> From<T> for S3ExampleError {
         ))
     }
 }
-impl std::error::Error for S3ExampleError {}
+impl std::error::Error for S3Error {}
 
-impl std::fmt::Display for S3ExampleError {
+impl std::fmt::Display for S3Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.0)
     }

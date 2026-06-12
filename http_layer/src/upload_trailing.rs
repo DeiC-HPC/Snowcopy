@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncSeekExt};
 use hyper::{Method, Request};
 use hyper::body::{Body, Frame};
 use bytes::Bytes;
-use util_layer::{FileInfo, SnowContext};
+use util_layer::{FileInfo, UploadConfig};
 use util_layer::cc_util::CcLoadAndTransfer;
 use util_layer::constants::{AMZ_CHECKSUM_SHA256, AMZ_CHUNK_SIGNATURE_HEADER, AMZ_STREAMING_TRAILER, AMZ_TRAILER_SIGNATURE, AWS_ALGORITHM, CHUNK_SIGNATURE_LENGTH, EMPTY_PAYLOAD_SHA256, TRAILER_HASH_LENGTH};
 use util_layer::snow_errors::SnowCopyError;
@@ -21,7 +21,7 @@ use crate::signer::{sha256_hex, ChunkSigner, CredentialScope};
 
 /// Upload a file using streaming for trailing headers.
 pub async fn put_file_streaming(
-    ctx: Arc<SnowContext>,
+    ctx: Arc<UploadConfig>,
     file_info: Arc<FileInfo>,
     from: u64,
     amount: u64,
@@ -30,9 +30,10 @@ pub async fn put_file_streaming(
     req_sem: Arc<Semaphore>,
     canonical_uri: Arc<String>,
     query_uri: &String,
+    open_file_limit: Arc<Semaphore>,
 ) -> anyhow::Result<(String, CcLoadAndTransfer)> {
     let file_permit_start = Instant::now();
-    let open_file_lock = ctx.trailing_info().open_file_sem_limit.acquire().await?;
+    let open_file_lock = open_file_limit.acquire().await?;
     let file_permit_elapsed = file_permit_start.elapsed();
 
     let file_work_start = Instant::now();
@@ -50,7 +51,7 @@ pub async fn put_file_streaming(
         amount,
         file_info.modified_time,
         file_sem,
-        ctx.trailing_info().trailing_chunk_size
+        ctx.trailing_chunk_size
     )?;
 
     let file_work_elapsed = file_work_start.elapsed();
@@ -94,7 +95,7 @@ pub async fn put_file_streaming(
 }
 
 fn create_streaming_req_trailing_checksum(
-    ctx: Arc<SnowContext>,
+    ctx: Arc<UploadConfig>,
     canonical_uri: Arc<String>,
     query_uri: &String,
     file: File,
@@ -105,7 +106,7 @@ fn create_streaming_req_trailing_checksum(
 ) -> anyhow::Result<Request<StreamingBody>> {
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
-        region: ctx.s3_region().to_string(),
+        region: ctx.endpoint.s3_region.clone(),
         service: "s3".to_string(),
     };
 
@@ -120,7 +121,9 @@ fn create_streaming_req_trailing_checksum(
     let mtime_str = modified_time.map(util_layer::time::time_to_float_string);
 
     let mut signed_headers: HashMap<String, String> = HashMap::new();
-    signed_headers.insert("host".to_string(), ctx.s3_host().to_string());
+    let url_parsed = url::Url::parse(&ctx.endpoint.s3_url).expect("Invalid S3 URL");
+    let host = url_parsed.host_str().unwrap_or("").to_string();
+    signed_headers.insert("host".to_string(), host);
     signed_headers.insert("x-amz-date".to_string(), amz_date.clone());
     signed_headers.insert("content-encoding".to_string(), "aws-chunked".to_string());
     signed_headers.insert("content-type".to_string(), "application/octet-stream".to_string());
@@ -144,7 +147,7 @@ fn create_streaming_req_trailing_checksum(
 
     let (auth_header, seed_signature) = signer::get_s3_auth_header_and_signature(
         "PUT",
-        ctx.clone(),
+        &ctx.endpoint,
         &credential_scope,
         AWS_ALGORITHM,
         &signed_headers,
@@ -152,12 +155,12 @@ fn create_streaming_req_trailing_checksum(
         query_uri,
     );
 
-    let uri = crate::format_query(&ctx, canonical_uri, query_uri);
+    let uri = crate::format_query(ctx.clone(), canonical_uri, query_uri);
 
     let signing_key = signer::s3_signing_key(
-        ctx.s3_secret_key(),
+        &ctx.endpoint.s3_secret_key,
         &date_y_m_d,
-        ctx.s3_region(),
+        credential_scope.region.as_str(),
     );
 
     let streaming_body = StreamingFileChunkedBody::new(

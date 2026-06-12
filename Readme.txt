@@ -1,6 +1,5 @@
 Run project with:
-run --package snowplowRust --bin snowplowRust -- -b rust-test ./Readme.txt
-
+run --package snowcopy --bin snowcopy -- my-file.txt lumio:rusty-rust-delete-me5
 
 Add config.json to project file with following structure:
 

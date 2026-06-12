@@ -1,23 +1,25 @@
+pub mod constants {
+    pub use util_layer::constants::*;
+}
+
 mod upload;
 mod auto_tuning;
 mod ui;
 mod download;
 mod command_center;
+mod config_and_parameter_parsing;
 
 use std::time::Instant;
-
-use clap::{Arg, ArgMatches, Command};
-
-use std::path::Path;
 use std::sync::Arc;
+
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
-use util_layer::{constants, Config};
+use util_layer::{SnowConfig, TransferMethod};
+use crate::config_and_parameter_parsing::{read_parameters_and_config_to_create_snow_config, parse_arguments};
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
 #[cfg(not(target_env = "msvc"))]
 use jemallocator::Jemalloc;
-
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
@@ -30,233 +32,50 @@ async fn main() {
 
     // Read Commandline Arguments
     let matches = parse_arguments();
+    let snow_config = read_parameters_and_config_to_create_snow_config(&matches).await;
 
-    if let Some(("config", _)) = matches.subcommand() {
-        if let Err(e) = config::run_tui() {
-            eprintln!("Error running config TUI: {}", e);
-            std::process::exit(1);
-        }
-        return;
-    }
-
-    let bucket = matches.get_one::<String>("bucket").ok_or_else(|| {
-        eprintln!("error: the following required arguments were not provided:\n  --bucket <NAME>\n\nUsage: snowplowRust --bucket <NAME> <PATH>\n\nFor more information, try '--help'.");
-        std::process::exit(2);
-    }).unwrap();
-
-    let path_as_string = matches.get_one::<String>("path").ok_or_else(|| {
-        eprintln!("error: the following required arguments were not provided:\n  <PATH>\n\nUsage: snowplowRust --bucket <NAME> <PATH>\n\nFor more information, try '--help'.");
-        std::process::exit(2);
-    }).unwrap();
-    let transfer_method = matches.get_one::<String>("o").expect("required");
-    let file_limit = matches.get_one::<usize>("file_limit").copied();
-    let req_limit = matches.get_one::<usize>("req_limit").copied();
-    let download_concurrency = matches.get_one::<usize>("download_concurrency").copied();
-    let silent = matches.get_flag("silent");
-    let download = matches.get_flag("download");
-    let stats = matches.get_flag("stats");
-    let md5_checksum_integrity = matches
-        .get_one::<bool>("md5_checksum_integrity")
-        .copied()
-        .unwrap_or(true);
-
-    println!("{}", md5_checksum_integrity);
-    let trailing = matches.get_flag("trailing");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
-    let trailing_small = matches.get_flag("trailing-small");    // TODO LND: Temporary flag - should be a force-negation in release when CC starts setting it autonomously
-    let trailing_chunk_size = matches.get_one::<usize>("trailing-chunk-size").copied(); // TODO LND: Possibly a temporary flag
-    let open_file_sem_limit = matches.get_one::<usize>("open-file-limit").copied();
-
-    let path = Path::new(path_as_string);
-    let arc_bucket = Arc::new(bucket.to_string());
-
-    let method = match_transfer_method(Some(transfer_method)).expect(format!("Transfer method {} unknown", transfer_method).as_str());
-
-    let config = gather_credentials().await;
-
-
-    if download { //TODO Jon: are we planning on supporting multiple implementations in the actual production code? I think not. At least not for first release. Hmm, maybe a hdd and ssd mode
-        match method {
-            TransferMethod::CephS3Tokio => download::download(arc_bucket, "", path, file_limit, req_limit, download_concurrency, silent, stats, &config, md5_checksum_integrity).await,
-            TransferMethod::TransferManager => transfer_manager::download(arc_bucket, path, silent, stats, &config, req_limit).await,
-        }
-    } else {
-        match method {
-            TransferMethod::CephS3Tokio => upload::run_s3_ceph_tokio(arc_bucket, path, file_limit, req_limit, download_concurrency, silent, stats, &config, md5_checksum_integrity, trailing, trailing_small, open_file_sem_limit, trailing_chunk_size).await,
-            TransferMethod::TransferManager => transfer_manager::upload(arc_bucket, path, silent, stats, &config, req_limit).await,
-        };
-    }
-
-    let elapsed = start_time.elapsed();
-    if !silent {
-        println!("Program execution time: {:.2?}", elapsed);
-    }
-}
-
-async fn gather_credentials() -> Config {
-    // Attempt to read existing config file first
-    if let Ok(contents) = std::fs::read_to_string(&constants::CONFIG_PATH) {
-        if let Ok(mut cfg) = serde_json::from_str::<Config>(&contents) {
-            if cfg.s3_region.is_empty() {
-                cfg.s3_region = "us-east-1".to_string();
+    match snow_config {
+        SnowConfig::Download(config) => {
+            let config = Arc::new(config);
+            let silent = config.silent;
+            match config.transfer_method {
+                TransferMethod::TokioSelfMade => download::download(config).await,
+                TransferMethod::TransferManager => transfer_manager::download(config).await,
             }
-            return cfg;
+            if !silent {
+                println!("Program execution time: {:.2?}", start_time.elapsed());
+            }
+        }
+        SnowConfig::Upload(config) => {
+            let config = Arc::new(config);
+            let silent = config.silent;
+            match config.transfer_method {
+                TransferMethod::TokioSelfMade => upload::upload(config).await,
+                TransferMethod::TransferManager => transfer_manager::upload(config).await,
+            };
+            if !silent {
+                println!("Program execution time: {:.2?}", start_time.elapsed());
+            }
+        }
+        SnowConfig::List(_config) => {
+            //TODO later: call ls with lsConfig
+            println!("Not implemented yet.");
+
+        }
+        SnowConfig::Remove(_config) => {
+            //TODO later: call remove with removeConfig
+            println!("Not implemented yet.");
+
+        }
+        SnowConfig::Config(_config) => {
+            if let Err(e) = config::run_tui() {
+                eprintln!("Error running config TUI: {}", e);
+                std::process::exit(1);
+            }
         }
     }
-
-    // Fallback: build config from AWS SDK defaults/environment
-    println!("No config file found. Building config from AWS SDK defaults/environment.");
-    let (credentials, region, endpoint) = aws_layer::load_aws_config_parts().await;
-
-    Config {
-        s3_access_key: credentials.access_key_id().to_string(),
-        s3_secret_key: credentials.secret_access_key().to_string(),
-        s3_url: endpoint.unwrap_or_default(),
-        s3_region: region.to_string(),
-    }
 }
 
-enum TransferMethod {
-    CephS3Tokio,
-    TransferManager,
-}
-
-fn parse_arguments() -> ArgMatches {
-    let matches = Command::new("snowplowRust")
-        .version("0.1.0")
-        .about("Parses a -b argument and a path")
-        .subcommand(
-            Command::new("config")
-                .about("Open the TUI for configuration management")
-        )
-        .arg(
-            Arg::new("bucket")
-                .short('b')                 // allows -b
-                .long("bucket")             // also allows --bucket
-                .value_name("NAME")
-                .help("Bucket (e.g., 'some-bucket-name')")
-                .required(false)
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("path")
-                .help("Input path")
-                .required(false)
-                .value_name("PATH")
-            //.index(1),
-        )
-        .arg(
-            Arg::new("o")
-                .help("Transfer method")
-                .short('o')
-                .required(false)
-                .default_value("o1")
-            //.index(1),
-        )
-        .arg(
-            Arg::new("file_limit")
-                .short('f')
-                .long("file-limit")
-                .value_name("NUMBER")
-                .help("Maximum number of files to process")
-                .required(false)
-                .value_parser(clap::value_parser!(usize))
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("req_limit")
-                .short('r')
-                .long("req-limit")
-                .value_name("NUMBER")
-                .help("Maximum number of concurrent requests")
-                .required(false)
-                .value_parser(clap::value_parser!(usize))
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("download_concurrency")
-                .short('c')
-                .long("download-concurrency")
-                .value_name("NUMBER")
-                .help("Maximum number of concurrent downloads per file")
-                .required(false)
-                .value_parser(clap::value_parser!(usize))
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("silent")
-                .short('q')
-                .long("silent")
-                .help("Suppress output messages")
-                .required(false)
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("download")
-                .short('d')
-                .long("download")
-                .help("Download mode")
-                .required(false)
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("stats")
-                .long("stats")
-                .help("Enable statistics output")
-                .required(false)
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("md5_checksum_integrity")
-                .long("disable-md5-checksum-integrity")
-                .help("Disable MD5 checksum validation")
-                .required(false)
-                .default_value("true")
-                .action(clap::ArgAction::SetFalse),
-        )
-        .arg(
-            Arg::new("trailing")
-                .long("trailing")
-                .help("Trailing header mode (uses trailing headers for S3 operations)")
-                .required(false)
-                .action(clap::ArgAction::SetTrue)
-        )
-        .arg(
-            Arg::new("trailing-small")
-                .long("trailing-small")
-                .help("Trailing header mode for small files (uses trailing headers for S3 operations)")
-                .required(false)
-                .action(clap::ArgAction::SetTrue)
-        )
-        .arg(
-            Arg::new("trailing-chunk-size")
-                .long("trailing-chunk-size")
-                .value_name("NUMBER")
-                .help("Size of chunks used for trailing header operations in kB")
-                .required(false)
-                .value_parser(clap::value_parser!(usize))
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("open-file-limit")
-                .long("open-file-limit")
-                .value_name("NUMBER")
-                .help("Limit of simultaneously open file descriptors")
-                .required(false)
-                .value_parser(clap::value_parser!(usize))
-                .num_args(1),
-        )
-        .after_help("Upload example:\n  snowplowRust -b bucket-name path/to/source")
-        .get_matches();
-    matches
-}
-
-fn match_transfer_method(method: Option<&str>) -> Option<TransferMethod> {
-    match method {
-        Some("o1") => Some(TransferMethod::CephS3Tokio),
-        Some("o2") => Some(TransferMethod::TransferManager),
-        _other => None,
-    }
-}
 
 fn init_logging() {
     let filter = EnvFilter::try_from_default_env()

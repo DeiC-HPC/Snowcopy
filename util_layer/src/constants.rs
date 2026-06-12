@@ -2,7 +2,7 @@ pub const CONFIG_PATH: &str = "config.json";
 pub const DEFAULT_REGION: &str = "us-east-1";
 pub const CHUNK_SIZE: u64 = 5 * 1024 * 1024;
 pub const DOWNLOAD_CHUNK_SIZE: usize = 1 * 1024 * 1024;
-pub const DOWNLOAD_MULTIPART_THRESHOLD: u64 = (2 * DOWNLOAD_CHUNK_SIZE) as u64;
+pub const DOWNLOAD_MULTIPART_THRESHOLD: u64 = 6 * 1024 * 1024; //TODO JON: Our download logic requires this to be larger than our multipart upload threshold
 pub const PRESIGN_LIFETIME: u64 = 900;
 
 pub const MAX_REQUEST_AMOUNT: usize = 400;

@@ -10,7 +10,7 @@ use aws_sdk_s3::operation::get_object::GetObjectOutput;
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
-use s3example_error::S3ExampleError;
+use s3example_error::S3Error;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +22,7 @@ use util_layer::cc_util::CommandCenterEvent;
 use util_layer::cc_util::Status::Transferring;
 use util_layer::constants::{MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, PAYLOAD_SHA256_METADATA_KEY};
 use util_layer::time::float_string_to_time;
-use util_layer::{constants, S3Object};
+use util_layer::{constants, EndpointConfig, S3Object};
 
 pub type AWSClient = Client;
 pub type CompletedPartAws = CompletedPart;
@@ -34,7 +34,7 @@ pub async fn complete_multipart_upload(
     key: &str,
     upload_id: &str,
     parts: Vec<CompletedPart>,
-) -> std::result::Result<(), S3ExampleError> {
+) -> std::result::Result<(), S3Error> {
     let completed_multipart_upload = CompletedMultipartUpload::builder()
         .set_parts(Some(parts))
         .build();
@@ -55,11 +55,14 @@ pub async fn complete_multipart_upload(
                 eprintln!("HTTP status code: {}", status);
             }
             eprintln!("Error completing multipart upload for key {}: {:?}", key, e);
-            Err(S3ExampleError::from(e))
+            Err(S3Error::from(e))
         }
     }
 }
 
+pub async fn create_client_from_config_endpoint(config: &EndpointConfig) -> AWSClient {
+    create_client(&config.s3_access_key, &config.s3_secret_key, &config.s3_url, &config.s3_region).await
+}
 
 pub async fn create_client(access_key: &str, secret_key: &str, url: &str, region: &str) -> AWSClient {
     let region = Region::new(region.to_string());
@@ -102,9 +105,9 @@ pub async fn create_client(access_key: &str, secret_key: &str, url: &str, region
 
 pub async fn create_bucket(
     client: &AWSClient,
-    bucket_name: Arc<String>,
-) -> Result<Option<CreateBucketOutput>, S3ExampleError> {
-    match client.head_bucket().bucket(bucket_name.as_str()).send().await {
+    bucket_name: &str,
+) -> Result<Option<CreateBucketOutput>, S3Error> {
+    match client.head_bucket().bucket(bucket_name).send().await {
         Ok(_) => {
             Ok(None)
         }
@@ -113,13 +116,13 @@ pub async fn create_bucket(
             if service_err.is_not_found() {
                 let create = client
                     .create_bucket()
-                    .bucket(bucket_name.as_str())
+                    .bucket(bucket_name)
                     .send()
                     .await;
 
-                create.map(Some).map_err(S3ExampleError::from)
+                create.map(Some).map_err(S3Error::from)
             } else {
-                Err(S3ExampleError::from(service_err))
+                Err(S3Error::from(service_err))
             }
         }
     }
@@ -141,10 +144,10 @@ pub async fn create_bucket(
 /// * `filename` - a reference to a path that will be read and uploaded to S3.
 /// * `key` - the string key that the object will be uploaded as inside the bucket.
 #[allow(dead_code)]
-async fn list_bucket(
+async fn list_bucket( //TODO JON: use for ls?
     client: &AWSClient,
     bucket: &str,
-) -> std::result::Result<(), S3ExampleError> {
+) -> std::result::Result<(), S3Error> {
     // List the buckets in this account
     let mut objects = client
         .list_objects_v2()
@@ -171,7 +174,6 @@ async fn list_bucket(
 
     Ok(())
 }
-
 
 
 pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: Arc<AWSClient>, sender: UnboundedSender<CommandCenterEvent>) ->  mpsc::Receiver<S3Object> {
@@ -286,12 +288,12 @@ pub async fn get_object(
     bucket: &str,
     key: &str,
     part_number: Option<i32>,
-) -> std::result::Result<GetObjectOutput, S3ExampleError> {
+) -> std::result::Result<GetObjectOutput, S3Error> {
     let mut request = client.get_object().bucket(bucket).key(key);
     if let Some(part) = part_number {
         request = request.part_number(part);
     }
-    request.send().await.map_err(S3ExampleError::from)
+    request.send().await.map_err(S3Error::from)
 }
 
 pub async fn head_object(
@@ -299,12 +301,12 @@ pub async fn head_object(
     bucket: &str,
     key: &str,
     part_number: Option<i32>,
-) -> std::result::Result<HeadObjectOutput, S3ExampleError> {
+) -> std::result::Result<HeadObjectOutput, S3Error> {
     let mut request = client.head_object().bucket(bucket).key(key);
     if let Some(part) = part_number {
         request = request.part_number(part);
     }
-    request.send().await.map_err(S3ExampleError::from)
+    request.send().await.map_err(S3Error::from)
 }
 
 pub async fn load_aws_config_parts() -> (Credentials, Region, Option<String>) {

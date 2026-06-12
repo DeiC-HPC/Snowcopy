@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use directories::ProjectDirs;
 use anyhow::{Result, Context};
 use std::fs;
+use util_layer::Endpoint;
+#[cfg(test)]
+use util_layer::EndpointConfig;
 
 pub mod tui;
 
@@ -15,7 +18,7 @@ pub struct AppConfig {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct GlobalConfig {
-    #[serde(default = "default_region")]
+    #[serde(default = "util_layer::default_region")]
     pub s3_region: String,
     #[serde(flatten)]
     pub additional_properties: HashMap<String, serde_json::Value>,
@@ -24,58 +27,8 @@ pub struct GlobalConfig {
 impl Default for GlobalConfig {
     fn default() -> Self {
         Self {
-            s3_region: default_region(),
+            s3_region: util_layer::default_region(),
             additional_properties: HashMap::new(),
-        }
-    }
-}
-
-fn default_region() -> String {
-    "us-east-1".to_string()
-}
-
-fn default_region_option() -> Option<String> {
-    Some(default_region())
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Endpoint {
-    pub name: String,
-    pub config: Option<EndpointConfig>,
-    pub settings: Option<HashMap<String, serde_json::Value>>,
-}
-
-impl Endpoint {
-    pub fn is_complete(&self) -> bool {
-        if self.name.trim().is_empty() {
-            return false;
-        }
-        if let Some(config) = &self.config {
-            !config.s3_access_key.trim().is_empty()
-                && !config.s3_secret_key.trim().is_empty()
-                && !config.s3_url.trim().is_empty()
-        } else {
-            false
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct EndpointConfig {
-    pub s3_access_key: String,
-    pub s3_secret_key: String,
-    pub s3_url: String,
-    #[serde(default = "default_region_option")]
-    pub s3_region: Option<String>,
-}
-
-impl Default for EndpointConfig {
-    fn default() -> Self {
-        Self {
-            s3_access_key: String::new(),
-            s3_secret_key: String::new(),
-            s3_url: String::new(),
-            s3_region: default_region_option(),
         }
     }
 }
@@ -93,7 +46,7 @@ pub fn load_config() -> Result<AppConfig> {
         return Ok(AppConfig::default());
     }
     let content = fs::read_to_string(path)?;
-    let config = serde_json::from_str(&content)?;
+    let config: AppConfig = serde_json::from_str(&content)?;
     Ok(config)
 }
 
@@ -123,7 +76,7 @@ mod tests {
                 s3_access_key: "key".to_string(),
                 s3_secret_key: "secret".to_string(),
                 s3_url: "url".to_string(),
-                s3_region: None,
+                s3_region: "us-east-1".to_string(),
             }),
             settings: None,
         };
@@ -152,7 +105,7 @@ mod tests {
                         s3_access_key: "key A".to_string(),
                         s3_secret_key: "secret A".to_string(),
                         s3_url: "url A".to_string(),
-                        s3_region: Some("region A".to_string()),
+                        s3_region: "region A".to_string(),
                     }),
                     settings: None,
                 },
@@ -162,7 +115,7 @@ mod tests {
                         s3_access_key: "key B".to_string(),
                         s3_secret_key: "secret B".to_string(),
                         s3_url: "url B".to_string(),
-                        s3_region: Some("region B".to_string()),
+                        s3_region: "region B".to_string(),
                     }),
                     settings: None,
                 },
@@ -184,7 +137,7 @@ mod tests {
         app.focus = Focus::Endpoints;
         app.input_mode = InputMode::Normal;
         
-        assert_eq!(app.config.endpoints[0].config.as_ref().unwrap().s3_region, Some("new region A".to_string()));
+        assert_eq!(app.config.endpoints[0].config.as_ref().unwrap().s3_region, "new region A".to_string());
         
         // 5. Navigate in Normal mode (should NOT call save_edit automatically)
         app.next_endpoint(); // now at B
@@ -195,7 +148,7 @@ mod tests {
         // Verify that B is still B
         assert_eq!(
             app.config.endpoints[1].config.as_ref().unwrap().s3_region, 
-            Some("region B".to_string()),
+            "region B".to_string(),
             "Endpoint B region should not be overwritten by navigation in Normal mode"
         );
     }
@@ -212,7 +165,7 @@ mod tests {
                         s3_access_key: "key A".to_string(),
                         s3_secret_key: "secret A".to_string(),
                         s3_url: "url A".to_string(),
-                        s3_region: Some("region A".to_string()),
+                        s3_region: "region A".to_string(),
                     }),
                     settings: None,
                 },
@@ -238,7 +191,7 @@ mod tests {
         // The config should NOT have changed
         assert_eq!(
             app.config.endpoints[0].config.as_ref().unwrap().s3_region, 
-            Some("region A".to_string()),
+            "region A".to_string(),
             "Esc should discard changes"
         );
         assert!(app.edit_buffer.is_empty(), "edit_buffer should be cleared on Esc");
@@ -249,7 +202,7 @@ mod tests {
         app.save_edit().unwrap(); // This is what Enter calls
         assert_eq!(
             app.config.endpoints[0].config.as_ref().unwrap().s3_region, 
-            Some("new region".to_string()),
+            "new region".to_string(),
             "Enter should still save changes"
         );
     }
