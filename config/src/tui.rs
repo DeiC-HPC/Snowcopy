@@ -436,7 +436,7 @@ where
                                 app.input_mode = InputMode::Normal;
                             }
                         }
-                        "help" => {
+                        "help" | "help_toggle_inner" => {
                             app.show_help = !app.show_help;
                         }
                         _ => {}
@@ -513,21 +513,43 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     f.render_widget(title, chunks[0]);
 
     if app.show_help {
-        let help_text = "
-Navigation:
-  - Up/Down: Navigate endpoints (left) or fields (right)
-  - Left/Right: Switch focus between endpoints and fields
-  - Enter: Edit selected field
-  - Esc: Cancel editing
-  - Ctrl-k: Clear field (in edit mode)
-  - a: Add new endpoint
-  - d: Delete selected endpoint
-  - q: Quit
-  - h: Toggle help
-";
+        let help_button_style = Style::default().bg(Color::Blue).fg(Color::White);
+        let help_text = vec![
+            Line::from(vec![
+                Span::raw("S3 server's, fields and buttons are clickable in most modern terminals."),
+            ]),
+            Line::from(vec![
+                Span::raw("Like this button to toggle "),
+                Span::styled(" help ", help_button_style),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled("Navigation:", Style::default().add_modifier(Modifier::BOLD))]),
+            Line::from("  - Up/Down: Navigate S3 servers (left) or fields (right)"),
+            Line::from("  - Left/Right: Switch focus between S3 servers and fields"),
+            Line::from("  - Enter: Edit selected field"),
+            Line::from("  - Esc: Cancel editing"),
+            Line::from("  - Ctrl-k: Clear field (in edit mode)"),
+            Line::from("  - a: Add new S3 server"),
+            Line::from("  - d: Delete selected S3 server"),
+            Line::from("  - q: Quit"),
+            Line::from("  - h: Toggle help"),
+        ];
+
         let help = Paragraph::new(help_text)
             .block(Block::default().title("Help").borders(Borders::ALL));
         f.render_widget(help, chunks[1]);
+        
+        // Add the help toggle button area for the button in the help text
+        // The button is " help " which is 6 chars long
+        // It's in the second line of the help text.
+        // help_text[1] is: "like this button to toggle " (27 chars) + " help " (6 chars)
+        let help_area = chunks[1];
+        app.button_areas.insert("help_toggle_inner".to_string(), Rect {
+            x: help_area.x + 1 + 27,
+            y: help_area.y + 1 + 1, // Second line (0-indexed)
+            width: 6,
+            height: 1,
+        });
     } else {
         let body_chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -613,7 +635,7 @@ Navigation:
                 (Field::AccessKey, "S3 Access Key", endpoint.config.as_ref().map(|c| c.s3_access_key.as_str()).unwrap_or("")),
                 (Field::SecretKey, "S3 Secret Key", endpoint.config.as_ref().map(|c| c.s3_secret_key.as_str()).unwrap_or("")),
                 (Field::Url, "S3 URL", endpoint.config.as_ref().map(|c| c.s3_url.as_str()).unwrap_or("")),
-                (Field::Region, "S3 Region (non-aws s3 endpoints commonly use us-east-1)", endpoint.config.as_ref().map(|c| c.s3_region.as_str()).unwrap_or("")),
+                (Field::Region, "S3 Region (non-aws s3 servers commonly use us-east-1)", endpoint.config.as_ref().map(|c| c.s3_region.as_str()).unwrap_or("")),
             ];
 
             for (idx, (field, label, value)) in fields.iter().enumerate() {
