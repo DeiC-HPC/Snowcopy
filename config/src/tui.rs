@@ -11,6 +11,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear as TuiClear, List, ListItem, ListState, Paragraph},
     Terminal,
 };
@@ -425,6 +426,19 @@ where
                                 app.edit_buffer.clear();
                             }
                         }
+                        "confirm_yes" => {
+                            if let InputMode::ConfirmDelete = app.input_mode {
+                                app.confirm_delete()?;
+                            }
+                        }
+                        "confirm_no" => {
+                            if let InputMode::ConfirmDelete = app.input_mode {
+                                app.input_mode = InputMode::Normal;
+                            }
+                        }
+                        "help" => {
+                            app.show_help = !app.show_help;
+                        }
                         _ => {}
                     }
                 }
@@ -706,66 +720,115 @@ Navigation:
         }
     }
 
-    let footer_text = match app.input_mode {
-        InputMode::Normal => match app.focus {
-            Focus::Endpoints => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate server | Right: focus fields | h: help",
-            Focus::Fields => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate fields | Left: focus server | Enter: edit | h: help",
-        },
-        InputMode::Editing => "🖱️ Enter: save | 🖱️ Esc: cancel | Up/Down/Left: save & move | 🖱️ Ctrl-k: clear",
-        InputMode::ConfirmDelete => "Are you sure you want to delete this endpoint? (y/n)",
-    };
-
-    // Store button areas for the footer
-        
     let footer_area = chunks[2];
-    
-    // Parse footer_text to calculate exact button positions
-    let options: Vec<&str> = footer_text.split(" | ").collect();
-    let mut x_offset = footer_area.x + 1;
+    f.render_widget(TuiClear, footer_area); // Clear the footer area, so no artifacts remain
 
-    for option in options {
-        // Only process options with mouse icon
-        if option.contains("🖱️") {
-            // Extract button ID from pattern like "🖱️ q: quit" or "🖱️ Enter: save"
-            let id = if let Some(colon_pos) = option.find(':') {
-                let before_colon = &option[..colon_pos];
-                if let Some(space_pos) = before_colon.rfind(' ') {
-                    before_colon[space_pos + 1..].trim()
-                } else {
-                    ""
-                }
+    let mut footer_spans = Vec::new();
+    app.button_areas.clear();
+
+    match app.input_mode {
+        InputMode::Normal => {
+            let mut buttons = vec![
+                ("q", "quit", "quit"),
+                ("a", "add server", "add"),
+                ("d", "delete server", "delete"),
+            ];
+
+            if app.show_help {
+                buttons.push(("h", "close help", "help"));
             } else {
-                ""
-            };
+                buttons.push(("h", "help", "help"));
+            }
 
-            if !id.is_empty() {
-                let button_id = match id {//TODO JON: This can all be refactored by having a list of commands, that then generate a footnote and clickable areas.
-                    "q" => "quit",
-                    "a" => "add",
-                    "d" => "delete",
-                    "Enter" => "enter",
-                    "Esc" => "cancel",
-                    "Ctrl-k" => "clear",
-                    //TODO JON: add yes/no confirmation. Perhaps a popup?
-                    _ => id,
-                };
-
-                let width = option.chars().count() as u16;
-                app.button_areas.insert(button_id.to_string(), Rect {
-                    x: x_offset,
+            let mut current_x = footer_area.x + 1;
+            for (key, label, id) in buttons {
+                let text = format!(" {}: {} ", key, label);
+                let width = text.chars().count() as u16;
+                
+                app.button_areas.insert(id.to_string(), Rect {
+                    x: current_x,
                     y: footer_area.y + 1,
                     width,
                     height: 1,
                 });
+
+                footer_spans.push(Span::styled(
+                    text,
+                    Style::default().bg(Color::Blue).fg(Color::White),
+                ));
+                footer_spans.push(Span::raw(" "));
+                current_x += width + 1;
+            }
+
+            if !app.show_help {
+                let help_text = match app.focus {
+                    Focus::Endpoints => "| Down/Up: navigate server | Right: focus fields",
+                    Focus::Fields => "| Down/Up: navigate fields | Left: focus server | Enter: edit",
+                };
+                footer_spans.push(Span::raw(help_text));
             }
         }
-        // Move offset for next option (including " | " separator which is 3 chars)
-        x_offset += option.chars().count() as u16 + 3;
-    }
-        f.render_widget(TuiClear, footer_area); // Clear the footer area, so no artifacts remain
+        InputMode::Editing => {
+            let buttons = vec![
+                ("Enter", "save", "enter"),
+                ("Esc", "cancel", "cancel"),
+                ("Ctrl-k", "clear", "clear"),
+            ];
 
-        let footer = Paragraph::new(footer_text)
-        .block(Block::default().borders(Borders::ALL));
-    f.render_widget(footer, chunks[2]);
+            let mut current_x = footer_area.x + 1;
+            for (key, label, id) in buttons {
+                let text = format!(" {}: {} ", key, label);
+                let width = text.chars().count() as u16;
+
+                app.button_areas.insert(id.to_string(), Rect {
+                    x: current_x,
+                    y: footer_area.y + 1,
+                    width,
+                    height: 1,
+                });
+
+                footer_spans.push(Span::styled(
+                    text,
+                    Style::default().bg(Color::Blue).fg(Color::White),
+                ));
+                footer_spans.push(Span::raw(" "));
+                current_x += width + 1;
+            }
+            footer_spans.push(Span::raw("| Up/Down/Left: save & move"));
+        }
+        InputMode::ConfirmDelete => {
+            footer_spans.push(Span::raw("Are you sure you want to delete this endpoint? "));
+            
+            let mut current_x = footer_area.x + 1 + "Are you sure you want to delete this endpoint? ".chars().count() as u16;
+            
+            let buttons = vec![
+                ("y", "Yes", "confirm_yes"),
+                ("n", "No", "confirm_no"),
+            ];
+
+            for (key, label, id) in buttons {
+                let text = format!(" {}: {} ", key, label);
+                let width = text.chars().count() as u16;
+
+                app.button_areas.insert(id.to_string(), Rect {
+                    x: current_x,
+                    y: footer_area.y + 1,
+                    width,
+                    height: 1,
+                });
+
+                footer_spans.push(Span::styled(
+                    text,
+                    Style::default().bg(Color::Red).fg(Color::White),
+                ));
+                footer_spans.push(Span::raw(" "));
+                current_x += width + 1;
+            }
+        }
     }
+
+    let footer = Paragraph::new(Line::from(footer_spans))
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(footer, footer_area);
+}
 }
