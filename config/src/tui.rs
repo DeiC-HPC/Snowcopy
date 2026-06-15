@@ -291,7 +291,7 @@ where
                         app.delete_endpoint()?;
                     }
                     KeyCode::Char('h') => app.show_help = !app.show_help,
-                    KeyCode::Down => {
+                    KeyCode::Down | KeyCode::Tab => {
                         match app.focus {
                             Focus::Endpoints => {
                                 app.next_endpoint();
@@ -302,7 +302,7 @@ where
                             }
                         }
                     }
-                    KeyCode::Up => {
+                    KeyCode::Up | KeyCode::BackTab => {
                         match app.focus {
                             Focus::Endpoints => {
                                 app.previous_endpoint();
@@ -355,12 +355,12 @@ where
                         app.focus = Focus::Endpoints;
                         app.input_mode = InputMode::Normal;
                     }
-                    KeyCode::Down => {
+                    KeyCode::Down | KeyCode::Tab => {
                         app.save_edit()?;
                         app.next_field();
                         app.start_editing();
                     }
-                    KeyCode::Up => {
+                    KeyCode::Up | KeyCode::BackTab => {
                         app.save_edit()?;
                         app.previous_field();
                         app.start_editing();
@@ -516,7 +516,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         let help_button_style = Style::default().bg(Color::Blue).fg(Color::White);
         let help_text = vec![
             Line::from(vec![
-                Span::raw("S3 server's, fields and buttons are clickable in most modern terminals."),
+                Span::raw("S3 servers, fields and buttons are clickable in most modern terminals."),
             ]),
             Line::from(vec![
                 Span::raw("Like this button to toggle "),
@@ -524,7 +524,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             ]),
             Line::from(""),
             Line::from(vec![Span::styled("Navigation:", Style::default().add_modifier(Modifier::BOLD))]),
-            Line::from("  - Up/Down: Navigate S3 servers (left) or fields (right)"),
+            Line::from("  - Up/Down, Tab/Shift+Tab: Navigate S3 servers (left) or fields (right)"),
             Line::from("  - Left/Right: Switch focus between S3 servers and fields"),
             Line::from("  - Enter: Edit selected field"),
             Line::from("  - Esc: Cancel editing"),
@@ -793,7 +793,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         InputMode::Editing => {
             let buttons = vec![
                 ("Enter", "save", "enter"),
-                ("Esc", "cancel", "cancel"),
+                ("Esc", "cancel edit", "cancel"),
                 ("Ctrl-k", "clear", "clear"),
             ];
 
