@@ -6,6 +6,7 @@ pub mod retry;
 pub mod pattern;
 pub mod snow_errors;
 pub mod download;
+pub mod upload_util;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

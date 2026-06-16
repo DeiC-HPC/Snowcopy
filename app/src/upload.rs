@@ -8,6 +8,7 @@ use futures::future::join_all;
 use http_layer::{build_https_client, BufferPool, PoolClient};
 use std::sync::Arc;
 use std::time::SystemTime;
+use std::fs::File;
 use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
@@ -125,22 +126,24 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
     let mut handles = Vec::new();
 
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.key));
+    let file_lock = file_sem.acquire().await.unwrap();  // Lock file for reading
+    let file = Arc::new(File::open(&*file_info.file_path).expect("File should exist")); // TODO LND: Let's handle errors properly (such as moved file etc)
 
     for i in 0..chunk_amount_u64 {
-        let start_pos = i * CHUNK_SIZE;
-        let amount = std::cmp::min(CHUNK_SIZE, file_info.file_size - start_pos);
+        let file_read_offset = i * CHUNK_SIZE;
+        let amount = std::cmp::min(CHUNK_SIZE, file_info.file_size - file_read_offset);
 
         let part_number = (i + 1) as i32;
         let query_uri = format!("partNumber={}&uploadId={}", part_number, upload_id);
 
         let hyper_client = hyper_client.clone();
         let file_info_clone = file_info.clone();
-        let file_sem_clone = file_sem.clone();
         let req_sem_clone = req_sem.clone();
         let buffer_pool_clone = buffer_pool.clone();
         let completed_parts = completed_parts.clone();
         let sender_cloned = sender.clone();
         let open_file_limit = open_file_limit.clone();
+        let file_cloned = file.clone();
 
         let ctx_cloned = ctx.clone();
         let canonical_uri_cloned = canonical_uri.clone();
@@ -149,18 +152,17 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
                 let ctx = ctx_cloned.clone();
                 let file_info = file_info_clone.clone();
                 let hyper_client = hyper_client.clone();
-                let file_sem = file_sem_clone.clone();
                 let req_sem = req_sem_clone.clone();
                 let buffer_pool = buffer_pool_clone.clone();
                 let canonical_uri = canonical_uri_cloned.clone();
                 let query_uri = query_uri.clone();
                 let open_file_limit = open_file_limit.clone();
-
+                let file = file_cloned.clone();
                 async move {
                     if ctx.trailing {
-                        http_layer::upload_trailing::put_file_streaming(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri, open_file_limit).await
+                        http_layer::upload_trailing::put_file_streaming(ctx, file_info, file_read_offset, amount, &hyper_client, req_sem, file, canonical_uri, &query_uri, open_file_limit).await
                     } else {
-                        http_layer::put_file_range(ctx, file_info, start_pos, amount, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
+                        http_layer::put_file_range(ctx, file_info, file, file_read_offset, amount, &hyper_client, req_sem, buffer_pool, canonical_uri, &query_uri).await
                     }
                 }
             }, sender_cloned.clone(), |e: &anyhow::Error| {
@@ -190,6 +192,7 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
     }
 
     join_all(handles).await;
+    drop(file_lock);    // Release the file lock after all parts are uploaded   // TODO LND: Can this be released earlier in a practical way after all parts are read but before all uploads?
 
     let completed_parts = Arc::try_unwrap(completed_parts).unwrap().into_inner();
     aws_layer::complete_multipart_upload(&aws_client, &ctx.bucket, &*file_info.key, upload_id, completed_parts).await.unwrap();
@@ -199,7 +202,13 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
 async fn small_file_upload(ctx: Arc<UploadConfig>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>, open_file_limit: Arc<Semaphore>) {
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.key));
     let query_uri = "".to_string();
+    let trailing_file_lock;
 
+    if ctx.trailing_small {
+        trailing_file_lock = Some(file_sem.clone().acquire_owned().await.unwrap());
+    } else {
+        trailing_file_lock = None;
+    }
     let result = retry_on_failure_async(|| {
         let ctx = ctx.clone();
         let amount = file_info.file_size;
@@ -212,10 +221,15 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, hyper_client: Arc<PoolClient>
         let query_uri = query_uri.clone();
         let open_file_limit = open_file_limit.clone();
         async move {
+
             if ctx.trailing_small {
-                http_layer::upload_trailing::put_file_streaming(ctx, file_info, 0, amount, &hyper_client, file_sem, req_sem, canonical_uri, &query_uri, open_file_limit).await
+                let file = Arc::new(File::open(&*file_info.file_path).expect("File should exist"));
+                http_layer::upload_trailing::put_file_streaming(ctx, file_info, 0, amount, &hyper_client, req_sem, file, canonical_uri, &query_uri, open_file_limit).await
             } else {
-                http_layer::put_file(ctx, file_info, &hyper_client, file_sem, req_sem, buffer_pool, canonical_uri, &query_uri).await
+                let file_lock = file_sem.clone().acquire_owned().await.unwrap();
+                let file = Arc::new(File::open(&*file_info.file_path).expect("File should exist"));
+
+                http_layer::put_file(ctx, file_info, file, &hyper_client, file_lock, req_sem, buffer_pool, canonical_uri, &query_uri).await
             }
         }
     }, sender.clone(), |e: &anyhow::Error| {
@@ -224,6 +238,8 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, hyper_client: Arc<PoolClient>
         }
         false
     }, format!("Uploading {}", file_info.key)).await;
+
+    drop(trailing_file_lock);
 
     match result {
         Ok(metrics) => {
