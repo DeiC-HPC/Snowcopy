@@ -256,7 +256,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> Result<()>
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let config = load_config().unwrap_or_default();
+    let config = load_config()?;
     let mut app = App::new(config);
 
     if app.config.endpoints.is_empty() {

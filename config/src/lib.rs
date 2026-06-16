@@ -10,10 +10,21 @@ use util_layer::EndpointConfig;
 
 pub mod tui;
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppConfig {
+    pub version: u32,
     pub global: GlobalConfig,
     pub endpoints: Vec<Endpoint>,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            global: GlobalConfig::default(),
+            endpoints: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -45,8 +56,21 @@ pub fn load_config() -> Result<AppConfig> {
     if !path.exists() {
         return Ok(AppConfig::default());
     }
-    let content = fs::read_to_string(path)?;
-    let config: AppConfig = serde_json::from_str(&content)?;
+    let content = fs::read_to_string(&path)?;
+    let value: serde_json::Value = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse config as JSON at {}", path.display()))?;
+    
+    let version = value.get("version")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("Configuration error: missing 'version' field in config file at {}", path.display()))?;
+
+    if version != 1 {
+        //In the future, we want to handle version upgrades here automatically
+        anyhow::bail!("Configuration error: expected version 1, found version {} in config file at {}", version, path.display());
+    }
+
+    let config: AppConfig = serde_json::from_value(value)
+        .with_context(|| format!("Failed to deserialize AppConfig from {} after version check", path.display()))?;
     Ok(config)
 }
 
@@ -97,6 +121,7 @@ mod tests {
     fn test_tui_data_leak_fix() {
         use crate::tui::{App, Field, Focus, InputMode};
         let config = AppConfig {
+            version: 1,
             global: GlobalConfig::default(),
             endpoints: vec![
                 Endpoint {
@@ -157,6 +182,7 @@ mod tests {
     fn test_tui_esc_discards_changes() {
         use crate::tui::{App, Field, InputMode};
         let config = AppConfig {
+            version: 1,
             global: GlobalConfig::default(),
             endpoints: vec![
                 Endpoint {
@@ -205,5 +231,82 @@ mod tests {
             "new region".to_string(),
             "Enter should still save changes"
         );
+    }
+
+    #[test]
+    fn test_config_version_check() {
+        let config_path = std::env::temp_dir().join(format!("snowcopy_test_config_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+
+        // Cleanup function
+        let cleanup = |path: &PathBuf| {
+            if path.exists() {
+                let _ = fs::remove_file(path);
+            }
+        };
+
+        // Test missing version
+        let bad_config = serde_json::json!({
+            "global": {
+                "s3_region": "us-east-1"
+            },
+            "endpoints": []
+        });
+        fs::write(&config_path, serde_json::to_string(&bad_config).unwrap()).unwrap();
+
+        // We need to use a function that takes path to test version logic
+        fn load_config_from_path(path: PathBuf) -> Result<AppConfig> {
+            if !path.exists() {
+                return Ok(AppConfig::default());
+            }
+            let content = fs::read_to_string(&path)?;
+            let value: serde_json::Value = serde_json::from_str(&content)
+                .with_context(|| format!("Failed to parse config as JSON at {}", path.display()))?;
+            
+            let version = value.get("version")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| anyhow::anyhow!("Configuration error: missing 'version' field in config file at {}", path.display()))?;
+
+            if version != 1 {
+                anyhow::bail!("Configuration error: expected version 1, found version {} in config file at {}", version, path.display());
+            }
+
+            let config: AppConfig = serde_json::from_value(value)
+                .with_context(|| format!("Failed to deserialize AppConfig from {} after version check", path.display()))?;
+            Ok(config)
+        }
+
+        let result = load_config_from_path(config_path.clone());
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("missing 'version' field"));
+        assert!(err_msg.contains(config_path.to_str().unwrap()));
+
+        // Test wrong version
+        let wrong_version_config = serde_json::json!({
+            "version": 2,
+            "global": {
+                "s3_region": "us-east-1"
+            },
+            "endpoints": []
+        });
+        fs::write(&config_path, serde_json::to_string(&wrong_version_config).unwrap()).unwrap();
+        let result = load_config_from_path(config_path.clone());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("expected version 1, found version 2"));
+
+        // Test correct version
+        let correct_config = serde_json::json!({
+            "version": 1,
+            "global": {
+                "s3_region": "us-east-1"
+            },
+            "endpoints": []
+        });
+        fs::write(&config_path, serde_json::to_string(&correct_config).unwrap()).unwrap();
+        let result = load_config_from_path(config_path.clone());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().version, 1);
+        
+        cleanup(&config_path);
     }
 }
