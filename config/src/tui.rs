@@ -11,6 +11,7 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear as TuiClear, List, ListItem, ListState, Paragraph},
     Terminal,
 };
@@ -255,7 +256,7 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> Result<()>
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let config = load_config().unwrap_or_default();
+    let config = load_config()?;
     let mut app = App::new(config);
 
     if app.config.endpoints.is_empty() {
@@ -290,7 +291,7 @@ where
                         app.delete_endpoint()?;
                     }
                     KeyCode::Char('h') => app.show_help = !app.show_help,
-                    KeyCode::Down => {
+                    KeyCode::Down | KeyCode::Tab => {
                         match app.focus {
                             Focus::Endpoints => {
                                 app.next_endpoint();
@@ -301,7 +302,7 @@ where
                             }
                         }
                     }
-                    KeyCode::Up => {
+                    KeyCode::Up | KeyCode::BackTab => {
                         match app.focus {
                             Focus::Endpoints => {
                                 app.previous_endpoint();
@@ -354,12 +355,12 @@ where
                         app.focus = Focus::Endpoints;
                         app.input_mode = InputMode::Normal;
                     }
-                    KeyCode::Down => {
+                    KeyCode::Down | KeyCode::Tab => {
                         app.save_edit()?;
                         app.next_field();
                         app.start_editing();
                     }
-                    KeyCode::Up => {
+                    KeyCode::Up | KeyCode::BackTab => {
                         app.save_edit()?;
                         app.previous_field();
                         app.start_editing();
@@ -424,6 +425,19 @@ where
                             if let InputMode::Editing = app.input_mode {
                                 app.edit_buffer.clear();
                             }
+                        }
+                        "confirm_yes" => {
+                            if let InputMode::ConfirmDelete = app.input_mode {
+                                app.confirm_delete()?;
+                            }
+                        }
+                        "confirm_no" => {
+                            if let InputMode::ConfirmDelete = app.input_mode {
+                                app.input_mode = InputMode::Normal;
+                            }
+                        }
+                        "help" | "help_toggle_inner" => {
+                            app.show_help = !app.show_help;
                         }
                         _ => {}
                     }
@@ -499,21 +513,43 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     f.render_widget(title, chunks[0]);
 
     if app.show_help {
-        let help_text = "
-Navigation:
-  - Up/Down: Navigate endpoints (left) or fields (right)
-  - Left/Right: Switch focus between endpoints and fields
-  - Enter: Edit selected field
-  - Esc: Cancel editing
-  - Ctrl-k: Clear field (in edit mode)
-  - a: Add new endpoint
-  - d: Delete selected endpoint
-  - q: Quit
-  - h: Toggle help
-";
+        let help_button_style = Style::default().bg(Color::Blue).fg(Color::White);
+        let help_text = vec![
+            Line::from(vec![
+                Span::raw("S3 servers, fields and buttons are clickable in most modern terminals."),
+            ]),
+            Line::from(vec![
+                Span::raw("Like this button to toggle "),
+                Span::styled(" help ", help_button_style),
+            ]),
+            Line::from(""),
+            Line::from(vec![Span::styled("Navigation:", Style::default().add_modifier(Modifier::BOLD))]),
+            Line::from("  - Up/Down, Tab/Shift+Tab: Navigate S3 servers (left) or fields (right)"),
+            Line::from("  - Left/Right: Switch focus between S3 servers and fields"),
+            Line::from("  - Enter: Edit selected field"),
+            Line::from("  - Esc: Cancel editing"),
+            Line::from("  - Ctrl-k: Clear field (in edit mode)"),
+            Line::from("  - a: Add new S3 server"),
+            Line::from("  - d: Delete selected S3 server"),
+            Line::from("  - q: Quit"),
+            Line::from("  - h: Toggle help"),
+        ];
+
         let help = Paragraph::new(help_text)
             .block(Block::default().title("Help").borders(Borders::ALL));
         f.render_widget(help, chunks[1]);
+        
+        // Add the help toggle button area for the button in the help text
+        // The button is " help " which is 6 chars long
+        // It's in the second line of the help text.
+        // help_text[1] is: "like this button to toggle " (27 chars) + " help " (6 chars)
+        let help_area = chunks[1];
+        app.button_areas.insert("help_toggle_inner".to_string(), Rect {
+            x: help_area.x + 1 + 27,
+            y: help_area.y + 1 + 1, // Second line (0-indexed)
+            width: 6,
+            height: 1,
+        });
     } else {
         let body_chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -599,7 +635,7 @@ Navigation:
                 (Field::AccessKey, "S3 Access Key", endpoint.config.as_ref().map(|c| c.s3_access_key.as_str()).unwrap_or("")),
                 (Field::SecretKey, "S3 Secret Key", endpoint.config.as_ref().map(|c| c.s3_secret_key.as_str()).unwrap_or("")),
                 (Field::Url, "S3 URL", endpoint.config.as_ref().map(|c| c.s3_url.as_str()).unwrap_or("")),
-                (Field::Region, "S3 Region (non-aws s3 endpoints commonly use us-east-1)", endpoint.config.as_ref().map(|c| c.s3_region.as_str()).unwrap_or("")),
+                (Field::Region, "S3 Region (non-aws s3 servers commonly use us-east-1)", endpoint.config.as_ref().map(|c| c.s3_region.as_str()).unwrap_or("")),
             ];
 
             for (idx, (field, label, value)) in fields.iter().enumerate() {
@@ -706,66 +742,115 @@ Navigation:
         }
     }
 
-    let footer_text = match app.input_mode {
-        InputMode::Normal => match app.focus {
-            Focus::Endpoints => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate server | Right: focus fields | h: help",
-            Focus::Fields => "🖱️ q: quit | 🖱️ a: add server | 🖱️ d: delete server | Down/Up: navigate fields | Left: focus server | Enter: edit | h: help",
-        },
-        InputMode::Editing => "🖱️ Enter: save | 🖱️ Esc: cancel | Up/Down/Left: save & move | 🖱️ Ctrl-k: clear",
-        InputMode::ConfirmDelete => "Are you sure you want to delete this endpoint? (y/n)",
-    };
-
-    // Store button areas for the footer
-        
     let footer_area = chunks[2];
-    
-    // Parse footer_text to calculate exact button positions
-    let options: Vec<&str> = footer_text.split(" | ").collect();
-    let mut x_offset = footer_area.x + 1;
+    f.render_widget(TuiClear, footer_area); // Clear the footer area, so no artifacts remain
 
-    for option in options {
-        // Only process options with mouse icon
-        if option.contains("🖱️") {
-            // Extract button ID from pattern like "🖱️ q: quit" or "🖱️ Enter: save"
-            let id = if let Some(colon_pos) = option.find(':') {
-                let before_colon = &option[..colon_pos];
-                if let Some(space_pos) = before_colon.rfind(' ') {
-                    before_colon[space_pos + 1..].trim()
-                } else {
-                    ""
-                }
+    let mut footer_spans = Vec::new();
+    app.button_areas.clear();
+
+    match app.input_mode {
+        InputMode::Normal => {
+            let mut buttons = vec![
+                ("q", "quit", "quit"),
+                ("a", "add server", "add"),
+                ("d", "delete server", "delete"),
+            ];
+
+            if app.show_help {
+                buttons.push(("h", "close help", "help"));
             } else {
-                ""
-            };
+                buttons.push(("h", "help", "help"));
+            }
 
-            if !id.is_empty() {
-                let button_id = match id {//TODO JON: This can all be refactored by having a list of commands, that then generate a footnote and clickable areas.
-                    "q" => "quit",
-                    "a" => "add",
-                    "d" => "delete",
-                    "Enter" => "enter",
-                    "Esc" => "cancel",
-                    "Ctrl-k" => "clear",
-                    //TODO JON: add yes/no confirmation. Perhaps a popup?
-                    _ => id,
-                };
-
-                let width = option.chars().count() as u16;
-                app.button_areas.insert(button_id.to_string(), Rect {
-                    x: x_offset,
+            let mut current_x = footer_area.x + 1;
+            for (key, label, id) in buttons {
+                let text = format!(" {}: {} ", key, label);
+                let width = text.chars().count() as u16;
+                
+                app.button_areas.insert(id.to_string(), Rect {
+                    x: current_x,
                     y: footer_area.y + 1,
                     width,
                     height: 1,
                 });
+
+                footer_spans.push(Span::styled(
+                    text,
+                    Style::default().bg(Color::Blue).fg(Color::White),
+                ));
+                footer_spans.push(Span::raw(" "));
+                current_x += width + 1;
+            }
+
+            if !app.show_help {
+                let help_text = match app.focus {
+                    Focus::Endpoints => "| Down/Up: navigate server | Right: focus fields",
+                    Focus::Fields => "| Down/Up: navigate fields | Left: focus server | Enter: edit",
+                };
+                footer_spans.push(Span::raw(help_text));
             }
         }
-        // Move offset for next option (including " | " separator which is 3 chars)
-        x_offset += option.chars().count() as u16 + 3;
-    }
-        f.render_widget(TuiClear, footer_area); // Clear the footer area, so no artifacts remain
+        InputMode::Editing => {
+            let buttons = vec![
+                ("Enter", "save", "enter"),
+                ("Esc", "cancel edit", "cancel"),
+                ("Ctrl-k", "clear", "clear"),
+            ];
 
-        let footer = Paragraph::new(footer_text)
-        .block(Block::default().borders(Borders::ALL));
-    f.render_widget(footer, chunks[2]);
+            let mut current_x = footer_area.x + 1;
+            for (key, label, id) in buttons {
+                let text = format!(" {}: {} ", key, label);
+                let width = text.chars().count() as u16;
+
+                app.button_areas.insert(id.to_string(), Rect {
+                    x: current_x,
+                    y: footer_area.y + 1,
+                    width,
+                    height: 1,
+                });
+
+                footer_spans.push(Span::styled(
+                    text,
+                    Style::default().bg(Color::Blue).fg(Color::White),
+                ));
+                footer_spans.push(Span::raw(" "));
+                current_x += width + 1;
+            }
+            footer_spans.push(Span::raw("| Up/Down/Left: save & move"));
+        }
+        InputMode::ConfirmDelete => {
+            footer_spans.push(Span::raw("Are you sure you want to delete this endpoint? "));
+            
+            let mut current_x = footer_area.x + 1 + "Are you sure you want to delete this endpoint? ".chars().count() as u16;
+            
+            let buttons = vec![
+                ("y", "Yes", "confirm_yes"),
+                ("n", "No", "confirm_no"),
+            ];
+
+            for (key, label, id) in buttons {
+                let text = format!(" {}: {} ", key, label);
+                let width = text.chars().count() as u16;
+
+                app.button_areas.insert(id.to_string(), Rect {
+                    x: current_x,
+                    y: footer_area.y + 1,
+                    width,
+                    height: 1,
+                });
+
+                footer_spans.push(Span::styled(
+                    text,
+                    Style::default().bg(Color::Red).fg(Color::White),
+                ));
+                footer_spans.push(Span::raw(" "));
+                current_x += width + 1;
+            }
+        }
     }
+
+    let footer = Paragraph::new(Line::from(footer_spans))
+        .block(Block::default().borders(Borders::ALL));
+    f.render_widget(footer, footer_area);
+}
 }
