@@ -21,7 +21,9 @@ use util_layer::{DownloadConfig, FileInfo, S3Object};
 use http_layer::integrity::{reconstructable_multipart_etag, IntegrityAlgorithm};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::task::JoinSet;
+use http_layer::filesystem_checker::is_valid_s3_key_for_local_filesystem;
 use util_layer::cc_util::CommandCenterEvent;
+use util_layer::url_encoder::url_encode_fast;
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.
@@ -53,7 +55,7 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
     let (file_sem, req_sem, download_file_concurrency) = auto_tune_download(ctx.clone(), cc_tx.clone());
     let task_sem = Arc::new(Semaphore::new(req_sem.available_permits() * 2));
 
-    let (disk_write_tx, disk_write_rx) = mpsc::channel::<WriteMsg>(2048); //TODO JON: tune + configure buffer size. This matters also for file descriptor limit
+    let (disk_write_tx, disk_write_rx) = mpsc::channel::<WriteMsg>(2048); //TODO JON: tune + configure buffer size. This matters also for file descriptor limit and memory usage
     http_layer::download::spawn_global_writers(disk_write_rx, file_sem.available_permits(), cc_tx.clone());
 
     let mut created_dirs: HashSet<PathBuf> = HashSet::new();
@@ -114,6 +116,13 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
                 object.chunk_size = chunk_size;
                 object.etag = etag;
                 object.sha256_checksum = sha256;
+                object.aws_uri_encoded_key = url_encode_fast(&object.key, false);
+
+                if !is_valid_s3_key_for_local_filesystem(&object.key){
+                    cc_tx.send(CommandCenterEvent::Log(format!("Skipping invalid S3 key. It cannot be mapped to a local file: {}", object.key))).expect("Failed to send message. This should never happen.");
+                    //TODO JON: we need to ensure that we return a non-zero return value. Should we notify the command center and give it the responsibility handle that?
+                    return;
+                }
 
                 let should_download = should_download_object(&mut object);
 
@@ -224,12 +233,12 @@ async fn download_object(pool_client: Arc<PoolClient>, config: Arc<DownloadConfi
         //simple download
         let file_info = Arc::new(FileInfo {
             file_path: object.local_path.clone(),
-            key: object.key.clone(),
+            aws_uri_encoded_key: object.aws_uri_encoded_key.clone(), //TODO JON: I don't think download need this at all. When changing to use tower, refactor this.
             file_size: object.size as u64,
             modified_time: object.modified_time,
         });
 
-        let canonical_uri = Arc::new(format!("/{}/{}", &config.bucket, object.key));
+        let canonical_uri = Arc::new(format!("/{}/{}", &config.bucket, object.aws_uri_encoded_key));
         let query_uri = String::new();
 
         let integrity_result = download_full_file_and_check_integrity(pool_client.clone(), config.clone(), object.clone(), req_sem.clone(), cc_sender.clone(), disk_write_tx.clone(), file_info.clone(), canonical_uri.clone(), query_uri.clone()).await;

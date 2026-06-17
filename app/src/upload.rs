@@ -17,6 +17,7 @@ use util_layer::snow_errors::SnowCopyError;
 use util_layer::{FileInfo, UploadConfig};
 use util_layer::constants;
 use walkdir::WalkDir;
+use util_layer::url_encoder::url_encode_fast;
 use util_layer::constants::{CHUNK_SIZE, MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY};
 
 pub async fn upload(ctx: Arc<UploadConfig>) {
@@ -105,7 +106,7 @@ async fn upload_file(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, hyper_c
 }
 
 async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>, open_file_limit: Arc<Semaphore>) {
-    let mut create_multipart_upload = aws_client.create_multipart_upload().bucket(&ctx.bucket).key(&*file_info.key);
+    let mut create_multipart_upload = aws_client.create_multipart_upload().bucket(&ctx.bucket).key(&*file_info.aws_uri_encoded_key);
 
     if let Some(mtime) = file_info.modified_time {
         create_multipart_upload = create_multipart_upload.metadata("mtime", util_layer::time::time_to_float_string(mtime));
@@ -124,7 +125,7 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
     let completed_parts = Arc::new(Mutex::new(Vec::new()));
     let mut handles = Vec::new();
 
-    let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.key));
+    let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.aws_uri_encoded_key));
 
     for i in 0..chunk_amount_u64 {
         let start_pos = i * CHUNK_SIZE;
@@ -168,7 +169,7 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
                     return snow_error.is_retryable();
                 }
                 false
-            }, format!("Uploading part {} of {}", part_number, file_info_clone.key)).await;
+            }, format!("Uploading part {} of {}", part_number, file_info_clone.aws_uri_encoded_key)).await;
 
             match result {
                 Ok((etag, metrics)) => {
@@ -192,12 +193,12 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
     join_all(handles).await;
 
     let completed_parts = Arc::try_unwrap(completed_parts).unwrap().into_inner();
-    aws_layer::complete_multipart_upload(&aws_client, &ctx.bucket, &*file_info.key, upload_id, completed_parts).await.unwrap();
+    aws_layer::complete_multipart_upload(&aws_client, &ctx.bucket, &*file_info.aws_uri_encoded_key, upload_id, completed_parts).await.unwrap();
     let _ = sender.send(CommandCenterEvent::FileTransferred(file_info.file_size));
 }
 
 async fn small_file_upload(ctx: Arc<UploadConfig>, hyper_client: Arc<PoolClient>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, sender: UnboundedSender<CommandCenterEvent>, open_file_limit: Arc<Semaphore>) {
-    let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.key));
+    let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.aws_uri_encoded_key));
     let query_uri = "".to_string();
 
     let result = retry_on_failure_async(|| {
@@ -223,7 +224,7 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, hyper_client: Arc<PoolClient>
             return snow_err.is_retryable();
         }
         false
-    }, format!("Uploading {}", file_info.key)).await;
+    }, format!("Uploading {}", file_info.aws_uri_encoded_key)).await;
 
     match result {
         Ok(metrics) => {
@@ -255,7 +256,7 @@ fn check_already_exists(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSender<Command
                     let cc_tx = cc_tx_checker.clone();
 
                     checker_set.spawn(async move {
-                        let (_exists_at_target, size, s3_mtime, _chunk_size, _etag, _sha256_checksum) = get_s3_metadata(&client, &bucket, &file_info.key).await;
+                        let (_exists_at_target, size, s3_mtime, _chunk_size, _etag, _sha256_checksum) = get_s3_metadata(&client, &bucket, &file_info.aws_uri_encoded_key).await;
 
                         if should_upload(&file_info, size, s3_mtime).await {
                             upload_tx.send(Ok(file_info)).await.expect("Should never fail.")
@@ -300,8 +301,9 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
 
         cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).expect("Failed to send message to command center. Should never happen.");
 
-        let key = base_path.file_name().unwrap().to_str().unwrap().to_string();
-        let file_info = FileInfo { file_path : base_path, key, file_size, modified_time };
+        let key = base_path.file_name().unwrap().to_str().unwrap();
+        let aws_uri_encoded_key = url_encode_fast(key, true);
+        let file_info = FileInfo { file_path : base_path, aws_uri_encoded_key, file_size, modified_time };
         tx.send(Ok(file_info)).await.unwrap();
         let _ = cc_tx.send(CommandCenterEvent::StatusChanged(Status::Transferring));
 
@@ -328,7 +330,7 @@ pub async fn walk_directory(base_path: PathBuf, cc_tx: UnboundedSender<CommandCe
 
                         cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).expect("Failed to send message to command center. Should never happen.");
 
-                        let file_info = FileInfo { file_path, key, file_size, modified_time };
+                        let file_info = FileInfo { file_path, aws_uri_encoded_key: key, file_size, modified_time };
                         tx.blocking_send(Ok(file_info)).expect("Failed to send message. Should never happen.");
                     }
                 }

@@ -3,6 +3,7 @@ mod signer;
 pub mod download;
 pub mod integrity;
 pub mod upload_trailing;
+pub mod filesystem_checker;
 
 use crate::signer::CredentialScope;
 use anyhow::Result;
@@ -28,7 +29,7 @@ use tokio::time::Instant;
 use util_layer::cc_util::CcLoadAndTransfer;
 use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
 use util_layer::snow_errors::{S3Error, SnowCopyError};
-use util_layer::{FileInfo, UploadConfig, DownloadConfig, S3ConfigTrait};
+use util_layer::{DownloadConfig, FileInfo, S3ConfigTrait, UploadConfig};
 
 const READ_BUFFER_SIZE: usize = 256 * 1024;
 pub struct BufferPool {

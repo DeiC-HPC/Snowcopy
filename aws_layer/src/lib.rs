@@ -23,6 +23,7 @@ use util_layer::cc_util::Status::Transferring;
 use util_layer::constants::{MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, PAYLOAD_SHA256_METADATA_KEY};
 use util_layer::time::float_string_to_time;
 use util_layer::{constants, EndpointConfig, S3Object};
+use util_layer::url_encoder::url_encode_fast;
 
 pub type AWSClient = Client;
 pub type CompletedPartAws = CompletedPart;
@@ -209,6 +210,7 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
 
                                 let s3_object = S3Object {
                                     key: key.to_string(),
+                                    aws_uri_encoded_key: url_encode_fast(key, true),
                                     local_path,
                                     size,
                                     modified_time : None, //No fallback value. Either we have the one from s3 metadata or we dont care
