@@ -54,6 +54,7 @@ mod tests {
     fn test_can_reconstruct_etag() {
         let mut obj = S3Object {
             key: "test".to_string(),
+            aws_uri_encoded_key: "test".to_string(),
             local_path: std::path::PathBuf::from("test"),
             size: 100,
             modified_time: None,

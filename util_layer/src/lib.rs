@@ -6,6 +6,7 @@ pub mod retry;
 pub mod pattern;
 pub mod snow_errors;
 pub mod download;
+pub mod url_encoder;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -175,6 +176,7 @@ pub enum SnowConfig {
 #[derive(Debug, Clone)]
 pub struct S3Object {
     pub key: String,
+    pub aws_uri_encoded_key: String,
     pub local_path: PathBuf,
     pub size: i64,
     pub modified_time: Option<SystemTime>,
@@ -186,7 +188,7 @@ pub struct S3Object {
 #[derive(Clone)]
 pub struct FileInfo {
     pub file_path: PathBuf,
-    pub key: String,
+    pub aws_uri_encoded_key: String,
     pub file_size: u64,
     pub modified_time: Option<SystemTime>,
 }
