@@ -44,41 +44,46 @@ pub struct CommandCenter {
     silent : bool,
     stats: bool,
     mode: Mode,
+    cancellation_token_of_all_ongoing_tasks: tokio_util::sync::CancellationToken,
 }
 
 
 impl CommandCenter {
-    pub fn new_upload(config: &util_layer::UploadConfig) -> Self {
+    pub fn new_upload(config: &util_layer::UploadConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken) -> Self {
         CommandCenter {
             silent: config.silent,
             stats: config.stats,
             mode: Mode::Upload,
+            cancellation_token_of_all_ongoing_tasks
         }
     }
 
-    pub fn new_download(config: &util_layer::DownloadConfig) -> Self {
+    pub fn new_download(config: &util_layer::DownloadConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken) -> Self {
         CommandCenter {
             silent: config.silent,
             stats: config.stats,
             mode: Mode::Download,
+            cancellation_token_of_all_ongoing_tasks
         }
     }
 
     #[allow(dead_code)]
-    pub fn new_list(config: &util_layer::ListConfig) -> Self {
+    pub fn new_list(config: &util_layer::ListConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken) -> Self {
         CommandCenter {
             silent: config.silent,
             stats: false,
             mode: Mode::List,
+            cancellation_token_of_all_ongoing_tasks
         }
     }
 
     #[allow(dead_code)]
-    pub fn new_remove(config: &util_layer::RemoveConfig) -> Self {
+    pub fn new_remove(config: &util_layer::RemoveConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken) -> Self {
         CommandCenter {
             silent: config.silent,
             stats: false,
             mode: Mode::Remove,
+            cancellation_token_of_all_ongoing_tasks
         }
     }
 }
@@ -97,26 +102,18 @@ impl CC for CommandCenter {
 
         let mode = self.mode.clone();
         let stats = self.stats;
+        let cancellation_token_of_all_ongoing_tasks = self.cancellation_token_of_all_ongoing_tasks.clone();
         let handle = tokio::task::spawn(async move {
             let mut file_transferred_count = 0u64;
             let mut total_integrity_checked_files = 0u64;
             let mut total_retries = 0u64;
-            let mut total_file_permit_time = 0f64;
-            let mut total_req_permit_time = 0f64;
-            let mut total_file_work_time = 0f64;
-            let mut total_req_work_time = 0f64;
 
             let _ = ui_tx.send(UiEvent::Message(Status::Discovering.to_string()));
 
             while let Some(ev) = cc_rx.recv().await {
                 match ev {
-                    CommandCenterEvent::PartTransferred(metrics) => {
-                        total_file_permit_time += metrics.file_sem_acquire_time_secs;
-                        total_req_permit_time += metrics.req_sem_acquire_time_secs;
-                        total_file_work_time += metrics.file_sem_work_time_secs;
-                        total_req_work_time += metrics.req_sem_work_time_secs;
-
-                        let _ = ui_tx.send(UiEvent::TransferredData(metrics.amount));
+                    CommandCenterEvent::PartTransferred(amount) => {
+                        let _ = ui_tx.send(UiEvent::TransferredData(amount));
                     }
                     CommandCenterEvent::FileTransferred(bytes) => {
                         file_transferred_count += 1;
@@ -153,17 +150,17 @@ impl CC for CommandCenter {
                             total_integrity_checked_files += 1;
                         }
                     }
+                    CommandCenterEvent::FatalError(err) => {
+                        ui_tx.send(UiEvent::Println(format!("Fatal error: {}", err))).expect("Should never fail");
+                        cancellation_token_of_all_ongoing_tasks.cancel();
+                        return;
+                    }
                 }
             }
 
             //We are out of the loop, the program is terminating:
-
             if stats {
                 ui_tx.send(UiEvent::Println(format!("Total files completed: {}", file_transferred_count))).expect("Should never fail");
-                ui_tx.send(UiEvent::Println(format!("Total time spent acquiring file permits: {:.2}s", total_file_permit_time))).expect("Should never fail"); //TODO Jon: Is this metric actually relevant?
-                ui_tx.send(UiEvent::Println(format!("Total time spent acquiring request permits: {:.2}s", total_req_permit_time))).expect("Should never fail");
-                ui_tx.send(UiEvent::Println(format!("Total time spent working on disk I/O: {:.2}s", total_file_work_time))).expect("Should never fail");
-                ui_tx.send(UiEvent::Println(format!("Total time spent working on request I/O: {:.2}s", total_req_work_time))).expect("Should never fail");
             }
 
             drop(ui_tx); //This allows the UI task to exit gracefully when all files have been uploaded

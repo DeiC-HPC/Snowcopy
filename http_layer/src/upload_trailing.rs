@@ -1,23 +1,21 @@
-use std::io::Write;
+use crate::signer::{sha256_hex, ChunkSigner, CredentialScope};
+use crate::{signer, HyperClient, StreamingBody};
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use hyper::body::{Body, Frame};
+use hyper::{Method, Request};
 use std::collections::HashMap;
+use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::SystemTime;
-use tokio::sync::Semaphore;
-use tokio::time::Instant;
 use tokio::fs::File;
-use http_body_util::{BodyExt};
 use tokio::io::{AsyncRead, AsyncSeekExt};
-use hyper::{Method, Request};
-use hyper::body::{Body, Frame};
-use bytes::Bytes;
-use util_layer::{FileInfo, UploadConfig};
-use util_layer::cc_util::CcLoadAndTransfer;
+use tokio::sync::Semaphore;
 use util_layer::constants::{AMZ_CHECKSUM_SHA256, AMZ_CHUNK_SIGNATURE_HEADER, AMZ_STREAMING_TRAILER, AMZ_TRAILER_SIGNATURE, AWS_ALGORITHM, CHUNK_SIGNATURE_LENGTH, EMPTY_PAYLOAD_SHA256, TRAILER_HASH_LENGTH};
 use util_layer::snow_errors::SnowCopyError;
-use crate::{signer, PoolClient, StreamingBody};
-use crate::signer::{sha256_hex, ChunkSigner, CredentialScope};
+use util_layer::{FileInfo, UploadConfig};
 
 /// Upload a file using streaming for trailing headers.
 pub async fn put_file_streaming(
@@ -25,18 +23,15 @@ pub async fn put_file_streaming(
     file_info: Arc<FileInfo>,
     from: u64,
     amount: u64,
-    client: &PoolClient,
+    client: &HyperClient,
     file_sem: Arc<Semaphore>,
-    req_sem: Arc<Semaphore>,
-    canonical_uri: Arc<String>,
+    req_sem: &Semaphore,
+    canonical_uri: &String,
     query_uri: &String,
-    open_file_limit: Arc<Semaphore>,
-) -> anyhow::Result<(String, CcLoadAndTransfer)> {
-    let file_permit_start = Instant::now();
+    open_file_limit: &Semaphore,
+) -> anyhow::Result<(String, u64)> {
     let open_file_lock = open_file_limit.acquire().await?;
-    let file_permit_elapsed = file_permit_start.elapsed();
 
-    let file_work_start = Instant::now();
     let mut file = File::open(&*file_info.file_path).await?;
 
     if from > 0 {
@@ -45,7 +40,7 @@ pub async fn put_file_streaming(
 
     let req = create_streaming_req_trailing_checksum(
         ctx.clone(),
-        canonical_uri.clone(),
+        canonical_uri,
         query_uri,
         file,
         amount,
@@ -54,15 +49,8 @@ pub async fn put_file_streaming(
         ctx.trailing_chunk_size
     )?;
 
-    let file_work_elapsed = file_work_start.elapsed();
-
-    let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
-    let req_permit_elapsed = req_permit_start.elapsed();
-
-    let req_work_start = Instant::now();
     let resp = client.request(req).await?;
-    let req_work_elapsed = req_work_start.elapsed();
 
     drop(permit);
     drop(open_file_lock);
@@ -85,18 +73,12 @@ pub async fn put_file_streaming(
         return Err(SnowCopyError::MissingRequiredHeader("etag").into());
     }
 
-    Ok((etag.unwrap(), CcLoadAndTransfer {
-        amount,
-        file_sem_work_time_secs: file_work_elapsed.as_secs_f64(),
-        file_sem_acquire_time_secs: file_permit_elapsed.as_secs_f64(),
-        req_sem_work_time_secs: req_work_elapsed.as_secs_f64(),
-        req_sem_acquire_time_secs: req_permit_elapsed.as_secs_f64(),
-    }))
+    Ok((etag.unwrap(), amount))
 }
 
 fn create_streaming_req_trailing_checksum(
     ctx: Arc<UploadConfig>,
-    canonical_uri: Arc<String>,
+    canonical_uri: &String,
     query_uri: &String,
     file: File,
     file_size: u64,
@@ -151,7 +133,7 @@ fn create_streaming_req_trailing_checksum(
         &credential_scope,
         AWS_ALGORITHM,
         &signed_headers,
-        canonical_uri.clone(),
+        canonical_uri,
         query_uri,
     );
 
@@ -198,7 +180,7 @@ impl Unpin for StreamingFileChunkedBody {}
 /// Inner state that can be safely mutated
 pub struct StreamingFileChunkedBodyInner {
     /// The raw payload data
-    file: Option<Pin<Box<tokio::fs::File>>>,
+    file: Option<Pin<Box<File>>>,
     /// Remaining bytes to read from the file
     remaining: u64,
     /// Semaphore to protect file access

@@ -1,4 +1,4 @@
-use crate::{create_and_sign_req, map_s3_error, signer, PoolClient};
+use crate::{create_and_sign_req, map_s3_error, signer, HyperClient};
 use anyhow::Error;
 use bytes::Bytes;
 use http_body_util::BodyExt;
@@ -7,27 +7,23 @@ use hyper::Method;
 use std::cmp;
 use std::collections::HashMap;
 use std::fs::File;
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender};
 use tokio::sync::Semaphore;
 use tokio::task;
-use util_layer::cc_util::{CcLoadAndTransfer, CommandCenterEvent};
+use util_layer::cc_util::CommandCenterEvent;
 use util_layer::constants::{AWS_ALGORITHM, DOWNLOAD_CHUNK_SIZE, DOWNLOAD_DIRECT_WRITE_FRAME_THRESHOLD, EMPTY_PAYLOAD_SHA256};
 use util_layer::download::{FileCompletionTracker, WriteMsg};
 use util_layer::{FileInfo, DownloadConfig};
 use crate::integrity::IntegrityAlgorithm;
 
-pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfig>, pool_client: &Arc<PoolClient>, req_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, fd : Arc<File>, disk_write_tx: Sender<WriteMsg>, tracker: Arc<FileCompletionTracker>, hash_algo : IntegrityAlgorithm) -> std::result::Result<(u64, Option<String>), Error> {
+pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfig>, pool_client: &Arc<HyperClient>, req_sem: Arc<Semaphore>, canonical_uri: &String, query_uri: &String, fd : Arc<File>, disk_write_tx: Sender<WriteMsg>, tracker: Arc<FileCompletionTracker>, hash_algo : IntegrityAlgorithm) -> Result<(u64, Option<String>), Error> {
     let range = format!("bytes={}-{}", start, end);
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
     header_map.insert("range".to_string(), range);
 
-    let req = create_and_sign_req(config.clone(), canonical_uri.clone(), query_uri, None, Method::GET, &header_map)?;
+    let req = create_and_sign_req(config.clone(), canonical_uri, query_uri, None, Method::GET, &header_map)?;
 
     let req_permit = req_sem.acquire().await.expect("Should never fail");
     let resp = pool_client.request(req).await?;
@@ -41,7 +37,7 @@ pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfi
 
     let mut body = resp.into_body();
 
-    let (bytes_read, hash) = download_body_to_buffer_and_offload_to_disk_writers(start, fd, disk_write_tx, &mut body, tracker, (end - start + 1) as usize, hash_algo).await?;
+    let (bytes_read, hash) = download_body_to_buffer_and_offload_to_disk_writers(start, fd, disk_write_tx, &mut body, tracker, (end - start + 1) as usize, hash_algo).await?; //TODO AJON: dependency inject
 
     if bytes_read != end - start + 1 {
         return Err(anyhow::anyhow!("Partial download failed. Expected {} bytes, got {}", end - start + 1, bytes_read));
@@ -72,9 +68,9 @@ async fn download_body_to_buffer_and_offload_to_disk_writers(start: u64, fd: Arc
             }
 
             //Large enough tcp frame that we can just pass it directly to disk writers
-            if data.len() >= DOWNLOAD_DIRECT_WRITE_FRAME_THRESHOLD { //we can save time by not copying data into buffer
+            if data.len() >= DOWNLOAD_DIRECT_WRITE_FRAME_THRESHOLD { //we can save time by not copying data into the buffer
                 if !buffer.is_empty() {
-                    //flush current buffer before new frame directly to disk writers
+                    //flush the current buffer before sending the new frame directly to disk writers
                     let buffered = std::mem::replace(&mut buffer, Vec::with_capacity(cmp::min(DOWNLOAD_CHUNK_SIZE, file_size)));
 
                     disk_write_tx
@@ -129,16 +125,29 @@ async fn download_body_to_buffer_and_offload_to_disk_writers(start: u64, fd: Arc
 }
 
 #[cfg(unix)]
-fn write_at_offset(file: &File, data: &[u8], offset: u64) -> std::io::Result<usize> {
-    file.write_at(data, offset)
+impl WriteAt for std::fs::File {
+    fn write_at(&self, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+        use std::os::unix::fs::FileExt;
+        self.write_at(buf, offset)
+    }
 }
 
 #[cfg(windows)]
-fn write_at_offset(file: &File, data: &[u8], offset: u64) -> std::io::Result<usize> {
-    file.seek_write(data, offset)
+impl WriteAt for File {
+    fn write_at(&self, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+        use std::os::windows::fs::FileExt;
+        self.seek_write(buf, offset)
+    }
 }
 
-pub async fn get_file(config: Arc<DownloadConfig>, file_info: Arc<FileInfo>, client: &PoolClient, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, disk_write_tx: Sender<WriteMsg>) -> Result<Option<String>, Error> {
+
+trait WriteAt { //Abstract to make it more testable
+    fn write_at(&self, buf: &[u8], offset: u64) -> std::io::Result<usize>;
+}
+
+
+
+pub async fn get_file(config: Arc<DownloadConfig>, file_info: Arc<FileInfo>, client: &HyperClient, canonical_uri: &String, query_uri: &String, req_sem: Arc<Semaphore>, disk_write_tx: Sender<WriteMsg>) -> Result<Option<String>, Error> {
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
 
@@ -193,22 +202,12 @@ pub fn spawn_global_writers(
 
                 match msg {
                     Some((file, offset, data, tracker)) => {
-                        if let Err(e) = write_at_offset(&file, &data, offset) {
+                        if let Err(e) = &file.write_at(&data, offset) {
                             eprintln!("write error: {}", e); //TODO JON: Should we just retry? But what kind of local IO error would benefit from that?
                             //probably panic?
                         } else {
                             tracker.complete_write(&file, data.len(), cc_sender.clone());
-
-                            let transfer_metrics = CcLoadAndTransfer { //TODO JON: cleaner metrics. Perhaps optional.
-                                amount: data.len() as u64,
-                                file_sem_work_time_secs: 0.0,
-                                file_sem_acquire_time_secs: 0.0,
-                                req_sem_work_time_secs: 0.0,
-                                req_sem_acquire_time_secs: 0.0,
-                            };
-
-                            cc_sender.send(CommandCenterEvent::PartTransferred(transfer_metrics)).unwrap();
-
+                            cc_sender.send(CommandCenterEvent::PartTransferred(data.len() as u64)).unwrap();
                         }
                     }
                     None => break,

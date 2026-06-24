@@ -15,18 +15,16 @@ use hyper_util::{
     client::legacy::{connect::HttpConnector, Client},
     rt::TokioExecutor,
 };
-use openssl::hash::{Hasher, MessageDigest};
 use openssl::base64;
+use openssl::hash::{Hasher, MessageDigest};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
-use url::Url;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::task::JoinSet;
-use tokio::time::Instant;
-use util_layer::cc_util::CcLoadAndTransfer;
+use url::Url;
 use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
 use util_layer::snow_errors::{S3Error, SnowCopyError};
 use util_layer::{DownloadConfig, FileInfo, S3ConfigTrait, UploadConfig};
@@ -74,9 +72,9 @@ impl BufferPool {
 // Public type aliases so app can use the exact type
 pub type Https = hyper_rustls::HttpsConnector<HttpConnector>;
 pub type StreamingBody = BoxBody<Bytes, std::io::Error>;
-pub type PoolClient = Client<Https, StreamingBody>;
+pub type HyperClient = Client<Https, StreamingBody>;
 
-pub fn build_https_client() -> PoolClient {
+pub fn build_https_client() -> HyperClient {
     use hyper_rustls::HttpsConnectorBuilder;
 
     let mut http = HttpConnector::new();
@@ -94,19 +92,13 @@ pub fn build_https_client() -> PoolClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {
-    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(0, None, ctx, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
+pub async fn put_file(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64)> {
+    let req = create_in_memory_body_put_with_hashes(0, None, ctx, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
-    let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
-    let req_permit_elapsed = req_permit_start.elapsed();
-
-    let req_work_start = Instant::now();
     let resp = client.request(req).await?;
-    let req_work_elapsed = req_work_start.elapsed();
 
     let status = resp.status();
-
     if !status.is_success() {
         let s3_err = map_s3_error(resp).await;
         drop(permit);
@@ -123,26 +115,15 @@ pub async fn put_file(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, client: 
     resp.into_body().collect().await?;
     drop(permit);
 
-    let transfer_metrics = CcLoadAndTransfer {
-        amount : file_info.file_size,
-        file_sem_work_time_secs: file_work_elapsed.as_secs_f64(),
-        file_sem_acquire_time_secs: file_permit_elapsed.as_secs_f64(),
-        req_sem_work_time_secs: req_work_elapsed.as_secs_f64(),
-        req_sem_acquire_time_secs: req_permit_elapsed.as_secs_f64(),
-    };
-    Ok((etag.unwrap(), transfer_metrics))
+    Ok((etag.unwrap(), file_info.file_size))
 }
 
-pub async fn put_file_range(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &PoolClient, file_sem: Arc<Semaphore>, req_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(String, CcLoadAndTransfer)> {
-    let (req, file_work_elapsed, file_permit_elapsed) = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, file_info, file_sem, buffer_pool, canonical_uri, query_uri).await?;
+pub async fn put_file_range(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64)> {
+    let req = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, file_info, file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
-    let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await.expect("Should never fail");
-    let req_permit_elapsed = req_permit_start.elapsed();
 
-    let req_work_start = Instant::now();
     let resp = client.request(req).await?; //send_with_logging(client, req).await?;
-    let req_work_elapsed = req_work_start.elapsed();
     drop(permit);
 
     let status = resp.status();
@@ -164,23 +145,12 @@ pub async fn put_file_range(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, fr
         return Err(SnowCopyError::MissingRequiredHeader("etag").into());
     }
 
-    let transfer_metrics = CcLoadAndTransfer {
-        amount,
-        file_sem_work_time_secs: file_work_elapsed.as_secs_f64(),
-        file_sem_acquire_time_secs: file_permit_elapsed.as_secs_f64(),
-        req_sem_work_time_secs: req_work_elapsed.as_secs_f64(),
-        req_sem_acquire_time_secs: req_permit_elapsed.as_secs_f64(),
-    };
-
-    Ok((etag.unwrap(), transfer_metrics))
+    Ok((etag.unwrap(), amount))
 }
 
-async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, file_sem: Arc<Semaphore>, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String) -> Result<(Request<StreamingBody>, std::time::Duration, std::time::Duration)> {
-    let file_permit_start = Instant::now();
+async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, file_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(Request<StreamingBody>)> {
     let file_lock = file_sem.acquire().await?;
-    let file_permit_elapsed = file_permit_start.elapsed();
 
-    let file_work_start = Instant::now();
     let mut file = File::open(&*file_info.file_path).await?;
 
     let amount = match amount_option {
@@ -194,6 +164,7 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     // Ensure the buffer is large enough if amount > chunk_size,
     // though in this app amount is expected to be <= CHUNK_SIZE.
+    //TODO JON: We have to be careful here, as we might end up using more memory than we intend. We should have a known limit from the beginning or use multiple chunks.
     let mut buffer = buffer_pool.get().await;
     if buffer.len() < amount as usize {
         buffer.resize(amount as usize, 0u8);
@@ -225,7 +196,6 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
         total_read += to_read;
     }
     drop(file);
-    let file_work_elapsed = file_work_start.elapsed();
     drop(file_lock);
 
     let sha256_hex = signer::finish_sha256_hex(sha_hasher);
@@ -265,10 +235,10 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
     let bytes = Bytes::from_owner(body_buffer);
     let req = create_and_sign_req(ctx, canonical_uri, query_uri, Some(&bytes), Method::PUT, &header_map)?;
 
-    Ok((req, file_work_elapsed, file_permit_elapsed))
+    Ok(req)
 }
 
-pub async fn get_file_range(ctx: Arc<DownloadConfig>, client: &PoolClient, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, start: u64, end: u64) -> Result<PooledBuffer> {
+pub async fn get_file_range(ctx: Arc<DownloadConfig>, client: &HyperClient, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, start: u64, end: u64) -> Result<PooledBuffer> {
     let total_range_size = (end - start + 1) as usize;
     let mut buffer = buffer_pool.get().await;
     let buffer_ptr = buffer.as_mut_ptr() as usize;
@@ -298,7 +268,7 @@ pub async fn get_file_range(ctx: Arc<DownloadConfig>, client: &PoolClient, buffe
             header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
             header_map.insert("range".to_string(), sub_range);
 
-            let req = create_and_sign_req(ctx, canonical_uri, &query_uri, None, Method::GET, &header_map)?;
+            let req = create_and_sign_req(ctx, &canonical_uri, &query_uri, None, Method::GET, &header_map)?;
             let _permit = req_sem.acquire().await.expect("Should never fail");
             let resp = client.request(req).await?;
 
@@ -345,7 +315,7 @@ pub async fn get_file_range(ctx: Arc<DownloadConfig>, client: &PoolClient, buffe
 }
 
 
-fn create_and_sign_req<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: Arc<String>, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>) -> Result<Request<StreamingBody>> {
+fn create_and_sign_req<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: &String, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>) -> Result<Request<StreamingBody>> {
     let endpoint = ctx.endpoint();
     let url_parsed = Url::parse(&endpoint.s3_url).expect("Invalid S3 URL");
     let host = url_parsed.host_str().unwrap_or("");
@@ -370,7 +340,7 @@ fn create_and_sign_req<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: Arc<String>
         &credential_scope,
         AWS_ALGORITHM,
         &signed_headers,
-        canonical_uri.clone(),
+        canonical_uri,
         &query_uri,
     );
 
@@ -403,7 +373,7 @@ fn create_and_sign_req<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: Arc<String>
     Ok(req)
 }
 
-fn format_query<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: Arc<String>, query_uri: &String) -> String {
+fn format_query<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: &String, query_uri: &String) -> String {
     let endpoint = ctx.endpoint();
     let url_parsed = Url::parse(&endpoint.s3_url).expect("Invalid S3 URL");
     let host = url_parsed.host_str().unwrap_or("");
@@ -438,8 +408,8 @@ impl Drop for PooledBuffer {
 }
 
 pub async fn send_with_logging(
-    client: &crate::PoolClient,
-    req: hyper::Request<crate::StreamingBody>,
+    client: &HyperClient,
+    req: hyper::Request<StreamingBody>,
 ) -> Result<hyper::Response<hyper::body::Incoming>> {
     logging::log_request_headers(&req);
     let resp = client.request(req).await?;

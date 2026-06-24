@@ -89,7 +89,7 @@ pub async fn create_client(access_key: &str, secret_key: &str, url: &str, region
         .build();
 
     let retry_config = RetryConfig::standard()
-        .with_max_attempts(constants::MAX_RETRY);
+        .with_max_attempts(1);
 
     let s3_conf = Builder::from(&shared_config)
         .force_path_style(true)

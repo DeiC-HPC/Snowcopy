@@ -2,23 +2,16 @@ use std::fmt;
 use std::time::{SystemTime, Duration};
 use tokio::sync::oneshot;
 
-pub struct CcLoadAndTransfer { //TODO Jon: The Java way would be to encapsulate this data. Should that be done here with impl and traits?
-    pub amount : u64,
-    pub file_sem_work_time_secs: f64,
-    pub file_sem_acquire_time_secs: f64,
-    pub req_sem_work_time_secs: f64,
-    pub req_sem_acquire_time_secs: f64,
-}
-
 pub enum CommandCenterEvent {
-    PartTransferred(CcLoadAndTransfer),
+    PartTransferred(u64),
     FileTransferred(u64),
     FileDiscovered(u64),
     FileAlreadyAtTarget(u64),
     StatusChanged(Status),
     Log(String),
     RetryRequested(oneshot::Sender<Duration>, u32, SystemTime, String),
-    FileIntegrityChecked(bool) //JON: Should have key for some logging?
+    FileIntegrityChecked(bool), //JON: Should have key for some logging?
+    FatalError(String),
 }
 
 #[allow(dead_code)] //TODO Jon: not all status are used currently

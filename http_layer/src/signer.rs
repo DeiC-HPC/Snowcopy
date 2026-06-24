@@ -109,7 +109,7 @@ pub fn get_s3_auth_header_and_signature(
     credential_scope: &CredentialScope,
     algorithm: &str,
     signed_headers_sorted: &HashMap<String, String>,
-    canonical_uri: Arc<String>,
+    canonical_uri: &String,
     query_url: &String,
 ) -> (String, String) {
     let mut headers: Vec<(&str, &str)> = Vec::with_capacity(signed_headers_sorted.len());
@@ -183,7 +183,7 @@ pub fn get_s3_auth_header(
     credential_scope: &CredentialScope,
     algorithm: &str,
     signed_headers: &HashMap<String, String>,
-    canonical_uri: Arc<String>,
+    canonical_uri: &String,
     query_uri: &String,
 ) -> String {
     let (auth, _) =

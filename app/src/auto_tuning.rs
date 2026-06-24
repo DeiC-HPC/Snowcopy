@@ -36,7 +36,7 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
     }
 }
 
-pub fn auto_tune_upload(config: Arc<UploadConfig>, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Arc<Semaphore>, Arc<Semaphore>, Arc<Semaphore>, usize) {
+pub fn auto_tune_upload(config: Arc<UploadConfig>, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Semaphore, Semaphore, Semaphore, usize) {
     let (mut file_limit, mut req_limit, mut open_files_sem, buffer_pool_size, _) = auto_tune_internal(&config.local_path, cc_tx.clone());
 
     if let Some(override_value) = config.file_limit_overwrite {
@@ -56,9 +56,9 @@ pub fn auto_tune_upload(config: Arc<UploadConfig>, cc_tx: UnboundedSender<Comman
         buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0)
     )));
 
-    let file_sem = Arc::new(Semaphore::new(file_limit));
-    let req_sem = Arc::new(Semaphore::new(req_limit));
-    let open_files_sem = Arc::new(Semaphore::new(open_files_sem));
+    let file_sem = Semaphore::new(file_limit);
+    let req_sem = Semaphore::new(req_limit);
+    let open_files_sem = Semaphore::new(open_files_sem);
 
     (file_sem, req_sem, open_files_sem, buffer_pool_size)
 }
