@@ -19,15 +19,13 @@ use openssl::base64;
 use openssl::hash::{Hasher, MessageDigest};
 use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fs::File;
 use std::sync::Arc;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex, Semaphore};
-use tokio::task::JoinSet;
 use url::Url;
-use util_layer::constants::{AWS_ALGORITHM, EMPTY_PAYLOAD_SHA256};
+use util_layer::constants::AWS_ALGORITHM;
 use util_layer::snow_errors::{S3Error, SnowCopyError};
-use util_layer::{DownloadConfig, FileInfo, S3ConfigTrait, UploadConfig};
+use util_layer::{FileInfo, S3ConfigTrait, UploadConfig};
 
 const READ_BUFFER_SIZE: usize = 256 * 1024;
 pub struct BufferPool {
@@ -92,8 +90,8 @@ pub fn build_https_client() -> HyperClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64)> {
-    let req = create_in_memory_body_put_with_hashes(0, None, ctx, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
+pub async fn put_file(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: Arc<FileInfo>, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64)> {
+    let req = create_in_memory_body_put_with_hashes(file, 0, None, ctx, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let permit = req_sem.acquire().await?;
     let resp = client.request(req).await?;
@@ -118,8 +116,8 @@ pub async fn put_file(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, client: 
     Ok((etag.unwrap(), file_info.file_size))
 }
 
-pub async fn put_file_range(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64)> {
-    let req = create_in_memory_body_put_with_hashes(from, Some(amount), ctx, file_info, file_sem, buffer_pool, canonical_uri, query_uri).await?;
+pub async fn put_file_range(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64)> {
+    let req = create_in_memory_body_put_with_hashes(file, from, Some(amount), ctx, file_info, file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let permit = req_sem.acquire().await.expect("Should never fail");
 
@@ -148,19 +146,13 @@ pub async fn put_file_range(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, fr
     Ok((etag.unwrap(), amount))
 }
 
-async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option<u64>, ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, file_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(Request<StreamingBody>)> {
+async fn create_in_memory_body_put_with_hashes(file: Arc<File>, start: u64, amount_option: Option<u64>, ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, file_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<Request<StreamingBody>> {
     let file_lock = file_sem.acquire().await?;
-
-    let mut file = File::open(&*file_info.file_path).await?;
 
     let amount = match amount_option {
         Some(v) => v,
-        None => file.metadata().await?.len(),
+        None => file.metadata()?.len(),
     };
-
-    if start > 0 {
-        file.seek(std::io::SeekFrom::Start(start)).await?;
-    }
 
     // Ensure the buffer is large enough if amount > chunk_size,
     // though in this app amount is expected to be <= CHUNK_SIZE.
@@ -172,39 +164,50 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     let mut total_read = 0usize;
     let chunk_size = READ_BUFFER_SIZE.min(amount as usize);
+    let cloned_ctx = ctx.clone();
 
-    //TODO JON: Its very possible that we should wrap this in a spawn_blocking and use a single file descriptor for the upload.
+    let future = tokio::task::spawn_blocking(
+        move || -> Result<(String, Option<String>, Vec<u8>), anyhow::Error> { //TODO JON: Error type should be SnowCopyError?
+            let mut md5_hasher: Option<Hasher> = if cloned_ctx.md5_checksum_upload {
+                Some(Hasher::new(MessageDigest::md5())?)
+            } else {
+                None
+            };
+            let mut sha_hasher = signer::create_sha256_hasher();
 
-    let mut md5_hasher: Option<Hasher> = if ctx.md5_checksum_upload {
-        Some(Hasher::new(MessageDigest::md5())?)
-    } else {
-        None
-    };
-    let mut sha_hasher = signer::create_sha256_hasher();
+            while total_read < amount as usize { //read small chunks, so the block is less significant when hashing.
+                let remaining = amount as usize - total_read;
+                let to_read = remaining.min(chunk_size);
+                let chunk = &mut buffer[total_read..total_read + to_read];
 
-    while total_read < amount as usize { //read small chunks, so the block is less significant when hashing.
-        let remaining = amount as usize - total_read;
-        let to_read = remaining.min(chunk_size);
-        let chunk = &mut buffer[total_read..total_read + to_read];
+                let read = file.read_at_offset(chunk, start + total_read as u64)?;
+                if to_read != read {
+                    return Err(anyhow::anyhow!("Failed to read file. Expected to read {} bytes, but read {} bytes", to_read, read));
+                }
+                sha_hasher.update(chunk).expect("Failed to update SHA256 hasher");
+                if let Some(ref mut md5_hasher) = md5_hasher {
+                    md5_hasher.update(chunk).expect("Failed to update MD5 hasher");
+                }
 
-        file.read_exact(chunk).await?;
-        sha_hasher.update(chunk).expect("Failed to update SHA256 hasher");
-        if let Some(ref mut md5_hasher) = md5_hasher {
-            md5_hasher.update(chunk).expect("Failed to update MD5 hasher");
+                total_read += read;
+            }
+
+            let sha256_hex = signer::finish_sha256_hex(sha_hasher);
+            let md5_base64 = if let Some(mut md5_hasher) = md5_hasher {
+                let md5 = md5_hasher.finish()?;
+                Some(base64::encode_block(&md5))
+            } else {
+                None
+            };
+
+
+            Ok((sha256_hex, md5_base64, buffer))
         }
+    );
 
-        total_read += to_read;
-    }
-    drop(file);
+    let (sha256_hex, md5_base64, buffer) = future.await??;
     drop(file_lock);
 
-    let sha256_hex = signer::finish_sha256_hex(sha_hasher);
-    let md5_base64 = if let Some(mut md5_hasher) = md5_hasher {
-        let md5 = md5_hasher.finish()?;
-        Some(base64::encode_block(&md5))
-    } else {
-        None
-    };
 
     let mtime_str = file_info.modified_time.map(util_layer::time::time_to_float_string);
 
@@ -237,83 +240,6 @@ async fn create_in_memory_body_put_with_hashes(start: u64, amount_option: Option
 
     Ok(req)
 }
-
-pub async fn get_file_range(ctx: Arc<DownloadConfig>, client: &HyperClient, buffer_pool: Arc<BufferPool>, canonical_uri: Arc<String>, query_uri: &String, req_sem: Arc<Semaphore>, start: u64, end: u64) -> Result<PooledBuffer> {
-    let total_range_size = (end - start + 1) as usize;
-    let mut buffer = buffer_pool.get().await;
-    let buffer_ptr = buffer.as_mut_ptr() as usize;
-
-    // Split into 4 sub-requests
-    let num_sub_parts = 4; //TODO Jon: configurable/change dynamically?
-    let sub_part_size = (total_range_size + num_sub_parts - 1) / num_sub_parts;
-
-    let mut join_set: JoinSet<Result<()>> = JoinSet::new();
-
-    for i in 0..num_sub_parts {
-        let sub_start = start + (i * sub_part_size) as u64;
-        if sub_start > end {
-            break;
-        }
-        let sub_end = std::cmp::min(sub_start + sub_part_size as u64 - 1, end);
-        let sub_range = format!("bytes={}-{}", sub_start, sub_end);
-
-        let ctx = ctx.clone();
-        let client = client.clone();
-        let canonical_uri = canonical_uri.clone();
-        let query_uri = query_uri.clone();
-        let req_sem = req_sem.clone();
-
-        join_set.spawn(async move {
-            let mut header_map : HashMap<String, String> = HashMap::new();
-            header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
-            header_map.insert("range".to_string(), sub_range);
-
-            let req = create_and_sign_req(ctx, &canonical_uri, &query_uri, None, Method::GET, &header_map)?;
-            let _permit = req_sem.acquire().await.expect("Should never fail");
-            let resp = client.request(req).await?;
-
-            let status = resp.status();
-
-            if !status.is_success() && status != hyper::StatusCode::PARTIAL_CONTENT {
-                let s3_err = map_s3_error(resp).await;
-                return Err(s3_err.into());
-            }
-
-            let mut body = resp.into_body();
-            let mut sub_data_len = 0usize;
-            while let Some(frame) = body.frame().await {
-                let frame = frame.map_err(|e| anyhow::anyhow!("Body error: {}", e))?;
-                if let Some(data) = frame.data_ref() {
-                    let offset = (sub_start - start) as usize + sub_data_len;
-                    // SAFETY: each spawn writes to a unique non-overlapping range in the buffer.
-                    //TODO JON: I believe we don't need the unsafe. If we decide to go this direction, then slices should be used instead
-
-                    unsafe {
-                        let dst = (buffer_ptr as *mut u8).add(offset);
-                        std::ptr::copy_nonoverlapping(data.as_ptr(), dst, data.len());
-                    }
-                    sub_data_len += data.len();
-                }
-            }
-            Ok::<(), anyhow::Error>(())
-        });
-    }
-
-    while let Some(res) = join_set.join_next().await {
-        match res {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => return Err(err),
-            Err(join_err) => return Err(anyhow::anyhow!("Task join error: {}", join_err)),
-        }
-    }
-
-    Ok(PooledBuffer {
-        buffer: Some(buffer),
-        pool: buffer_pool,
-        len: total_range_size,
-    })
-}
-
 
 fn create_and_sign_req<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: &String, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>) -> Result<Request<StreamingBody>> {
     let endpoint = ctx.endpoint();
@@ -434,4 +360,25 @@ pub async fn map_s3_error(resp: hyper::Response<hyper::body::Incoming>) -> SnowC
     } else {
         SnowCopyError::Http(status.as_u16())
     }
+}
+
+
+#[cfg(unix)]
+impl ReadAt for File {
+    fn read_at_offset(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+        use std::os::unix::fs::FileExt;
+        self.read_at(buf, offset)
+    }
+}
+
+#[cfg(windows)]
+impl ReadAt for File {
+    fn read_at_offset(&self, buf: &mut[u8], offset: u64) -> std::io::Result<usize> {
+        use std::os::windows::fs::FileExt;
+        self.seek_read(buf, offset)
+    }
+}
+
+trait ReadAt { //Abstract to make it more testable
+    fn read_at_offset(&self, buf: &mut[u8], offset: u64) -> std::io::Result<usize>;
 }

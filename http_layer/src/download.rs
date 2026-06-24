@@ -126,7 +126,7 @@ async fn download_body_to_buffer_and_offload_to_disk_writers(start: u64, fd: Arc
 
 #[cfg(unix)]
 impl WriteAt for std::fs::File {
-    fn write_at(&self, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    fn write_at_offset(&self, buf: &[u8], offset: u64) -> std::io::Result<usize> {
         use std::os::unix::fs::FileExt;
         self.write_at(buf, offset)
     }
@@ -134,15 +134,14 @@ impl WriteAt for std::fs::File {
 
 #[cfg(windows)]
 impl WriteAt for File {
-    fn write_at(&self, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+    fn write_at_offset(&self, buf: &[u8], offset: u64) -> std::io::Result<usize> {
         use std::os::windows::fs::FileExt;
         self.seek_write(buf, offset)
     }
 }
 
-
 trait WriteAt { //Abstract to make it more testable
-    fn write_at(&self, buf: &[u8], offset: u64) -> std::io::Result<usize>;
+    fn write_at_offset(&self, buf: &[u8], offset: u64) -> std::io::Result<usize>;
 }
 
 
@@ -202,7 +201,7 @@ pub fn spawn_global_writers(
 
                 match msg {
                     Some((file, offset, data, tracker)) => {
-                        if let Err(e) = &file.write_at(&data, offset) {
+                        if let Err(e) = &file.write_at_offset(&data, offset) {
                             eprintln!("write error: {}", e); //TODO JON: Should we just retry? But what kind of local IO error would benefit from that?
                             //probably panic?
                         } else {

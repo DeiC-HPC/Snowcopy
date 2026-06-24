@@ -1,5 +1,6 @@
 use crate::auto_tuning;
 use crate::command_center::{CommandCenter, CC};
+use std::fs::File;
 use std::io;
 use std::io::Error;
 use std::path::PathBuf;
@@ -32,9 +33,9 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
     let bucket_creation_handle = create_bucket_if_not_exist(&ctx, &aws_sdk_client);
 
     let hyper_client = build_https_client();
-    let (file_sem, req_sem, open_files_sem, buffer_pool_size) = auto_tuning::auto_tune_upload(ctx.clone(), cc_tx.clone());
+    let (active_file_io_sem, req_sem, open_files_sem, buffer_pool_size) = auto_tuning::auto_tune_upload(ctx.clone(), cc_tx.clone());
 
-    let task_sem = Arc::new(Semaphore::new(500)); //TODO JON: should this just be open_file_sem?
+    let task_sem = Arc::new(Semaphore::new(open_files_sem.available_permits())); //TODO JON: should this just be open_file_sem?
     let buffer_pool = BufferPool::new(buffer_pool_size, CHUNK_SIZE as usize);
 
     let bucket_created = bucket_creation_handle.await.unwrap();
@@ -46,7 +47,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
     }
 
     let runtime = Arc::new(UploadRuntime { //TODO JON: I'm unsure if the internals should be wrapped in Arc as well.
-        file_sem : Arc::new(file_sem),
+        file_sem : Arc::new(active_file_io_sem),
         req_sem,
         open_files_sem,
         hyper_client,
@@ -103,14 +104,22 @@ fn create_bucket_if_not_exist(ctx: &Arc<UploadConfig>, client: &Arc<AWSClient>) 
 }
 
 async fn upload_file(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>) {
+    let file = File::open(&*file_info.file_path);
+    
+    if let Err(e) = file { //Hopefully, we should be on top of ulimit through auto-tuning
+        runtime.cc_tx.send(CommandCenterEvent::FatalError(format!("Error opening file {}: {}", file_info.file_path.to_str().unwrap(), e))).expect("Failed to send message to command center. Should never happen.");
+        return;
+    }
+    let file = Arc::new(file.unwrap());
+
     if file_info.file_size > CHUNK_SIZE {
-        upload_with_multipart(ctx, aws_client, runtime, file_info).await;
+        upload_with_multipart(ctx, aws_client, runtime, file_info, file).await;
     } else {
-        small_file_upload(ctx, runtime, file_info).await;
+        small_file_upload(ctx, runtime, file_info, file).await;
     }
 }
 
-async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>) {
+async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>, file: Arc<File>) {
     let upload_id = start_multipart_upload_with_retry(&ctx, &aws_client, &file_info).await;
 
     let chunk_amount_u64 = (file_info.file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
@@ -133,6 +142,8 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
 
         let ctx_cloned = ctx.clone();
         let canonical_uri_cloned = canonical_uri.clone();
+        let file = file.clone();
+
         join_set.spawn(async move {
             let result = retry_on_failure_async(|| {
                 let ctx = ctx_cloned.clone();
@@ -140,12 +151,13 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
                 let runtime = runtime_clone.clone();
                 let canonical_uri = canonical_uri_cloned.clone();
                 let query_uri = query_uri.clone();
+                let file = file.clone();
 
                 async move {
                     if ctx.trailing {
-                        http_layer::upload_trailing::put_file_streaming(ctx, file_info, start_pos, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri, &runtime.open_files_sem).await
+                        http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri, &runtime.open_files_sem).await
                     } else {
-                        http_layer::put_file_range(ctx, file_info, start_pos, amount, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
+                        http_layer::put_file_range(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
                     }
                 }
             }, runtime_clone.cc_tx.clone(), |e: &anyhow::Error| {
@@ -163,7 +175,7 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
                         .build();
                     completed_parts.lock().await.push(completed_part);
 
-                    runtime_clone.cc_tx.send(CommandCenterEvent::PartTransferred(metrics)).unwrap();
+                    runtime_clone.cc_tx.send(CommandCenterEvent::PartTransferred(metrics)).expect("Failed to send message to command center. Should never happen.");
                 }
                 Err(e) => {
                     panic!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e); //TODO JON: is this the way?
@@ -196,7 +208,7 @@ async fn start_multipart_upload_with_retry(ctx: &Arc<UploadConfig>, aws_client: 
     upload_id.to_string()
 }
 
-async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>) {
+async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>, file: Arc<File>) {
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.aws_uri_encoded_key));
     let query_uri = "".to_string();
 
@@ -207,11 +219,13 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, 
         let runtime = runtime.clone();
         let canonical_uri = canonical_uri.clone();
         let query_uri = query_uri.clone();
+        let file = file.clone();
+
         async move {
             if ctx.trailing_small {
-                http_layer::upload_trailing::put_file_streaming(ctx, file_info, 0, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri, &runtime.open_files_sem).await
+                http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, 0, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri, &runtime.open_files_sem).await
             } else {
-                http_layer::put_file(ctx, file_info, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
+                http_layer::put_file(ctx, file, file_info, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
             }
         }
     }, runtime.cc_tx.clone(), |e: &anyhow::Error| {
@@ -224,8 +238,8 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, 
     match result {
         Ok(metrics) => {
             let file_size = file_info.file_size;
-            runtime.cc_tx.send(CommandCenterEvent::PartTransferred(metrics.1)).unwrap();
-            runtime.cc_tx.send(CommandCenterEvent::FileTransferred(file_size)).unwrap();
+            runtime.cc_tx.send(CommandCenterEvent::PartTransferred(metrics.1)).expect("Failed to send message to command center. Should never happen.");
+            runtime.cc_tx.send(CommandCenterEvent::FileTransferred(file_size)).expect("Failed to send message to command center. Should never happen.");
         },
         Err(e) => panic!("Error uploading file {}: {}", file_info.file_path.to_str().unwrap(), e),
     }

@@ -1,11 +1,10 @@
 use openssl::hash::{Hasher, MessageDigest};
 use openssl::pkey::PKey;
-use openssl::sign::Signer;
 use openssl::sha::sha256;
+use openssl::sign::Signer;
 use std::collections::HashMap;
-use std::sync::Arc;
 use util_layer::constants::{AMZ_CHUNK_SIGNATURE_HEADER, AMZ_TRAILER_SIGNATURE, AWS_CHUNK_PAYLOAD_ALGORITHM, AWS_CHUNK_TRAILER_ALGORITHM, EMPTY_PAYLOAD_SHA256};
-use util_layer::{EndpointConfig};
+use util_layer::EndpointConfig;
 
 pub struct CredentialScope {
     pub(crate) timestamp: chrono::DateTime<chrono::Utc>,

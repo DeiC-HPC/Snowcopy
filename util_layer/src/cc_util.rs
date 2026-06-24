@@ -11,7 +11,7 @@ pub enum CommandCenterEvent {
     Log(String),
     RetryRequested(oneshot::Sender<Duration>, u32, SystemTime, String),
     FileIntegrityChecked(bool), //JON: Should have key for some logging?
-    FatalError(String),
+    FatalError(String), //TODO JON: also add metadata for some logging?
 }
 
 #[allow(dead_code)] //TODO Jon: not all status are used currently

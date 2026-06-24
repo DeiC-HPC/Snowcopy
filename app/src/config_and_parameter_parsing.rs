@@ -82,10 +82,10 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
             let md5_checksum_integrity = matches.get_one::<bool>("md5_checksum_integrity").copied().unwrap_or(true);
             let trailing = matches.get_flag("trailing");
             let trailing_small = matches.get_flag("trailing-small");
-            let trailing_chunk_size_val = matches.get_one::<usize>("trailing-chunk-size").copied().unwrap_or(8 * 1024 * 1024); //TODO JON: We should not have this value here.
+            let trailing_chunk_size_val = matches.get_one::<usize>("trailing-chunk-size").copied().unwrap_or(1 * 1024 * 1024); //TODO JON: We should not have this value here.
             let open_file_limit_overwrite = matches.get_one::<usize>("open-file-limit").copied();
             let transfer_method = TransferMethod::from_str(transfer_method_str).expect(format!("Transfer method {} unknown", transfer_method_str).as_str());
-            let prefix = matches.get_one::<String>("prefix").unwrap_or(&"".to_string()).to_string(); //TODO JON: We will add prefixing after release
+            let prefix = "".to_string(); //TODO JON: We will add prefixing after release
 
             let src_str = matches.get_one::<String>("src").unwrap();
             let dest_str = matches.get_one::<String>("dest").unwrap();

@@ -3,7 +3,7 @@ use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 use anyhow::Error;
 use aws_layer::{async_head_objects_from_bucket, get_s3_metadata, AWSClient};
-use http_layer::{BufferPool, HyperClient};
+use http_layer::HyperClient;
 use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
@@ -17,12 +17,10 @@ use util_layer::download::{FileCompletionTracker, WriteMsg};
 use util_layer::retry::retry_on_failure_async;
 use util_layer::snow_errors::SnowCopyError;
 use util_layer::{DownloadConfig, FileInfo, S3Object};
-
+use http_layer::filesystem_checker::is_valid_s3_key_for_local_filesystem;
 use http_layer::integrity::{reconstructable_multipart_etag, IntegrityAlgorithm};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
-use http_layer::filesystem_checker::is_valid_s3_key_for_local_filesystem;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::url_encoder::url_encode_fast;
 
@@ -403,21 +401,6 @@ fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadC
     download_set
 }
 
-#[allow(dead_code)]
-async fn download_part_buffered(start: u64, end: u64, config: Arc<DownloadConfig>, pool_client: &Arc<HyperClient>, req_sem: Arc<Semaphore>, file_sem: Arc<Semaphore>, canonical_uri: Arc<String>, query_uri: &String, file_path: &PathBuf, buffer_pool: Arc<BufferPool>) -> Result<u64, Error> {
-    let data = http_layer::get_file_range(config, &pool_client, buffer_pool, canonical_uri, &query_uri, req_sem, start, end).await?;
-
-    let _file_permit = file_sem.acquire().await.expect("Should never fail");
-    let mut file = tokio::fs::OpenOptions::new()
-        .write(true)
-        .open(&file_path)
-        .await?;
-
-    file.seek(std::io::SeekFrom::Start(start)).await?;
-    file.write_all(data.as_ref()).await?;
-    file.flush().await?; //We must flush to ensure our mtime update is not overwritten after its been set.
-    Ok(data.len as u64)
-}
 
 #[allow(dead_code)]
 fn update_mod_time_on_file(object: &S3Object, cc_sender: &UnboundedSender<CommandCenterEvent>) { //TODO JON: should we retry? I think this should never fail, in practice, unless some other program takes write of the file and then we dont want to update mtime anyways
