@@ -24,7 +24,6 @@ use jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-
 #[tokio::main]
 async fn main() {
     let start_time = Instant::now();

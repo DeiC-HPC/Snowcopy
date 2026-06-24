@@ -27,7 +27,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
     let cc = CommandCenter::new_upload(&ctx, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
 
-    let mut files_to_upload_stream = walk_directory_async(ctx.local_path.to_path_buf(), cc_tx.clone()).await;
+    let mut files_to_upload_stream = walk_directory_async(ctx.local_path.to_path_buf(), cc_tx.clone(), cancellation_token.clone()).await;
 
     let aws_sdk_client = Arc::new(aws_layer::create_client_from_config_endpoint(&ctx.endpoint).await);
     let bucket_creation_handle = create_bucket_if_not_exist(&ctx, &aws_sdk_client);
@@ -43,7 +43,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
 
     if !bucket_created {
         //We did not create the bucket, so check for already uploaded files
-        files_to_upload_stream = filter_already_existing_files(&ctx, &cc_tx, &aws_client, files_to_upload_stream);
+        files_to_upload_stream = filter_already_existing_files(&ctx, &cc_tx, &aws_client, files_to_upload_stream, cancellation_token.clone());
     }
 
     let runtime = Arc::new(UploadRuntime { //TODO JON: I'm unsure if the internals should be wrapped in Arc as well.
@@ -64,22 +64,30 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
 
 async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream: &mut Receiver<Result<FileInfo, Error>>, task_sem: Arc<Semaphore>, runtime: Arc<UploadRuntime>, aws_client: Arc<AWSClient>) {
     let mut join_set = JoinSet::new();
-    while let Some(result) = files_to_upload_stream.recv().await {
-        match result {
-            Ok(file_info) => {
-                let file_info_arc = Arc::new(file_info);
-                let ctx = ctx.clone();
-                let runtime = runtime.clone();
-                let aws_client = aws_client.clone();
+    loop {
+        tokio::select! {
+            result = files_to_upload_stream.recv() => {
+                match result {
+                    Some(Ok(file_info)) => {
+                        let file_info_arc = Arc::new(file_info);
+                        let ctx = ctx.clone();
+                        let runtime = runtime.clone();
+                        let aws_client = aws_client.clone();
 
-                let permit = task_sem.clone().acquire_owned().await.unwrap();
-                join_set.spawn(async move {
-                    upload_file(ctx, aws_client, runtime, file_info_arc).await;
-                    drop(permit);
-                });
+                        let permit = task_sem.clone().acquire_owned().await.unwrap();
+                        join_set.spawn(async move {
+                            upload_file(ctx, aws_client, runtime, file_info_arc).await;
+                            drop(permit);
+                        });
+                    }
+                    Some(Err(e)) => {
+                        panic!("Error walking directory: {}", e);
+                    }
+                    None => break,
+                }
             }
-            Err(e) => {
-                panic!("Error walking directory: {}", e);
+            _ = runtime.cancellation_token.cancelled() => {
+                break;
             }
         }
     }
@@ -124,12 +132,24 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
 
     let chunk_amount_u64 = (file_info.file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-    let completed_parts = Arc::new(Mutex::new(Vec::new()));
+    let completed_parts: Arc<Mutex<Vec<CompletedPartAws>>> = Arc::new(Mutex::new(Vec::new()));
+
+    if upload_each_chunk_with_retry(&ctx, &runtime, &file_info, file, &upload_id, chunk_amount_u64, &completed_parts).await { return; }
+
+    let completed_parts = Arc::try_unwrap(completed_parts).unwrap().into_inner();
+    aws_layer::complete_multipart_upload(&aws_client, &ctx.bucket, &*file_info.aws_uri_encoded_key, &upload_id, completed_parts).await.unwrap();
+    let _ = runtime.cc_tx.send(CommandCenterEvent::FileTransferred(file_info.file_size));
+}
+
+async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<UploadRuntime>, file_info: &Arc<FileInfo>, file: Arc<File>, upload_id: &String, chunk_amount_u64: u64, completed_parts: &Arc<Mutex<Vec<CompletedPartAws>>>) -> bool {
     let mut join_set = JoinSet::new();
 
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.aws_uri_encoded_key));
 
     for i in 0..chunk_amount_u64 {
+        if runtime.cancellation_token.is_cancelled() {
+            break;
+        }
         let start_pos = i * CHUNK_SIZE;
         let amount = std::cmp::min(CHUNK_SIZE, file_info.file_size - start_pos);
 
@@ -145,27 +165,32 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
         let file = file.clone();
 
         join_set.spawn(async move {
-            let result = retry_on_failure_async(|| {
-                let ctx = ctx_cloned.clone();
-                let file_info = file_info_clone.clone();
-                let runtime = runtime_clone.clone();
-                let canonical_uri = canonical_uri_cloned.clone();
-                let query_uri = query_uri.clone();
-                let file = file.clone();
+            let result = tokio::select! {
+                res = retry_on_failure_async(|| {
+                    let ctx = ctx_cloned.clone();
+                    let file_info = file_info_clone.clone();
+                    let runtime = runtime_clone.clone();
+                    let canonical_uri = canonical_uri_cloned.clone();
+                    let query_uri = query_uri.clone();
+                    let file = file.clone();
 
-                async move {
-                    if ctx.trailing {
-                        http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri, &runtime.open_files_sem).await
-                    } else {
-                        http_layer::put_file_range(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
+                    async move {
+                        if ctx.trailing {
+                            http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri, &runtime.open_files_sem).await
+                        } else {
+                            http_layer::put_file_range(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
+                        }
                     }
+                }, runtime_clone.cc_tx.clone(), |e: &anyhow::Error| {
+                    if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
+                        return snow_error.is_retryable();
+                    }
+                    false
+                }, format!("Uploading part {} of {}", part_number, file_info_clone.aws_uri_encoded_key)) => res,
+                _ = runtime_clone.cancellation_token.cancelled() => {
+                    return;
                 }
-            }, runtime_clone.cc_tx.clone(), |e: &anyhow::Error| {
-                if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
-                    return snow_error.is_retryable();
-                }
-                false
-            }, format!("Uploading part {} of {}", part_number, file_info_clone.aws_uri_encoded_key)).await;
+            };
 
             match result {
                 Ok((etag, metrics)) => {
@@ -186,9 +211,10 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient
 
     while let Some(_) = join_set.join_next().await {}
 
-    let completed_parts = Arc::try_unwrap(completed_parts).unwrap().into_inner();
-    aws_layer::complete_multipart_upload(&aws_client, &ctx.bucket, &*file_info.aws_uri_encoded_key, &upload_id, completed_parts).await.unwrap();
-    let _ = runtime.cc_tx.send(CommandCenterEvent::FileTransferred(file_info.file_size));
+    if runtime.cancellation_token.is_cancelled() {
+        return true;
+    }
+    false
 }
 
 async fn start_multipart_upload_with_retry(ctx: &Arc<UploadConfig>, aws_client: &Arc<AWSClient>, file_info: &Arc<FileInfo>) -> String {
@@ -212,28 +238,34 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, 
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.aws_uri_encoded_key));
     let query_uri = "".to_string();
 
-    let result = retry_on_failure_async(|| {
-        let ctx = ctx.clone();
-        let amount = file_info.file_size;
-        let file_info = file_info.clone();
-        let runtime = runtime.clone();
-        let canonical_uri = canonical_uri.clone();
-        let query_uri = query_uri.clone();
-        let file = file.clone();
+    let result = tokio::select! {
+        res = retry_on_failure_async(|| {
+            let ctx = ctx.clone();
+            let amount = file_info.file_size;
+            let file_info = file_info.clone();
+            let runtime = runtime.clone();
+            let canonical_uri = canonical_uri.clone();
+            let query_uri = query_uri.clone();
+            let file = file.clone();
 
-        async move {
-            if ctx.trailing_small {
-                http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, 0, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri, &runtime.open_files_sem).await
-            } else {
-                http_layer::put_file(ctx, file, file_info, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
+            async move {
+                if ctx.trailing_small {
+                    http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, 0, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri, &runtime.open_files_sem).await
+                } else {
+                    http_layer::put_file(ctx, file, file_info, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
+                }
             }
+        }, runtime.cc_tx.clone(), |e: &anyhow::Error| {
+            if let Some(snow_err) = e.downcast_ref::<SnowCopyError>() {
+                return snow_err.is_retryable();
+            }
+            false
+        }, format!("Uploading {}", file_info.aws_uri_encoded_key)) => res,
+        
+        _ = runtime.cancellation_token.cancelled() => {
+            return;
         }
-    }, runtime.cc_tx.clone(), |e: &anyhow::Error| {
-        if let Some(snow_err) = e.downcast_ref::<SnowCopyError>() {
-            return snow_err.is_retryable();
-        }
-        false
-    }, format!("Uploading {}", file_info.aws_uri_encoded_key)).await;
+    };
 
     match result {
         Ok(metrics) => {
@@ -245,7 +277,7 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, 
     }
 }
 
-fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: &AWSClient, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>) -> Receiver<Result<FileInfo, io::Error>> {
+fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: &AWSClient, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, cancellation_token: CancellationToken) -> Receiver<Result<FileInfo, io::Error>> {
     let (upload_tx, upload_rx) = mpsc::channel::<Result<FileInfo, io::Error>>(constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_UPLOAD as usize);
 
     let checker_client = client.clone();
@@ -255,29 +287,43 @@ fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSende
 
     tokio::spawn(async move {
         let mut checker_set = JoinSet::new();
-        while let Some(result) = file_discovery_channel.recv().await {
-            match result {
-                Ok(file_info) => {
-                    let client = checker_client.clone();
-                    let bucket = checker_bucket.clone();
-                    let upload_tx = upload_tx.clone();
-                    let permit = checker_task_sem.clone().acquire_owned().await.unwrap();
-                    let cc_tx = cc_tx_checker.clone();
+        loop {
+            tokio::select! {
+                result = file_discovery_channel.recv() => {
+                    match result {
+                        Some(Ok(file_info)) => {
+                            let client = checker_client.clone();
+                            let bucket = checker_bucket.clone();
+                            let upload_tx = upload_tx.clone();
+                            let permit = checker_task_sem.clone().acquire_owned().await.unwrap();
+                            let cc_tx = cc_tx_checker.clone();
+                            let cancellation_token = cancellation_token.clone();
 
-                    checker_set.spawn(async move {
-                        let (_exists_at_target, size, s3_mtime, _chunk_size, _etag, _sha256_checksum) = get_s3_metadata(&client, &bucket, &file_info.aws_uri_encoded_key).await;
+                            checker_set.spawn(async move {
+                                let (_exists_at_target, size, s3_mtime, _chunk_size, _etag, _sha256_checksum) = tokio::select! {
+                                    res = get_s3_metadata(&client, &bucket, &file_info.aws_uri_encoded_key) => res,
+                                    _ = cancellation_token.cancelled() => {
+                                        return;
+                                    }
+                                };
 
-                        if should_upload(&file_info, size, s3_mtime).await {
-                            upload_tx.send(Ok(file_info)).await.expect("Should never fail.")
-                        } else {
-                            // Already uploaded, just let CC and ui know. We are done with the file
-                            cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(file_info.file_size)).expect("Should never fail.");
+                                if should_upload(&file_info, size, s3_mtime).await {
+                                    upload_tx.send(Ok(file_info)).await.expect("Should never fail.")
+                                } else {
+                                    // Already uploaded, just let CC and ui know. We are done with the file
+                                    cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(file_info.file_size)).expect("Should never fail.");
+                                }
+                                drop(permit);
+                            });
                         }
-                        drop(permit);
-                    });
+                        Some(Err(e)) => {
+                            upload_tx.send(Err(e)).await.expect("Should never fail.");
+                        }
+                        None => break,
+                    }
                 }
-                Err(e) => {
-                    upload_tx.send(Err(e)).await.expect("Should never fail.");
+                _ = cancellation_token.cancelled() => {
+                    break;
                 }
             }
         }
@@ -300,7 +346,7 @@ async fn should_upload(file_info: &FileInfo,  size: Option<i64>, s3_mtime: Optio
     needs_upload
 }
 
-pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<CommandCenterEvent>) -> mpsc::Receiver<Result<FileInfo, io::Error>> {
+pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<CommandCenterEvent>, cancellation_token: CancellationToken) -> mpsc::Receiver<Result<FileInfo, io::Error>> {
     let (tx, rx) = mpsc::channel(constants::DISCOVERY_LIMIT_UPLOAD as usize);
 
     if base_path.is_file() {
@@ -322,6 +368,9 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
     let base_path_for_relative = base_path.clone();
     tokio::task::spawn_blocking(move || {
         for entry in WalkDir::new(base_path).follow_links(false).max_open(100) {
+            if cancellation_token.is_cancelled() {
+                return;
+            }
             match entry {
                 Ok(entry) => {
                     if entry.path_is_symlink() {
