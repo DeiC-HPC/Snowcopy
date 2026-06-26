@@ -3,7 +3,7 @@ pub mod constants;
 pub mod cc_util;
 pub mod time;
 pub mod retry;
-pub mod pattern;
+pub mod bucket_and_path_parser;
 pub mod snow_errors;
 pub mod download;
 pub mod url_encoder;

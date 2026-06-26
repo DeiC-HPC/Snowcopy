@@ -1,5 +1,5 @@
 use clap::{Arg, ArgMatches, Command};
-use util_layer::pattern::PathPattern;
+use util_layer::bucket_and_path_parser::PathPattern;
 use util_layer::{ConfigModeConfig, DownloadConfig, EndpointConfig, ListConfig, Mode, RemoveConfig, SnowConfig, TransferMethod, UploadConfig};
 
 pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatches) -> SnowConfig {

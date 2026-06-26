@@ -6,7 +6,6 @@ pub mod upload_trailing;
 pub mod filesystem_checker;
 
 use crate::signer::CredentialScope;
-use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
@@ -90,7 +89,7 @@ pub fn build_https_client() -> HyperClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: Arc<FileInfo>, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64)> {
+pub async fn put_file(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: Arc<FileInfo>, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64), SnowCopyError> {
     let req = create_in_memory_body_put_with_hashes(file, 0, None, ctx, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let permit = req_sem.acquire().await?;
@@ -116,7 +115,7 @@ pub async fn put_file(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: Arc<Fi
     Ok((etag.unwrap(), file_info.file_size))
 }
 
-pub async fn put_file_range(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64)> {
+pub async fn put_file_range(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64), SnowCopyError> {
     let req = create_in_memory_body_put_with_hashes(file, from, Some(amount), ctx, file_info, file_sem, buffer_pool, canonical_uri, query_uri).await?;
 
     let permit = req_sem.acquire().await.expect("Should never fail");
@@ -146,7 +145,7 @@ pub async fn put_file_range(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: 
     Ok((etag.unwrap(), amount))
 }
 
-async fn create_in_memory_body_put_with_hashes(file: Arc<File>, start: u64, amount_option: Option<u64>, ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, file_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<Request<StreamingBody>> {
+async fn create_in_memory_body_put_with_hashes(file: Arc<File>, start: u64, amount_option: Option<u64>, ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, file_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<Request<StreamingBody>, SnowCopyError> {
     let file_lock = file_sem.acquire().await?;
 
     let amount = match amount_option {
@@ -167,7 +166,7 @@ async fn create_in_memory_body_put_with_hashes(file: Arc<File>, start: u64, amou
     let cloned_ctx = ctx.clone();
 
     let future = tokio::task::spawn_blocking(
-        move || -> Result<(String, Option<String>, Vec<u8>), anyhow::Error> { //TODO JON: Error type should be SnowCopyError?
+        move || -> Result<(String, Option<String>, Vec<u8>), SnowCopyError> {
             let mut md5_hasher: Option<Hasher> = if cloned_ctx.md5_checksum_upload {
                 Some(Hasher::new(MessageDigest::md5())?)
             } else {
@@ -182,7 +181,7 @@ async fn create_in_memory_body_put_with_hashes(file: Arc<File>, start: u64, amou
 
                 let read = file.read_at_offset(chunk, start + total_read as u64)?;
                 if to_read != read {
-                    return Err(anyhow::anyhow!("Failed to read file. Expected to read {} bytes, but read {} bytes", to_read, read));
+                    return Err(SnowCopyError::RetryableError(format!("Failed to read file. Expected to read {} bytes, but read {} bytes", to_read, read)));
                 }
                 sha_hasher.update(chunk).expect("Failed to update SHA256 hasher");
                 if let Some(ref mut md5_hasher) = md5_hasher {
@@ -205,7 +204,7 @@ async fn create_in_memory_body_put_with_hashes(file: Arc<File>, start: u64, amou
         }
     );
 
-    let (sha256_hex, md5_base64, buffer) = future.await??;
+    let (sha256_hex, md5_base64, buffer) = future.await.map_err(|e| SnowCopyError::RetryableError(format!("Failed to join task: {}", e)))??;
     drop(file_lock);
 
 
@@ -241,7 +240,7 @@ async fn create_in_memory_body_put_with_hashes(file: Arc<File>, start: u64, amou
     Ok(req)
 }
 
-fn create_and_sign_req<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: &String, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>) -> Result<Request<StreamingBody>> {
+fn create_and_sign_req<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: &String, query_uri: &String, payload: Option<&Bytes>, method: Method, header_map: &HashMap<String, String>) -> Result<Request<StreamingBody>, SnowCopyError> {
     let endpoint = ctx.endpoint();
     let url_parsed = Url::parse(&endpoint.s3_url).expect("Invalid S3 URL");
     let host = url_parsed.host_str().unwrap_or("");
@@ -336,7 +335,7 @@ impl Drop for PooledBuffer {
 pub async fn send_with_logging(
     client: &HyperClient,
     req: hyper::Request<StreamingBody>,
-) -> Result<hyper::Response<hyper::body::Incoming>> {
+) -> Result<hyper::Response<hyper::body::Incoming>, SnowCopyError> {
     logging::log_request_headers(&req);
     let resp = client.request(req).await?;
     logging::log_response_headers(&resp);

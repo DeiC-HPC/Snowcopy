@@ -15,7 +15,7 @@ impl S3Error {
     }
 }
 
-impl<T: aws_sdk_s3::error::ProvideErrorMetadata> From<T> for S3Error {
+impl<T: aws_sdk_s3::error::ProvideErrorMetadata> From<T> for S3Error { //TODO JON: Move into SnowCopyError
     fn from(value: T) -> Self {
         S3Error(format!(
             "{}: {}",

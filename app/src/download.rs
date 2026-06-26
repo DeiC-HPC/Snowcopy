@@ -1,7 +1,6 @@
 use crate::auto_tuning::auto_tune_download;
 use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
-use anyhow::Error;
 use aws_layer::{async_head_objects_from_bucket, get_s3_metadata, AWSClient};
 use http_layer::HyperClient;
 use std::collections::HashSet;
@@ -10,6 +9,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::{select, task};
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::sync::Semaphore;
 use util_layer::constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD;
@@ -21,6 +21,7 @@ use http_layer::filesystem_checker::is_valid_s3_key_for_local_filesystem;
 use http_layer::integrity::{reconstructable_multipart_etag, IntegrityAlgorithm};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
+use SnowCopyError::IntegrityError;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::url_encoder::url_encode_fast;
 
@@ -43,19 +44,19 @@ fn ensure_parent_dirs_exist(file_path: &Path, created_dirs: &mut HashSet<PathBuf
 
 pub async fn download(ctx: Arc<DownloadConfig>) {
     let cancellation_token = CancellationToken::new();
-    let cc = CommandCenter::new_download(&ctx, cancellation_token);
+    let cc = CommandCenter::new_download(&ctx, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
 
     let client = Arc::new(aws_layer::create_client_from_config_endpoint(&ctx.endpoint).await);
     let object_channel = async_head_objects_from_bucket(&ctx.bucket, &ctx.prefix, &ctx.local_path, client.clone(), cc_tx.clone()).await;
     let mut object_channel = fetch_object_metadata_and_filter_already_downloaded(&ctx, &cc_tx, client, object_channel).await;
 
-    let pool_client = Arc::new(http_layer::build_https_client());
+    let hyper_client = Arc::new(http_layer::build_https_client());
     let (file_sem, req_sem, download_file_concurrency) = auto_tune_download(ctx.clone(), cc_tx.clone());
     let task_sem = Arc::new(Semaphore::new(req_sem.available_permits() * 2));
 
     let (disk_write_tx, disk_write_rx) = mpsc::channel::<WriteMsg>(2048); //TODO JON: tune + configure buffer size. This matters also for file descriptor limit and memory usage
-    http_layer::download::spawn_global_writers(disk_write_rx, file_sem.available_permits(), cc_tx.clone());
+    spawn_global_writers(disk_write_rx, file_sem.available_permits(), cc_tx.clone(), cancellation_token.clone());
 
     let mut created_dirs: HashSet<PathBuf> = HashSet::new();
     let mut join_set = JoinSet::new();
@@ -68,7 +69,7 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
             continue;
         }
 
-        let pool_client_clone = pool_client.clone();
+        let hyper_client_clone = hyper_client.clone();
         let req_sem = req_sem.clone();
         let task_sem = task_sem.clone();
         let cc_tx = cc_tx.clone();
@@ -76,8 +77,10 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
 
         let permit = task_sem.clone().acquire_owned().await.unwrap();
         let config_clone = ctx.clone();
+        let cancellation_token = cancellation_token.clone();
+
         join_set.spawn(async move {
-            download_object(pool_client_clone, config_clone, object, req_sem.clone(), cc_tx.clone(), download_file_concurrency, disk_write_tx.clone()).await;
+            download_object(hyper_client_clone, config_clone, object, req_sem.clone(), cc_tx.clone(), download_file_concurrency, disk_write_tx.clone(), cancellation_token).await;
             drop(permit);
         });
     }
@@ -119,7 +122,7 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
 
                 if !is_valid_s3_key_for_local_filesystem(&object.key){
                     cc_tx.send(CommandCenterEvent::Log(format!("Skipping invalid S3 key. It cannot be mapped to a local file: {}", object.key))).expect("Failed to send message. This should never happen.");
-                    //TODO JON: we need to ensure that we return a non-zero return value. Should we notify the command center and give it the responsibility handle that?
+                    //TODO JON: we need to ensure that we return a non-zero return value. We should notify the command center and give it the responsibility handle that?
                     return;
                 }
 
@@ -175,7 +178,7 @@ fn should_download_object(object: &mut S3Object) -> bool {
     needs_download
 }
 
-async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConfig>, object: S3Object, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, download_file_concurrency: usize, disk_write_tx: Sender<WriteMsg>) {
+async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConfig>, object: S3Object, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, download_file_concurrency: usize, disk_write_tx: Sender<WriteMsg>, cancellation_token: CancellationToken) {
     let multipart_integrity_verification = config.md5_checksum_integrity && reconstructable_multipart_etag(&object);
 
     if object.size > DOWNLOAD_MULTIPART_THRESHOLD as i64 || multipart_integrity_verification {
@@ -186,14 +189,14 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
         let file = match File::create(&file_path) {
             Ok(f) => f,
             Err(e) => {
-                cc_sender.send(CommandCenterEvent::Log(format!("Failed to create file {:?}: {}", file_path, e))).expect("Failed to send message. This should never happen.");
-                return; //TODO JON: panic?
+                cc_sender.send(CommandCenterEvent::FatalError(format!("Failed to create file {:?}: {}", file_path, e))).expect("Failed to send message. This should never happen.");
+                return;
             }
         };
 
         if let Err(e) = file.set_len(total_size) {
-            cc_sender.send(CommandCenterEvent::Log(format!("Failed to truncate file {:?} to {}: {}", file_path, total_size, e))).expect("Failed to send message. This should never happen.");
-            return; //TODO JON: panic
+            cc_sender.send(CommandCenterEvent::FatalError(format!("Failed to truncate file {:?} to {}: {}", file_path, total_size, e))).expect("Failed to send message. This should never happen.");
+            return;
         }
 
         let file = Arc::new(file);
@@ -214,12 +217,12 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
             IntegrityAlgorithm::None
         };
 
-        let integrity_result = download_files_in_part_and_check_integrity(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &key, total_size, file.clone(), chunk_size, num_parts, hash_algo.clone()).await;
+        let integrity_result = download_files_in_part_and_check_integrity(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &key, total_size, file.clone(), chunk_size, num_parts, hash_algo.clone(), cancellation_token.clone()).await;
 
-        if let Err(e) = integrity_result {
+        if let Err(e) = integrity_result { //TODO JON: can we just check if its an integrity error?
             cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, e))).expect("Failed to send message. This should never happen.");
 
-            let integrity_result = download_files_in_part_and_check_integrity(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &key, total_size, file, chunk_size, num_parts, hash_algo).await;
+            let integrity_result = download_files_in_part_and_check_integrity(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &key, total_size, file, chunk_size, num_parts, hash_algo, cancellation_token).await;
 
             if let Err(e) = integrity_result {
                 cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Its likely that there is something with the metadata, the network or the s3 storage system.", object.key, e))).expect("Failed to send message. This should never happen.");
@@ -240,11 +243,11 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
         let canonical_uri = Arc::new(format!("/{}/{}", &config.bucket, object.aws_uri_encoded_key));
         let query_uri = String::new();
 
-        let integrity_result = download_full_file_and_check_integrity(pool_client.clone(), config.clone(), object.clone(), req_sem.clone(), cc_sender.clone(), disk_write_tx.clone(), file_info.clone(), canonical_uri.clone(), query_uri.clone()).await;
-        if let Err(e) = integrity_result {
+        let integrity_result = download_full_file_and_check_integrity(pool_client.clone(), config.clone(), object.clone(), req_sem.clone(), cc_sender.clone(), disk_write_tx.clone(), file_info.clone(), canonical_uri.clone(), query_uri.clone(), cancellation_token.clone()).await;
+        if let Err(e) = integrity_result { //TODO JON: only if its integrity failed.
             cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, e))).expect("Failed to send message. This should never happen.");
 
-            let integrity_result = download_full_file_and_check_integrity(pool_client, config, object.clone(), req_sem, cc_sender.clone(), disk_write_tx, file_info, canonical_uri, query_uri).await;
+            let integrity_result = download_full_file_and_check_integrity(pool_client, config, object.clone(), req_sem, cc_sender.clone(), disk_write_tx, file_info, canonical_uri, query_uri, cancellation_token).await;
 
             if let Err(e) = integrity_result {
                 cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Its likely that there is something with the metadata, the network or the s3 storage system.", object.key, e))).expect("Failed to send message. This should never happen.");
@@ -256,24 +259,27 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
     }
 }
 
-async fn download_full_file_and_check_integrity(pool_client: Arc<HyperClient>, config: Arc<DownloadConfig>, object: S3Object, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, disk_write_tx: Sender<WriteMsg>, file_info: Arc<FileInfo>, canonical_uri: Arc<String>, query_uri: String) -> Result<(), Error> {
-    let result = retry_on_failure_async(move || {
-        let config = config.clone();
-        let file_info = file_info.clone();
-        let pool_client = pool_client.clone();
-        let canonical_uri = canonical_uri.clone();
-        let query_uri = query_uri.clone();
-        let req_sem = req_sem.clone();
-        let disk_write_tx = disk_write_tx.clone();
-        async move {
-            http_layer::download::get_file(config, file_info, &pool_client, &canonical_uri, &query_uri, req_sem, disk_write_tx).await
-        }
-    }, cc_sender.clone(), |e: &anyhow::Error| {
-        if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
-            return snow_error.is_retryable();
-        }
-        false
-    }, format!("Downloading {}", object.key)).await;
+async fn download_full_file_and_check_integrity(pool_client: Arc<HyperClient>, config: Arc<DownloadConfig>, object: S3Object, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, disk_write_tx: Sender<WriteMsg>, file_info: Arc<FileInfo>, canonical_uri: Arc<String>, query_uri: String, cancellation_token: CancellationToken) -> Result<(), SnowCopyError> {
+    let result = select! {
+        _ = cancellation_token.cancelled() => {
+            return Err(SnowCopyError::Canceled);
+        },
+
+        result = retry_on_failure_async(move || {
+            let config = config.clone();
+            let file_info = file_info.clone();
+            let pool_client = pool_client.clone();
+            let canonical_uri = canonical_uri.clone();
+            let query_uri = query_uri.clone();
+            let req_sem = req_sem.clone();
+            let disk_write_tx = disk_write_tx.clone();
+
+            async move {
+                http_layer::download::get_file(config, file_info, &pool_client, &canonical_uri, &query_uri, req_sem, disk_write_tx).await
+            }
+        }, cc_sender.clone(),format!("Downloading {}", object.key)) => result
+    };
+
 
     match result {
         Ok(hash) => {
@@ -286,7 +292,7 @@ async fn download_full_file_and_check_integrity(pool_client: Arc<HyperClient>, c
                             object.key, sha256_expected, sha256
                         );
                         cc_sender.send(CommandCenterEvent::Log(error_msg.clone())).expect("Failed to send message");
-                        return Err(anyhow::anyhow!(error_msg));
+                        return Err(IntegrityError(error_msg));
                     } else {
                         cc_sender.send(CommandCenterEvent::FileIntegrityChecked(true)).expect("Failed to send message");
                     }
@@ -297,22 +303,24 @@ async fn download_full_file_and_check_integrity(pool_client: Arc<HyperClient>, c
             }
         }
         Err(e) => {
-            cc_sender.send(CommandCenterEvent::Log(format!("Failed to download {}: {}", object.key, e))).expect("Failed to send message");
-            //TODO JON: Panic? we need to be sharp about how to deal with these irrecoverable errors
+            cc_sender.send(CommandCenterEvent::FatalError(format!("Failed to download {}: {}", object.key, e))).expect("Failed to send message");
         }
     }
 
     Ok(())
 }
 
-async fn download_files_in_part_and_check_integrity(pool_client: &Arc<HyperClient>, config: &Arc<DownloadConfig>, object: &S3Object, req_sem: &Arc<Semaphore>, cc_sender: &UnboundedSender<CommandCenterEvent>, disk_write_tx: &Sender<WriteMsg>, multipart_integrity_verification: bool, key: &String, total_size: u64, file: Arc<File>, chunk_size: u64, num_parts: u64, hash_algo: IntegrityAlgorithm) -> Result<(), Error> {
-    let mut download_set = download_file_in_parts(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, &config.bucket, &key, total_size, file, chunk_size, num_parts, hash_algo);
+async fn download_files_in_part_and_check_integrity(pool_client: &Arc<HyperClient>, config: &Arc<DownloadConfig>, object: &S3Object, req_sem: &Arc<Semaphore>, cc_sender: &UnboundedSender<CommandCenterEvent>, disk_write_tx: &Sender<WriteMsg>, multipart_integrity_verification: bool, key: &String, total_size: u64, file: Arc<File>, chunk_size: u64, num_parts: u64, hash_algo: IntegrityAlgorithm, cancellation_token: CancellationToken) -> Result<(), SnowCopyError> {
+    let mut download_set = download_file_in_parts(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, &config.bucket, &key, total_size, file, chunk_size, num_parts, hash_algo, cancellation_token);
 
     let mut part_hashes = vec![None; num_parts as usize];
     while let Some(res) = download_set.join_next().await {
         match res {
-            Ok(Ok((i, _bytes, hash))) => {
-                part_hashes[i as usize] = hash; //Maintain part order to ensure correct integrity verification
+            Ok(Ok((part_index, _bytes, hash))) => {
+                part_hashes[part_index as usize] = hash; //Maintain part order to ensure correct integrity verification
+            }
+            Ok(Err(SnowCopyError::Canceled)) => {
+                return Ok(());
             }
             Ok(Err(e)) => {
                 panic!("Part download failed for {}: {}", key, e);
@@ -341,15 +349,16 @@ async fn download_files_in_part_and_check_integrity(pool_client: &Arc<HyperClien
                 key, expected_etag, reconstructed_etag
             );
             cc_sender.send(CommandCenterEvent::Log(error_msg.clone())).expect("Failed to send message");
-            return Err(anyhow::anyhow!(error_msg));
+            return Err(IntegrityError(error_msg));
         } else {
             cc_sender.send(CommandCenterEvent::FileIntegrityChecked(true)).expect("Failed to send message");
         }
     }
+
     Ok(())
 }
 
-fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadConfig>, object: &S3Object, req_sem: &Arc<Semaphore>, cc_sender: &UnboundedSender<CommandCenterEvent>, disk_write_tx: &Sender<WriteMsg>, bucket: &String, key: &String, total_size: u64, file: Arc<File>, chunk_size: u64, num_parts: u64, hash_algo: IntegrityAlgorithm) -> JoinSet<Result<(u64, u64, Option<String>), Error>> {
+fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadConfig>, object: &S3Object, req_sem: &Arc<Semaphore>, cc_sender: &UnboundedSender<CommandCenterEvent>, disk_write_tx: &Sender<WriteMsg>, bucket: &String, key: &String, total_size: u64, file: Arc<File>, chunk_size: u64, num_parts: u64, hash_algo: IntegrityAlgorithm, cancellation_token: CancellationToken) -> JoinSet<Result<(u64, u64, Option<String>), SnowCopyError>> {
     let tracker = Arc::new(FileCompletionTracker {
         pending_bytes_to_be_written: std::sync::atomic::AtomicU64::new(total_size),
         mtime: object.modified_time,
@@ -374,27 +383,30 @@ fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadC
         let hash_algo = hash_algo.clone();
 
         let cc_sender = cc_sender.clone();
+        let cancellation_token = cancellation_token.clone();
         download_set.spawn(async move {
-            let res = retry_on_failure_async(|| {
-                let config = config.clone();
-                let pool_client = pool_client.clone();
-                let req_sem = req_sem.clone();
-                let canonical_uri = canonical_uri.clone();
-                let query_uri = String::new();
-                let file = file.clone();
-                let disk_write_tx = disk_write_tx.clone();
-                let tracker = tracker.clone();
-                let hash_algo = hash_algo.clone();
+            let res = select! {
+                res = retry_on_failure_async(|| {
+                    let config = config.clone();
+                    let pool_client = pool_client.clone();
+                    let req_sem = req_sem.clone();
+                    let canonical_uri = canonical_uri.clone();
+                    let query_uri = String::new();
+                    let file = file.clone();
+                    let disk_write_tx = disk_write_tx.clone();
+                    let tracker = tracker.clone();
+                    let hash_algo = hash_algo.clone();
 
-                async move {
-                    http_layer::download::download_file_range(start, end, config, &pool_client, req_sem, &canonical_uri, &query_uri, file, disk_write_tx, tracker, hash_algo).await
+                    async move {
+                        http_layer::download::download_file_range(start, end, config, &pool_client, req_sem, &canonical_uri, &query_uri, file, disk_write_tx, tracker, hash_algo).await
+                    }
+                }, cc_sender.clone(),format!("Downloading part (bytes {} to {}) of {}", start, end, canonical_uri)) => res,
+
+                _ = cancellation_token.cancelled() => {
+                    return Err(SnowCopyError::Canceled);
                 }
-            }, cc_sender.clone(), |e: &anyhow::Error| {
-                if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
-                    return snow_error.is_retryable();
-                }
-                false
-            }, format!("Downloading part (bytes {} to {}) of {}", start, end, canonical_uri)).await;
+            };
+
             res.map(|(bytes, hash)| (i, bytes, hash))
         });
     }
@@ -402,19 +414,64 @@ fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadC
 }
 
 
-#[allow(dead_code)]
-fn update_mod_time_on_file(object: &S3Object, cc_sender: &UnboundedSender<CommandCenterEvent>) { //TODO JON: should we retry? I think this should never fail, in practice, unless some other program takes write of the file and then we dont want to update mtime anyways
-    if let Some(mtime) = object.modified_time {
-        match fs::OpenOptions::new().write(true).open(&object.local_path) {
-            Ok(file) => {
-                if let Err(e) = file.set_modified(mtime) {
-                    cc_sender.send(CommandCenterEvent::Log(format!("Failed to update mtime for {:?}: {}", object.local_path, e))).expect("Failed to send message. This should never happen.");
+pub fn spawn_global_writers(
+    rx: Receiver<WriteMsg>,
+    num_writers: usize,
+    cc_sender: UnboundedSender<CommandCenterEvent>,
+    token: CancellationToken
+) {
+    let rx = Arc::new(tokio::sync::Mutex::new(rx));
+
+    for _ in 0..num_writers {
+        let rx = rx.clone();
+        let cc_sender = cc_sender.clone();
+        let token = token.clone();
+
+        task::spawn_blocking(move || {
+            loop {
+                if token.is_cancelled() {
+                    break;
+                }
+
+                let msg = {
+                    let mut rx_lock = rx.blocking_lock();
+                    rx_lock.blocking_recv()
+                };
+
+                match msg {
+                    Some((file, offset, data, tracker)) => {
+                        if let Err(e) = &file.write_at_offset(&data, offset) {
+                            eprintln!("write error: {}", e); //TODO JON: Should we just retry? But what kind of local IO error would benefit from that?
+                            //probably panic?
+                        } else {
+                            tracker.complete_write(&file, data.len(), cc_sender.clone());
+                            cc_sender.send(CommandCenterEvent::PartTransferred(data.len() as u64)).unwrap();
+                        }
+                    }
+                    None => break,
                 }
             }
-            Err(e) => {
-                cc_sender.send(CommandCenterEvent::Log(format!("Failed to open file to update mtime for {:?}: {}", object.local_path, e))).expect("Failed to send message. This should never happen.");
-            }
-        }
+        });
     }
 }
 
+
+#[cfg(unix)]
+impl WriteAt for std::fs::File {
+    fn write_at_offset(&self, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+        use std::os::unix::fs::FileExt;
+        self.write_at(buf, offset)
+    }
+}
+
+#[cfg(windows)]
+impl WriteAt for File {
+    fn write_at_offset(&self, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+        use std::os::windows::fs::FileExt;
+        self.seek_write(buf, offset)
+    }
+}
+
+trait WriteAt { //Abstract to make it more testable
+    fn write_at_offset(&self, buf: &[u8], offset: u64) -> std::io::Result<usize>;
+}

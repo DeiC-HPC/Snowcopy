@@ -151,9 +151,9 @@ impl CC for CommandCenter {
                         }
                     }
                     CommandCenterEvent::FatalError(err) => {
-                        ui_tx.send(UiEvent::Println(format!("Fatal error: {}", err))).expect("Should never fail");
+                        ui_tx.send(UiEvent::Println(format!("Shutting down due to fatal error: {}", err))).expect("Should never fail");
                         cancellation_token_of_all_ongoing_tasks.cancel();
-                        return;
+                        //TODO Jon: save the first cancellation event and
                     }
                 }
             }

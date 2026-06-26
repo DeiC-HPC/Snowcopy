@@ -2,6 +2,7 @@ use std::fmt;
 use std::error::Error;
 use std::io;
 use hyper;
+use crate::retry::RetryableError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum S3Error {
@@ -106,6 +107,14 @@ pub enum SnowCopyError {
     Hyper(hyper::Error),
     /// The server returned a successful response, but it was missing data required by the client.
     MissingRequiredHeader(&'static str),
+    /// Generic retryable error
+    RetryableError(String),
+    /// Integrity Error
+    IntegrityError(String),
+    /// The operation was canceled.
+    Canceled,
+    /// If we cannot convert the error into a SnowCopyError.
+    Unknown,
 }
 
 impl fmt::Display for SnowCopyError {
@@ -118,14 +127,18 @@ impl fmt::Display for SnowCopyError {
             SnowCopyError::Parse(m) => write!(f, "Parsing failure: {}", m),
             SnowCopyError::Hyper(e) => write!(f, "Hyper error: {}", e),
             SnowCopyError::MissingRequiredHeader(header) => write!(f, "Invalid response: missing required `{}` header", header),
+            SnowCopyError::RetryableError(s) => write!(f, "Retryable error: {}", s),
+            SnowCopyError::IntegrityError(s) => write!(f, "Integrity error: {}", s),
+            SnowCopyError::Canceled => write!(f, "Operation canceled"),
+            SnowCopyError::Unknown => write!(f, "Unknown error"),
         }
     }
 }
 
 impl Error for SnowCopyError {}
 
-impl SnowCopyError {
-    pub fn is_retryable(&self) -> bool {
+impl RetryableError for SnowCopyError {
+    fn is_retryable(&self) -> bool {
         match self {
             SnowCopyError::S3(e) => e.is_retryable(),
             SnowCopyError::Http(s) => {
@@ -172,6 +185,18 @@ impl SnowCopyError {
                 // the multipart upload. Retrying the part is usually safe.
                 true
             }
+
+            SnowCopyError::RetryableError(_) => {
+                true
+            }
+
+            SnowCopyError::IntegrityError(_) => {
+                true
+            }
+
+            SnowCopyError::Canceled => false,
+
+            SnowCopyError::Unknown => false,
         }
     }
 }
@@ -185,6 +210,30 @@ impl From<io::Error> for SnowCopyError {
 impl From<hyper::Error> for SnowCopyError {
     fn from(err: hyper::Error) -> Self {
         SnowCopyError::Hyper(err)
+    }
+}
+
+impl From<tokio::sync::AcquireError> for SnowCopyError {
+    fn from(err: tokio::sync::AcquireError) -> Self {
+        SnowCopyError::Transport(err.to_string())
+    }
+}
+
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for SnowCopyError {
+    fn from(err: tokio::sync::mpsc::error::SendError<T>) -> Self {
+        SnowCopyError::Transport(err.to_string())
+    }
+}
+
+impl From<openssl::error::ErrorStack> for SnowCopyError {
+    fn from(err: openssl::error::ErrorStack) -> Self {
+        SnowCopyError::Parse(err.to_string())
+    }
+}
+
+impl From<hyper_util::client::legacy::Error> for SnowCopyError {
+    fn from(err: hyper_util::client::legacy::Error) -> Self {
+        SnowCopyError::Transport(err.to_string())
     }
 }
 

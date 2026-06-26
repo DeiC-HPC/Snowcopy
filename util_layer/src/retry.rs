@@ -5,6 +5,9 @@ use std::future::Future;
 use std::time::SystemTime;
 use crate::cc_util::CommandCenterEvent;
 
+pub trait RetryableError {
+    fn is_retryable(&self) -> bool;
+}
 
 /// ```text
 /// Asynchronously retries a given operation upon failure based on the specified retry condition.
@@ -16,8 +19,6 @@ use crate::cc_util::CommandCenterEvent;
 /// - `op`: A closure that produces a future representing the asynchronous operation to be executed.
 ///         The closure is invoked each time the operation is retried.
 /// - `cc_tx`: An `UnboundedSender` used to communicate retry events and logging information with the command center.
-/// - `should_retry`: A function that takes a reference to an error and returns `true` if the operation should be retried,
-///                   or `false` otherwise.
 /// - `message`: A `String` that describes the operation being retried, used for logging and monitoring purposes.
 ///
 /// # Returns
@@ -26,17 +27,15 @@ use crate::cc_util::CommandCenterEvent;
 /// - Returns `Err(E)` if the operation fails and the retry condition (`should_retry`) is not met or other issues occur.
 ///
 /// ```
-pub async fn retry_on_failure_async<F, Fut, T, E, ShouldRetry>(
+pub async fn retry_on_failure_async<F, Fut, T, E>(
     mut op: F,
     cc_tx: UnboundedSender<CommandCenterEvent>,
-    should_retry: ShouldRetry,
     message: String,
 ) -> Result<T, E>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, E>>,
-    ShouldRetry: Fn(&E) -> bool,
-    E: std::fmt::Display,
+    E: std::fmt::Display + RetryableError + std::fmt::Debug,
 {
     let mut attempt = 0;
 
@@ -44,8 +43,16 @@ where
         match op().await {
             Ok(value) => return Ok(value),
             Err(err) => {
-                if !should_retry(&err) {
-                    cc_tx.send(CommandCenterEvent::Log(format!("{}: Error: {}. Not retrying.", message, err))).expect("Failed to send message to command center.");
+                if !err.is_retryable() {
+                    cc_tx
+                        .send(CommandCenterEvent::FatalError(format!(
+                            "{}: Error type: {}. Error: {}. Debug: {:?}. Not retrying.",
+                            message,
+                            std::any::type_name::<E>(),
+                            err,
+                            err
+                        )))
+                        .expect("Failed to send message to command center.");
                     return Err(err);
                 }
 

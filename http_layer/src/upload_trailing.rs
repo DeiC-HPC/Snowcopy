@@ -28,8 +28,7 @@ pub async fn put_file_streaming(
     req_sem: &Semaphore,
     canonical_uri: &String,
     query_uri: &String,
-    open_file_limit: &Semaphore,
-) -> anyhow::Result<(String, u64)> {
+) -> Result<(String, u64), SnowCopyError> {
     let req = create_streaming_req_trailing_checksum(
         ctx.clone(),
         canonical_uri,
@@ -43,7 +42,7 @@ pub async fn put_file_streaming(
     )?;
 
     let permit = req_sem.acquire().await?;
-    let resp = client.request(req).await?;
+    let resp = client.request(req).await.map_err(SnowCopyError::from)?;
 
     drop(permit);
 
@@ -78,7 +77,7 @@ fn create_streaming_req_trailing_checksum(
     modified_time: Option<SystemTime>,
     file_sem: Arc<Semaphore>,
     chunk_size: u64,
-) -> anyhow::Result<Request<StreamingBody>> {
+) -> Result<Request<StreamingBody>, SnowCopyError> {
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
         region: ctx.endpoint.s3_region.clone(),
@@ -303,7 +302,7 @@ impl Body for StreamingFileChunkedBody {
     fn poll_frame(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
-    ) -> Poll<Option<anyhow::Result<Frame<Self::Data>, Self::Error>>> {
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let inner = &mut self.inner;
 
         loop {

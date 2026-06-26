@@ -17,7 +17,6 @@ use util_layer::cc_util::{CommandCenterEvent, Status};
 use util_layer::constants;
 use util_layer::constants::{CHUNK_SIZE, MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY};
 use util_layer::retry::retry_on_failure_async;
-use util_layer::snow_errors::SnowCopyError;
 use util_layer::url_encoder::url_encode_fast;
 use util_layer::{FileInfo, UploadConfig};
 use walkdir::WalkDir;
@@ -35,7 +34,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
     let hyper_client = build_https_client();
     let (active_file_io_sem, req_sem, open_files_sem, buffer_pool_size) = auto_tuning::auto_tune_upload(ctx.clone(), cc_tx.clone());
 
-    let task_sem = Arc::new(Semaphore::new(open_files_sem.available_permits())); //TODO JON: should this just be open_file_sem?
+    let task_sem = Arc::new(Semaphore::new(open_files_sem.available_permits()));
     let buffer_pool = BufferPool::new(buffer_pool_size, CHUNK_SIZE as usize);
 
     let bucket_created = bucket_creation_handle.await.unwrap();
@@ -49,7 +48,6 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
     let runtime = Arc::new(UploadRuntime { //TODO JON: I'm unsure if the internals should be wrapped in Arc as well.
         file_sem : Arc::new(active_file_io_sem),
         req_sem,
-        open_files_sem,
         hyper_client,
         buffer_pool : Arc::new(buffer_pool),
         cc_tx: cc_tx.clone(),
@@ -113,7 +111,7 @@ fn create_bucket_if_not_exist(ctx: &Arc<UploadConfig>, client: &Arc<AWSClient>) 
 
 async fn upload_file(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>) {
     let file = File::open(&*file_info.file_path);
-    
+
     if let Err(e) = file { //Hopefully, we should be on top of ulimit through auto-tuning
         runtime.cc_tx.send(CommandCenterEvent::FatalError(format!("Error opening file {}: {}", file_info.file_path.to_str().unwrap(), e))).expect("Failed to send message to command center. Should never happen.");
         return;
@@ -176,17 +174,15 @@ async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<Upl
 
                     async move {
                         if ctx.trailing {
-                            http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri, &runtime.open_files_sem).await
+                            http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri).await
                         } else {
                             http_layer::put_file_range(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
                         }
                     }
-                }, runtime_clone.cc_tx.clone(), |e: &anyhow::Error| {
-                    if let Some(snow_error) = e.downcast_ref::<SnowCopyError>() {
-                        return snow_error.is_retryable();
-                    }
-                    false
-                }, format!("Uploading part {} of {}", part_number, file_info_clone.aws_uri_encoded_key)) => res,
+                },
+                    runtime_clone.cc_tx.clone(),
+                    format!("Uploading part {} of {}", part_number, file_info_clone.aws_uri_encoded_key)) => res,
+
                 _ = runtime_clone.cancellation_token.cancelled() => {
                     return;
                 }
@@ -203,7 +199,7 @@ async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<Upl
                     runtime_clone.cc_tx.send(CommandCenterEvent::PartTransferred(metrics)).expect("Failed to send message to command center. Should never happen.");
                 }
                 Err(e) => {
-                    panic!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e); //TODO JON: is this the way?
+                    CommandCenterEvent::FatalError(format!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e));
                 }
             }
         });
@@ -250,18 +246,14 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, 
 
             async move {
                 if ctx.trailing_small {
-                    http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, 0, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri, &runtime.open_files_sem).await
+                    http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, 0, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri).await
                 } else {
                     http_layer::put_file(ctx, file, file_info, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
                 }
             }
-        }, runtime.cc_tx.clone(), |e: &anyhow::Error| {
-            if let Some(snow_err) = e.downcast_ref::<SnowCopyError>() {
-                return snow_err.is_retryable();
-            }
-            false
-        }, format!("Uploading {}", file_info.aws_uri_encoded_key)) => res,
-        
+        }, runtime.cc_tx.clone(),
+            format!("Uploading {}", file_info.aws_uri_encoded_key)) => res,
+
         _ = runtime.cancellation_token.cancelled() => {
             return;
         }
@@ -409,7 +401,6 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
 pub struct UploadRuntime {
     pub file_sem: Arc<Semaphore>,
     pub req_sem: Semaphore,
-    pub open_files_sem: Semaphore,
     pub hyper_client: HyperClient,
     pub buffer_pool: Arc<BufferPool>,
     pub cc_tx: UnboundedSender<CommandCenterEvent>,
