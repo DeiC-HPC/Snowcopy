@@ -18,6 +18,7 @@ use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::cc_util::Status::Transferring;
 use util_layer::constants::{MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, PAYLOAD_SHA256_METADATA_KEY};
@@ -177,7 +178,7 @@ async fn list_bucket( //TODO JON: use for ls?
 }
 
 
-pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: Arc<AWSClient>, sender: UnboundedSender<CommandCenterEvent>) ->  mpsc::Receiver<S3Object> {
+pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &Path, client: Arc<AWSClient>, sender: UnboundedSender<CommandCenterEvent>, token: CancellationToken) ->  mpsc::Receiver<S3Object> {
     let (tx, rx) = mpsc::channel::<S3Object>(constants::DISCOVERY_LIMIT_DOWNLOAD as usize);
 
     let bucket_clone = bucket.to_owned();
@@ -196,6 +197,9 @@ pub async fn async_head_objects_from_bucket(bucket: &str, prefix: &str, dest: &P
         let mut join_set = JoinSet::new();
 
         while let Some(result) = paginator.next().await {
+            if token.is_cancelled() {
+                break;
+            }
             match result {
                 Ok(output) => {
                     let tx_clone = tx.clone();

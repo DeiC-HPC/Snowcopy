@@ -48,8 +48,8 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
     let (cc_tx, cc_handle) = cc.start();
 
     let client = Arc::new(aws_layer::create_client_from_config_endpoint(&ctx.endpoint).await);
-    let object_channel = async_head_objects_from_bucket(&ctx.bucket, &ctx.prefix, &ctx.local_path, client.clone(), cc_tx.clone()).await;
-    let mut object_channel = fetch_object_metadata_and_filter_already_downloaded(&ctx, &cc_tx, client, object_channel).await;
+    let object_channel = async_head_objects_from_bucket(&ctx.bucket, &ctx.prefix, &ctx.local_path, client.clone(), cc_tx.clone(), cancellation_token.clone()).await;
+    let mut object_channel = fetch_object_metadata_and_filter_already_downloaded(&ctx, &cc_tx, client, object_channel, cancellation_token.clone()).await;
 
     let hyper_client = Arc::new(http_layer::build_https_client());
     let (file_sem, req_sem, download_file_concurrency) = auto_tune_download(ctx.clone(), cc_tx.clone());
@@ -91,7 +91,7 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
     cc_handle.await.unwrap();
 }
 
-async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<DownloadConfig>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut object_channel: Receiver<S3Object>) -> Receiver<S3Object> {
+async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<DownloadConfig>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut object_channel: Receiver<S3Object>, token: CancellationToken) -> Receiver<S3Object> {
     let (download_tx, download_rx) = mpsc::channel::<S3Object>(METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD as usize);
 
     let checker_client = client.clone();
@@ -104,6 +104,10 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
 
         let mut checker_set = JoinSet::new();
         while let Some(object) = object_channel.recv().await {
+            if token.is_cancelled() {
+                break;
+            }
+
             let client = checker_client.clone();
             let bucket = checker_bucket.clone();
             let download_tx = download_tx.clone();
@@ -219,8 +223,8 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
 
         let integrity_result = download_files_in_part_and_check_integrity(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &key, total_size, file.clone(), chunk_size, num_parts, hash_algo.clone(), cancellation_token.clone()).await;
 
-        if let Err(e) = integrity_result { //TODO JON: can we just check if its an integrity error?
-            cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, e))).expect("Failed to send message. This should never happen.");
+        if let Err(IntegrityError(msg)) = integrity_result {
+            cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, msg))).expect("Failed to send message. This should never happen.");
 
             let integrity_result = download_files_in_part_and_check_integrity(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &key, total_size, file, chunk_size, num_parts, hash_algo, cancellation_token).await;
 
@@ -244,8 +248,8 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
         let query_uri = String::new();
 
         let integrity_result = download_full_file_and_check_integrity(pool_client.clone(), config.clone(), object.clone(), req_sem.clone(), cc_sender.clone(), disk_write_tx.clone(), file_info.clone(), canonical_uri.clone(), query_uri.clone(), cancellation_token.clone()).await;
-        if let Err(e) = integrity_result { //TODO JON: only if its integrity failed.
-            cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, e))).expect("Failed to send message. This should never happen.");
+        if let Err(IntegrityError(msg)) = integrity_result { //TODO JON: only if its integrity failed.
+            cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, msg))).expect("Failed to send message. This should never happen.");
 
             let integrity_result = download_full_file_and_check_integrity(pool_client, config, object.clone(), req_sem, cc_sender.clone(), disk_write_tx, file_info, canonical_uri, query_uri, cancellation_token).await;
 
@@ -280,7 +284,6 @@ async fn download_full_file_and_check_integrity(pool_client: Arc<HyperClient>, c
         }, cc_sender.clone(),format!("Downloading {}", object.key)) => result
     };
 
-
     match result {
         Ok(hash) => {
             if let Some(sha256) = hash {
@@ -304,6 +307,7 @@ async fn download_full_file_and_check_integrity(pool_client: Arc<HyperClient>, c
         }
         Err(e) => {
             cc_sender.send(CommandCenterEvent::FatalError(format!("Failed to download {}: {}", object.key, e))).expect("Failed to send message");
+            return Err(e);
         }
     }
 
@@ -320,7 +324,7 @@ async fn download_files_in_part_and_check_integrity(pool_client: &Arc<HyperClien
                 part_hashes[part_index as usize] = hash; //Maintain part order to ensure correct integrity verification
             }
             Ok(Err(SnowCopyError::Canceled)) => {
-                return Ok(());
+                return Ok(()); //TODO JON: What is the best option here?
             }
             Ok(Err(e)) => {
                 panic!("Part download failed for {}: {}", key, e);
