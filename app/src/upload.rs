@@ -5,7 +5,7 @@ use std::io;
 use std::io::Error;
 use std::path::PathBuf;
 
-use aws_layer::{get_s3_metadata, AWSClient, CompletedPartAws};
+use aws_layer::{S3Client, CompletedPartAws};
 use http_layer::{build_https_client, BufferPool, HyperClient};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -15,7 +15,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::{CommandCenterEvent, Status};
 use util_layer::constants;
-use util_layer::constants::{CHUNK_SIZE, MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY};
+use util_layer::constants::CHUNK_SIZE;
 use util_layer::retry::retry_on_failure_async;
 use util_layer::url_encoder::url_encode_fast;
 use util_layer::{FileInfo, UploadConfig};
@@ -28,8 +28,8 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
 
     let mut files_to_upload_stream = walk_directory_async(ctx.local_path.to_path_buf(), cc_tx.clone(), cancellation_token.clone()).await;
 
-    let aws_sdk_client = Arc::new(aws_layer::create_client_from_config_endpoint(&ctx.endpoint).await);
-    let bucket_creation_handle = create_bucket_if_not_exist(&ctx, &aws_sdk_client);
+    let s3client = Arc::new(S3Client::new(&ctx.endpoint, cc_tx.clone()).await);
+    let bucket_creation_handle = create_bucket_if_not_exist(&ctx, &s3client);
 
     let hyper_client = build_https_client();
     let (active_file_io_sem, req_sem, open_files_sem, buffer_pool_size) = auto_tuning::auto_tune_upload(ctx.clone(), cc_tx.clone());
@@ -38,11 +38,10 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
     let buffer_pool = BufferPool::new(buffer_pool_size, CHUNK_SIZE as usize);
 
     let bucket_created = bucket_creation_handle.await.unwrap();
-    let aws_client = aws_sdk_client.clone();
 
     if !bucket_created {
         //We did not create the bucket, so check for already uploaded files
-        files_to_upload_stream = filter_already_existing_files(&ctx, &cc_tx, &aws_client, files_to_upload_stream, cancellation_token.clone());
+        files_to_upload_stream = filter_already_existing_files(&ctx, &cc_tx, &s3client, files_to_upload_stream, cancellation_token.clone());
     }
 
     let runtime = Arc::new(UploadRuntime { //TODO JON: I'm unsure if the internals should be wrapped in Arc as well.
@@ -54,13 +53,13 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
         cancellation_token,
     });
 
-    upload_files_from_stream(ctx, &mut files_to_upload_stream, task_sem, runtime, aws_client).await;
+    upload_files_from_stream(ctx, &mut files_to_upload_stream, task_sem, runtime, s3client).await;
 
     drop(cc_tx);
     cc_handle.await.unwrap();
 }
 
-async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream: &mut Receiver<Result<FileInfo, Error>>, task_sem: Arc<Semaphore>, runtime: Arc<UploadRuntime>, aws_client: Arc<AWSClient>) {
+async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream: &mut Receiver<Result<FileInfo, Error>>, task_sem: Arc<Semaphore>, runtime: Arc<UploadRuntime>, aws_client: Arc<S3Client>) {
     let mut join_set = JoinSet::new();
     loop {
         tokio::select! {
@@ -92,12 +91,12 @@ async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream
     while let Some(_) = join_set.join_next().await {};
 }
 
-fn create_bucket_if_not_exist(ctx: &Arc<UploadConfig>, client: &Arc<AWSClient>) -> JoinHandle<bool> {
+fn create_bucket_if_not_exist(ctx: &Arc<UploadConfig>, client: &Arc<S3Client>) -> JoinHandle<bool> {
     let bucket_creation_handle = {
         let client = client.clone();
         let bucket = ctx.bucket.clone();
         tokio::spawn(async move {
-            match aws_layer::create_bucket(&client, &bucket).await {
+            match client.create_bucket(&bucket).await {
                 Ok(Some(_)) => true, // Bucket created
                 Ok(None) => false, // Bucket already exists
                 Err(e) => {
@@ -109,7 +108,7 @@ fn create_bucket_if_not_exist(ctx: &Arc<UploadConfig>, client: &Arc<AWSClient>) 
     bucket_creation_handle
 }
 
-async fn upload_file(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>) {
+async fn upload_file(ctx: Arc<UploadConfig>, aws_client: Arc<S3Client>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>) {
     let file = File::open(&*file_info.file_path);
 
     if let Err(e) = file { //Hopefully, we should be on top of ulimit through auto-tuning
@@ -125,21 +124,21 @@ async fn upload_file(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, runtime
     }
 }
 
-async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<AWSClient>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>, file: Arc<File>) {
-    let upload_id = start_multipart_upload_with_retry(&ctx, &aws_client, &file_info).await;
+async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<S3Client>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>, file: Arc<File>) {
+    let chunk_amount = (file_info.file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-    let chunk_amount_u64 = (file_info.file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+    let upload_id = aws_client.create_multipart_upload(&ctx.bucket, &*file_info.aws_uri_encoded_key, file_info.modified_time, CHUNK_SIZE).await.unwrap();
 
     let completed_parts: Arc<Mutex<Vec<CompletedPartAws>>> = Arc::new(Mutex::new(Vec::new()));
 
-    if upload_each_chunk_with_retry(&ctx, &runtime, &file_info, file, &upload_id, chunk_amount_u64, &completed_parts).await { return; }
+    upload_each_chunk_with_retry(&ctx, &runtime, &file_info, file, &upload_id, chunk_amount, &completed_parts).await;
 
     let completed_parts = Arc::try_unwrap(completed_parts).unwrap().into_inner();
-    aws_layer::complete_multipart_upload(&aws_client, &ctx.bucket, &*file_info.aws_uri_encoded_key, &upload_id, completed_parts).await.unwrap();
+    aws_client.complete_multipart_upload(&ctx.bucket, &*file_info.aws_uri_encoded_key, &upload_id, completed_parts).await.unwrap();
     let _ = runtime.cc_tx.send(CommandCenterEvent::FileTransferred(file_info.file_size));
 }
 
-async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<UploadRuntime>, file_info: &Arc<FileInfo>, file: Arc<File>, upload_id: &String, chunk_amount_u64: u64, completed_parts: &Arc<Mutex<Vec<CompletedPartAws>>>) -> bool {
+async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<UploadRuntime>, file_info: &Arc<FileInfo>, file: Arc<File>, upload_id: &String, chunk_amount_u64: u64, completed_parts: &Arc<Mutex<Vec<CompletedPartAws>>>) {
     let mut join_set = JoinSet::new();
 
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.aws_uri_encoded_key));
@@ -206,29 +205,8 @@ async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<Upl
     }
 
     while let Some(_) = join_set.join_next().await {}
-
-    if runtime.cancellation_token.is_cancelled() {
-        return true;
-    }
-    false
 }
 
-async fn start_multipart_upload_with_retry(ctx: &Arc<UploadConfig>, aws_client: &Arc<AWSClient>, file_info: &Arc<FileInfo>) -> String {
-    let mut create_multipart_upload = aws_client.create_multipart_upload().bucket(&ctx.bucket).key(&*file_info.aws_uri_encoded_key);
-
-    if let Some(mtime) = file_info.modified_time {
-        create_multipart_upload = create_multipart_upload.metadata("mtime", util_layer::time::time_to_float_string(mtime));
-    }
-
-    if ctx.md5_checksum_upload {
-        //TODO JON: chunk will increase if file is larger than 50GiB
-        create_multipart_upload = create_multipart_upload.metadata(MULTIPART_UPLOAD_METADATA_CHUNK_AMOUNT_KEY, CHUNK_SIZE.to_string());
-    }
-
-    let create_multipart_upload_output = create_multipart_upload.send().await.unwrap();
-    let upload_id = create_multipart_upload_output.upload_id().unwrap();
-    upload_id.to_string()
-}
 
 async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>, file: Arc<File>) {
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.aws_uri_encoded_key));
@@ -269,7 +247,7 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, 
     }
 }
 
-fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: &AWSClient, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, cancellation_token: CancellationToken) -> Receiver<Result<FileInfo, io::Error>> {
+fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: &Arc<S3Client>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, cancellation_token: CancellationToken) -> Receiver<Result<FileInfo, io::Error>> {
     let (upload_tx, upload_rx) = mpsc::channel::<Result<FileInfo, io::Error>>(constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_UPLOAD as usize);
 
     let checker_client = client.clone();
@@ -292,20 +270,29 @@ fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSende
                             let cancellation_token = cancellation_token.clone();
 
                             checker_set.spawn(async move {
-                                let (_exists_at_target, size, s3_mtime, _chunk_size, _etag, _sha256_checksum) = tokio::select! {
-                                    res = get_s3_metadata(&client, &bucket, &file_info.aws_uri_encoded_key) => res,
+                                let metadata = tokio::select! {
+                                    res = client.get_s3_metadata(&bucket, &file_info.aws_uri_encoded_key) => res,
                                     _ = cancellation_token.cancelled() => {
+                                        drop(permit);
                                         return;
                                     }
                                 };
 
-                                if should_upload(&file_info, size, s3_mtime).await {
-                                    upload_tx.send(Ok(file_info)).await.expect("Should never fail.")
-                                } else {
-                                    // Already uploaded, just let CC and ui know. We are done with the file
-                                    cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(file_info.file_size)).expect("Should never fail.");
+                                match metadata {
+                                    Ok(metadata) => {
+                                        let (_exists_at_target, size, s3_mtime, _chunk_size, _etag, _sha256_checksum) = metadata;
+                                        if should_upload(&file_info, size, s3_mtime).await {
+                                            upload_tx.send(Ok(file_info)).await.expect("Should never fail.")
+                                        } else {
+                                            // Already uploaded, just let CC and ui know. We are done with the file
+                                            cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(file_info.file_size)).expect("Should never fail.");
+                                        }
+                                       drop(permit);
+                                    }
+                                    Err(e) => {
+                                        cc_tx.send(CommandCenterEvent::FatalError(format!("Error getting metadata for file {}: {}", file_info.file_path.to_str().unwrap(), e))).expect("Should never fail.");
+                                    }
                                 }
-                                drop(permit);
                             });
                         }
                         Some(Err(e)) => {
@@ -324,18 +311,27 @@ fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSende
     upload_rx
 }
 
-async fn should_upload(file_info: &FileInfo,  size: Option<i64>, s3_mtime: Option<SystemTime>) -> bool {
-    let needs_upload = if let Some(s3_mtime) = s3_mtime {
-        if let Some(size) = size {
-            //Same size and mtime -> its the same file.
-            !(size as u64 == file_info.file_size && s3_mtime.duration_since(file_info.modified_time.unwrap()).unwrap().as_secs() == 0)
-        } else {
-            true
-        }
-    } else {
-        true
+async fn should_upload(file_info: &FileInfo, size: Option<i64>, s3_mtime: Option<SystemTime>) -> bool {
+    let Some(size) = size else {
+        return true;
     };
-    needs_upload
+
+    if size as u64 != file_info.file_size {
+        return true;
+    }
+
+    let Some(s3_mtime) = s3_mtime else {
+        return true;
+    };
+
+    let Some(local_mtime) = file_info.modified_time else {
+        return true;
+    };
+
+    match s3_mtime.duration_since(local_mtime) {
+        Ok(diff) => diff.as_secs() != 0 || diff.subsec_nanos() != 0, //Same size and mtime -> its the same file.
+        Err(_) => true,
+    }
 }
 
 pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<CommandCenterEvent>, cancellation_token: CancellationToken) -> mpsc::Receiver<Result<FileInfo, io::Error>> {

@@ -1,7 +1,9 @@
 use crate::auto_tuning::auto_tune_download;
 use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
-use aws_layer::{async_head_objects_from_bucket, get_s3_metadata, AWSClient};
+use aws_layer::S3Client;
+use http_layer::filesystem_checker::is_valid_s3_key_for_local_filesystem;
+use http_layer::integrity::{reconstructable_multipart_etag, IntegrityAlgorithm};
 use http_layer::HyperClient;
 use std::collections::HashSet;
 use std::fs;
@@ -9,21 +11,19 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tokio::{select, task};
 use tokio::sync::mpsc::{self, Receiver, Sender, UnboundedSender};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
+use tokio::{select, task};
+use tokio_util::sync::CancellationToken;
+use util_layer::cc_util::CommandCenterEvent;
 use util_layer::constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD;
 use util_layer::download::{FileCompletionTracker, WriteMsg};
 use util_layer::retry::retry_on_failure_async;
 use util_layer::snow_errors::SnowCopyError;
-use util_layer::{DownloadConfig, FileInfo, S3Object};
-use http_layer::filesystem_checker::is_valid_s3_key_for_local_filesystem;
-use http_layer::integrity::{reconstructable_multipart_etag, IntegrityAlgorithm};
-use tokio::task::JoinSet;
-use tokio_util::sync::CancellationToken;
-use SnowCopyError::IntegrityError;
-use util_layer::cc_util::CommandCenterEvent;
 use util_layer::url_encoder::url_encode_fast;
+use util_layer::{DownloadConfig, FileInfo, S3Object};
+use SnowCopyError::IntegrityError;
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.
@@ -47,8 +47,8 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
     let cc = CommandCenter::new_download(&ctx, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
 
-    let client = Arc::new(aws_layer::create_client_from_config_endpoint(&ctx.endpoint).await);
-    let object_channel = async_head_objects_from_bucket(&ctx.bucket, &ctx.prefix, &ctx.local_path, client.clone(), cc_tx.clone(), cancellation_token.clone()).await;
+    let client = Arc::new(S3Client::new(&ctx.endpoint, cc_tx.clone()).await);
+    let object_channel = client.stream_head_objects_from_bucket_in_separate_task(&ctx.bucket, &ctx.prefix, &ctx.local_path, cancellation_token.clone()).await;
     let mut object_channel = fetch_object_metadata_and_filter_already_downloaded(&ctx, &cc_tx, client, object_channel, cancellation_token.clone()).await;
 
     let hyper_client = Arc::new(http_layer::build_https_client());
@@ -66,6 +66,7 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
         //Ensure parent directories exist
         if let Err(e) = ensure_parent_dirs_exist(&object.local_path, &mut created_dirs) {
             eprintln!("Failed to create directories for {:?}: {}", object.local_path, e);
+            cc_tx.send(CommandCenterEvent::FatalError(format!("Failed to create directories for {:?}: {}", object.local_path, e))).expect("Failed to send message. This should never happen.");
             continue;
         }
 
@@ -80,18 +81,20 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
         let cancellation_token = cancellation_token.clone();
 
         join_set.spawn(async move {
-            download_object(hyper_client_clone, config_clone, object, req_sem.clone(), cc_tx.clone(), download_file_concurrency, disk_write_tx.clone(), cancellation_token).await;
+            download_object(hyper_client_clone, config_clone, object, req_sem, cc_tx, download_file_concurrency, disk_write_tx, cancellation_token).await;
             drop(permit);
         });
     }
-
+    //TODO Jon: should we just check for errors here and react to them? But we would still like a general way to deal with errors and present them to the user. It could be that the command center did not care about errors at all. But the functioning program execution only
+    //TODO Jon: The object streams could propagate their errors and then we would have a single place that all errors are propagated to.
+    //TODO JON: The current design have us calling FATAL_ERROR, but still having to return an error. Its ugly because its hard to understand the error flow.
     while let Some(_) = join_set.join_next().await {};
     drop(disk_write_tx);
     drop(cc_tx);
     cc_handle.await.unwrap();
 }
 
-async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<DownloadConfig>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<AWSClient>, mut object_channel: Receiver<S3Object>, token: CancellationToken) -> Receiver<S3Object> {
+async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<DownloadConfig>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<S3Client>, mut object_channel: Receiver<S3Object>, token: CancellationToken) -> Receiver<S3Object> {
     let (download_tx, download_rx) = mpsc::channel::<S3Object>(METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD as usize);
 
     let checker_client = client.clone();
@@ -116,38 +119,52 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
             let warning_has_been_sent = warning_has_been_sent.clone();
 
             checker_set.spawn(async move {
-                let (_, _, mtime, chunk_size, etag, sha256) = get_s3_metadata(&client, &bucket, &object.key).await;
-                let mut object = object;
-                object.modified_time = mtime;
-                object.chunk_size = chunk_size;
-                object.etag = etag;
-                object.sha256_checksum = sha256;
-                object.aws_uri_encoded_key = url_encode_fast(&object.key, false);
+                let metadata = client.get_s3_metadata(&bucket, &object.key).await;
 
-                if !is_valid_s3_key_for_local_filesystem(&object.key){
-                    cc_tx.send(CommandCenterEvent::Log(format!("Skipping invalid S3 key. It cannot be mapped to a local file: {}", object.key))).expect("Failed to send message. This should never happen.");
-                    //TODO JON: we need to ensure that we return a non-zero return value. We should notify the command center and give it the responsibility handle that?
-                    return;
-                }
-
-                let should_download = should_download_object(&mut object);
-
-                if should_download {
-                    if object.chunk_size.is_none() && object.sha256_checksum.is_none() {
-                        let already_sent = warning_has_been_sent.swap(true, Ordering::Relaxed);
-                        if !already_sent {
-                            cc_tx.send(CommandCenterEvent::Log("Lack of Snowcopy file metadata detected for some files - file integrity checks are reduced".to_string())).expect("Failed to send message. This should never happen.");
+                match metadata {
+                    Ok((exists_at_target, _, mtime, chunk_size, etag, sha256)) => {
+                        drop(permit);
+                        if !exists_at_target {
+                            cc_tx.send(CommandCenterEvent::FatalError(format!("S3 object went missing from s3 server during the execution of the program: {}", object.key))).expect("Failed to send message. This should never happen.");
+                            return;
                         }
-                    }
+                        let mut object = object;
+                        object.modified_time = mtime;
+                        object.chunk_size = chunk_size;
+                        object.etag = etag;
+                        object.sha256_checksum = sha256;
+                        object.aws_uri_encoded_key = url_encode_fast(&object.key, false);
 
-                    if let Err(e) = download_tx.send(object).await {
-                        cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to download queue: {}", e))).expect("Failed to send message. This should never happen.");
+                        if !is_valid_s3_key_for_local_filesystem(&object.key){
+                            cc_tx.send(CommandCenterEvent::Log(format!("Skipping invalid S3 key. It cannot be mapped to a local file: {}", object.key))).expect("Failed to send message. This should never happen.");
+                            //TODO JON: we need to ensure that we return a non-zero return value. We should notify the command center and give it the responsibility handle that?
+                            return;
+                        }
+
+                        let should_download = should_download_object(&mut object);
+
+                        if should_download {
+                            if object.chunk_size.is_none() && object.sha256_checksum.is_none() {
+                                let already_sent = warning_has_been_sent.swap(true, Ordering::Relaxed);
+                                if !already_sent {
+                                    cc_tx.send(CommandCenterEvent::Log("Lack of Snowcopy file metadata detected for some files - file integrity checks are reduced".to_string())).expect("Failed to send message. This should never happen.");
+                                }
+                            }
+
+                            if let Err(e) = download_tx.send(object).await {
+                                cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to download queue: {}", e))).expect("Failed to send message. This should never happen.");
+                            }
+                        } else {
+                            // Already downloaded, just update progress for the UI
+                            cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(object.size as u64)).expect("Failed to send message. This should never happen.");
+                        }
+
                     }
-                } else {
-                    // Already downloaded, just update progress for the UI
-                    cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(object.size as u64)).expect("Failed to send message. This should never happen.");
+                    Err(e) => {
+                        cc_tx.send(CommandCenterEvent::FatalError(format!("Failed to get metadata for object: {}. Error: {}", object.key, e))).expect("Failed to send message. This should never happen.");
+                        return;
+                    }
                 }
-                drop(permit);
             });
         }
         while let Some(_) = checker_set.join_next().await {}

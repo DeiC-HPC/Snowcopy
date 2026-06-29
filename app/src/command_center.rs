@@ -138,7 +138,12 @@ impl CC for CommandCenter {
                     }
                     CommandCenterEvent::RetryRequested(tx, attempts, _time, message) => { //TODO Jon: later we should add some metrics and use them to get an idea of the entire stack
                         if attempts > MAX_RETRY {
-                            panic!("{}: Retry amount {} exceeded MAX_RETRY {}", message, attempts, MAX_RETRY);
+                            let _ = ui_tx.send(UiEvent::Println(format!(
+                                "{}: Retry amount {} exceeded MAX_RETRY {}. Not retrying.",
+                                message, attempts, MAX_RETRY
+                            )));
+                            drop(tx);  //tx is dropped; thus the retryer knows it cannot continue. 
+                            continue;
                         }
                         total_retries += 1;
                         let initial_delay = Duration::from_secs(1);

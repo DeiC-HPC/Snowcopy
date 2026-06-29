@@ -12,3 +12,4 @@ hyper = "1"
 bytes = "1.11.1"
 openssl = "0.10.81"
 hyper-util = "0.1.20"
+aws-sdk-s3 = { version = "1", default-features = false }

@@ -2,6 +2,8 @@ use std::fmt;
 use std::error::Error;
 use std::io;
 use hyper;
+use aws_sdk_s3::error::ProvideErrorMetadata;
+use aws_sdk_s3::error::SdkError;
 use crate::retry::RetryableError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +96,8 @@ pub enum SnowCopyError {
     /// Service-level S3 error.
     /// The response was successfully received and parsed, and contains an S3-specific error code.
     S3(S3Error),
+    /// AWS SDK Error
+    Aws(String),
     /// Protocol-level response.
     /// The request failed with an HTTP status code, but no S3-specific error code was found in the body.
     Http(u16),
@@ -121,6 +125,7 @@ impl fmt::Display for SnowCopyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SnowCopyError::S3(e) => write!(f, "S3 service error: {}", e),
+            SnowCopyError::Aws(m) => write!(f, "AWS SDK error: {}", m),
             SnowCopyError::Http(s) => write!(f, "HTTP protocol error (status {}): no S3 error code", s),
             SnowCopyError::Transport(m) => write!(f, "Transport failure: {}", m),
             SnowCopyError::Io(e) => write!(f, "IO failure: {}", e),
@@ -141,6 +146,7 @@ impl RetryableError for SnowCopyError {
     fn is_retryable(&self) -> bool {
         match self {
             SnowCopyError::S3(e) => e.is_retryable(),
+            SnowCopyError::Aws(_) => true, // Conservatively retry AWS SDK errors
             SnowCopyError::Http(s) => {
                 // Retryable HTTP status codes:
                 // 429: Too Many Requests / Slow Down
@@ -171,7 +177,6 @@ impl RetryableError for SnowCopyError {
                 }
             }
             SnowCopyError::Parse(_) => {
-                // Parsing errors are usually not retryable (data is corrupted or format changed)
                 false
             }
             SnowCopyError::Hyper(_) => {
@@ -234,6 +239,44 @@ impl From<openssl::error::ErrorStack> for SnowCopyError {
 impl From<hyper_util::client::legacy::Error> for SnowCopyError {
     fn from(err: hyper_util::client::legacy::Error) -> Self {
         SnowCopyError::Transport(err.to_string())
+    }
+}
+
+impl<E> From<SdkError<E>> for SnowCopyError
+where
+    E: ProvideErrorMetadata + std::fmt::Debug,
+{
+    fn from(err: SdkError<E>) -> Self {
+        let code = err.code().unwrap_or("unknown code");
+
+        if let Some(s3_err) = S3Error::from_code(code) {
+            return SnowCopyError::S3(s3_err);
+        }
+
+        if let Some(status) = err.raw_response().map(|response| response.status().as_u16()) {
+            return SnowCopyError::Http(status);
+        }
+
+        SnowCopyError::Aws(format!(
+            "{}: {}",
+            code,
+            err.message().unwrap_or("missing reason")
+        ))
+    }
+}
+
+impl From<aws_sdk_s3::Error> for SnowCopyError {
+    fn from(err: aws_sdk_s3::Error) -> Self {
+        let code = err.code().unwrap_or("unknown code");
+        if let Some(s3_err) = S3Error::from_code(code) {
+            SnowCopyError::S3(s3_err)
+        } else {
+            SnowCopyError::Aws(format!(
+                "{}: {}",
+                code,
+                err.message().unwrap_or("missing reason")
+            ))
+        }
     }
 }
 
