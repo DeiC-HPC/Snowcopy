@@ -132,7 +132,7 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
                         object.chunk_size = chunk_size;
                         object.etag = etag;
                         object.sha256_checksum = sha256;
-                        object.aws_uri_encoded_key = url_encode_fast(&object.key, false);
+                        object.aws_uri_encoded_key = url_encode_fast(&object.key, true);
 
                         if !is_valid_s3_key_for_local_filesystem(&object.key){
                             cc_tx.send(CommandCenterEvent::Log(format!("Skipping invalid S3 key. It cannot be mapped to a local file: {}", object.key))).expect("Failed to send message. This should never happen.");

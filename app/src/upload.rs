@@ -5,7 +5,7 @@ use std::io;
 use std::io::Error;
 use std::path::PathBuf;
 
-use aws_layer::{S3Client, CompletedPartAws};
+use aws_layer::{CompletedPartAws, S3Client};
 use http_layer::{build_https_client, BufferPool, HyperClient};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -14,10 +14,10 @@ use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::{CommandCenterEvent, Status};
-use util_layer::constants;
 use util_layer::constants::CHUNK_SIZE;
 use util_layer::retry::retry_on_failure_async;
 use util_layer::url_encoder::url_encode_fast;
+use util_layer::constants;
 use util_layer::{FileInfo, UploadConfig};
 use walkdir::WalkDir;
 
@@ -372,11 +372,11 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
                         let relative_path = file_path.strip_prefix(&base_path_for_relative)
                             .expect("base_path_for_relative should be a prefix of file_path. This error should never occur.");
 
-                        let key: String = util_layer::path_to_s3_key(relative_path.to_str().unwrap());
+                        let aws_uri_encoded_key: String = url_encode_fast(&util_layer::path_to_s3_key(relative_path.to_str().unwrap()), true);
 
                         cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).expect("Failed to send message to command center. Should never happen.");
 
-                        let file_info = FileInfo { file_path, aws_uri_encoded_key: key, file_size, modified_time };
+                        let file_info = FileInfo { file_path, aws_uri_encoded_key, file_size, modified_time };
                         tx.blocking_send(Ok(file_info)).expect("Failed to send message. Should never happen.");
                     }
                 }
