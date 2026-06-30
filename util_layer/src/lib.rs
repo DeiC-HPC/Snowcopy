@@ -7,6 +7,7 @@ pub mod bucket_and_path_parser;
 pub mod snow_errors;
 pub mod download;
 pub mod url_encoder;
+pub mod error_codes;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

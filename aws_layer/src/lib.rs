@@ -21,6 +21,8 @@ use util_layer::snow_errors::{S3Error, SnowCopyError};
 use util_layer::time::float_string_to_time;
 use util_layer::url_encoder::url_encode_fast;
 use util_layer::{constants, EndpointConfig, S3Object};
+use util_layer::error_codes::FatalError;
+use util_layer::error_codes::FatalErrorCode::RequestFailure;
 
 pub struct S3Client {
     aws_sdk_client: Arc<Client>,
@@ -163,7 +165,7 @@ impl S3Client {
                         }
                     },
                     cc_tx_fetch.clone(),
-                    format!("Listing objects in bucket {} with prefix {}", bucket_fetch, prefix_fetch),
+                    format!("Listing objects in bucket {} ", bucket_fetch),
                 ).await {
                     Ok(output) => {
                         next_page_continuation_token = output.next_continuation_token().map(|s| s.to_string());
@@ -177,6 +179,7 @@ impl S3Client {
                         }
                     }
                     Err(_) => {
+                        cc_tx_fetch.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, format!("Listing objects in bucket {}. Possible endpoint misconfiguration.", bucket_fetch)))).expect("Failed to send fatal error event");
                         break;
                     }
                 }

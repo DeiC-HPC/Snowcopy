@@ -8,6 +8,7 @@ mod ui;
 mod download;
 mod command_center;
 mod config_and_parameter_parsing;
+mod error_print;
 
 use std::time::Instant;
 use std::sync::Arc;
@@ -16,10 +17,13 @@ use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
 use util_layer::{SnowConfig, TransferMethod};
 use crate::config_and_parameter_parsing::{read_parameters_and_config_to_create_snow_config, parse_arguments};
+use crate::error_print::print_fatal_error;
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
 #[cfg(not(target_env = "msvc"))]
 use jemallocator::Jemalloc;
+use util_layer::error_codes::{FatalError, FatalErrorCode};
+
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
@@ -33,45 +37,63 @@ async fn main() {
     let matches = parse_arguments();
     let snow_config = read_parameters_and_config_to_create_snow_config(&matches).await;
 
-    match snow_config {
+    let fatal_error = match snow_config {
         SnowConfig::Download(config) => {
             let config = Arc::new(config);
             let silent = config.silent;
-            match config.transfer_method {
+            let res = match config.transfer_method {
                 TransferMethod::TokioSelfMade => download::download(config).await,
-                TransferMethod::TransferManager => transfer_manager::download(config).await,
-            }
-            if !silent {
-                println!("Program execution time: {:.2?}", start_time.elapsed());
-            }
-        }
-        SnowConfig::Upload(config) => {
-            let config = Arc::new(config);
-            let silent = config.silent;
-            match config.transfer_method {
-                TransferMethod::TokioSelfMade => upload::upload(config).await,
-                TransferMethod::TransferManager => transfer_manager::upload(config).await,
+                TransferMethod::TransferManager => {
+                    transfer_manager::download(config).await;
+                    None
+                }
             };
             if !silent {
                 println!("Program execution time: {:.2?}", start_time.elapsed());
             }
+            res
+        }
+        SnowConfig::Upload(config) => {
+            let config = Arc::new(config);
+            let silent = config.silent;
+            let res = match config.transfer_method {
+                TransferMethod::TokioSelfMade => upload::upload(config).await,
+                TransferMethod::TransferManager => {
+                    transfer_manager::upload(config).await;
+                    None
+                }
+            };
+            if !silent {
+                println!("Program execution time: {:.2?}", start_time.elapsed());
+            }
+            res
         }
         SnowConfig::List(_config) => {
             //TODO later: call ls with lsConfig
             println!("Not implemented yet.");
-
+            None
         }
         SnowConfig::Remove(_config) => {
             //TODO later: call remove with removeConfig
             println!("Not implemented yet.");
-
+            None
         }
         SnowConfig::Config(_config) => {
             if let Err(e) = config::run_tui() {
-                eprintln!("Error running config TUI: {}", e);
-                std::process::exit(1);
+                Some(FatalError::new(
+                    FatalErrorCode::Unknown,
+                    format!("Error running config: {}", e),
+                ))
+            } else {
+                None
             }
         }
+    };
+
+    if fatal_error.is_some() {
+        let error = fatal_error.unwrap();
+        print_fatal_error(&error);
+        std::process::exit(error.code().as_i32());
     }
 }
 

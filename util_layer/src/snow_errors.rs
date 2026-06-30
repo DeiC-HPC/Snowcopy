@@ -248,24 +248,81 @@ where
     E: ProvideErrorMetadata + std::fmt::Debug,
 {
     fn from(err: SdkError<E>) -> Self {
-        let code = err.code().unwrap_or("unknown code");
+        let status = err
+            .raw_response()
+            .map(|response| response.status().as_u16());
 
-        if let Some(s3_err) = S3Error::from_code(code) {
-            return SnowCopyError::S3(s3_err);
+        match err {
+            SdkError::ServiceError(service_err) => {
+                let source = service_err.err();
+                let code = source.code().unwrap_or("unknown code");
+                let message = source.message().unwrap_or("missing reason");
+
+                if let Some(s3_err) = S3Error::from_code(code) {
+                    return SnowCopyError::S3(s3_err);
+                }
+
+                match status {
+                    Some(status) => SnowCopyError::Aws(format!( //TODO JON: Just map directly to HTTP?
+                        "S3 service error: HTTP status {}, code {}, message: {}, details: {:?}",
+                        status,
+                        code,
+                        message,
+                        source
+                    )),
+                    None => SnowCopyError::Aws(format!(
+                        "S3 service error: code {}, message: {}, details: {:?}",
+                        code,
+                        message,
+                        source
+                    )),
+                }
+            }
+
+            SdkError::ResponseError(response_err) => {
+                match status {
+                    Some(status) => SnowCopyError::Aws(format!(
+                        "AWS SDK response error: HTTP status {}, {:?}",
+                        status,
+                        response_err
+                    )),
+                    None => SnowCopyError::Aws(format!(
+                        "AWS SDK response error: {:?}",
+                        response_err
+                    )),
+                }
+            }
+
+            SdkError::DispatchFailure(dispatch_err) => {
+                SnowCopyError::Transport(format!(
+                    "AWS SDK dispatch failure: {:?}. This often means the endpoint URL is wrong, DNS failed, TLS failed, or the server closed the connection.",
+                    dispatch_err
+                ))
+            }
+
+            SdkError::TimeoutError(timeout_err) => {
+                SnowCopyError::Transport(format!(
+                    "AWS SDK timeout: {:?}",
+                    timeout_err
+                ))
+            }
+
+            SdkError::ConstructionFailure(construction_err) => {
+                SnowCopyError::Aws(format!(
+                    "AWS SDK request construction failure: {:?}",
+                    construction_err
+                ))
+            }
+
+            other => {
+                SnowCopyError::Aws(format!(
+                    "AWS SDK error: {}",
+                    other
+                ))
+            }
         }
-
-        if let Some(status) = err.raw_response().map(|response| response.status().as_u16()) {
-            return SnowCopyError::Http(status);
-        }
-
-        SnowCopyError::Aws(format!(
-            "{}: {}",
-            code,
-            err.message().unwrap_or("missing reason")
-        ))
     }
 }
-
 impl From<aws_sdk_s3::Error> for SnowCopyError {
     fn from(err: aws_sdk_s3::Error) -> Self {
         let code = err.code().unwrap_or("unknown code");

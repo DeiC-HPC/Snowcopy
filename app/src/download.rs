@@ -24,6 +24,8 @@ use util_layer::snow_errors::SnowCopyError;
 use util_layer::url_encoder::url_encode_fast;
 use util_layer::{DownloadConfig, FileInfo, S3Object};
 use SnowCopyError::IntegrityError;
+use util_layer::error_codes::FatalError;
+use util_layer::error_codes::FatalErrorCode::{DiskIoError, RequestFailure, ServerStateChangeDuringExecution};
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.
@@ -42,7 +44,7 @@ fn ensure_parent_dirs_exist(file_path: &Path, created_dirs: &mut HashSet<PathBuf
     Ok(())
 }
 
-pub async fn download(ctx: Arc<DownloadConfig>) {
+pub async fn download(ctx: Arc<DownloadConfig>) -> Option<FatalError> {
     let cancellation_token = CancellationToken::new();
     let cc = CommandCenter::new_download(&ctx, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
@@ -65,7 +67,7 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
     while let Some(object) = object_channel.recv().await {
         //Ensure parent directories exist
         if let Err(e) = ensure_parent_dirs_exist(&object.local_path, &mut created_dirs) {
-            cc_tx.send(CommandCenterEvent::FatalError(format!("Failed to create directories for {:?}: {}", object.local_path, e))).expect("Failed to send message. This should never happen.");
+            cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError, format!("Failed to create directories for {:?}: {}", object.local_path, e)))).expect("Failed to send message. This should never happen.");
             continue;
         }
 
@@ -90,7 +92,7 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
     while let Some(_) = join_set.join_next().await {};
     drop(disk_write_tx);
     drop(cc_tx);
-    cc_handle.await.unwrap();
+    cc_handle.await.unwrap()
 }
 
 async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<DownloadConfig>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: Arc<S3Client>, mut object_channel: Receiver<S3Object>, token: CancellationToken) -> Receiver<S3Object> {
@@ -124,7 +126,7 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
                     Ok((exists_at_target, _, mtime, chunk_size, etag, sha256)) => {
                         drop(permit);
                         if !exists_at_target {
-                            cc_tx.send(CommandCenterEvent::FatalError(format!("S3 object went missing from s3 server during the execution of the program: {}", object.key))).expect("Failed to send message. This should never happen.");
+                            cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(ServerStateChangeDuringExecution,format!("S3 object went missing from s3 server during the execution of the program: {}", object.key)))).expect("Failed to send message. This should never happen.");
                             return;
                         }
                         let mut object = object;
@@ -160,7 +162,7 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
 
                     }
                     Err(e) => {
-                        cc_tx.send(CommandCenterEvent::FatalError(format!("Failed to get metadata for object: {}. Error: {}", object.key, e))).expect("Failed to send message. This should never happen.");
+                        cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, format!("Failed to get metadata for object: {}. Error: {}", object.key, e)))).expect("Failed to send message. This should never happen.");
                         return;
                     }
                 }
@@ -209,13 +211,13 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
         let file = match File::create(&file_path) {
             Ok(f) => f,
             Err(e) => {
-                cc_sender.send(CommandCenterEvent::FatalError(format!("Failed to create file {:?}: {}", file_path, e))).expect("Failed to send message. This should never happen.");
+                cc_sender.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError,format!("Failed to create file {:?}: {}", file_path, e)))).expect("Failed to send message. This should never happen.");
                 return;
             }
         };
 
         if let Err(e) = file.set_len(total_size) {
-            cc_sender.send(CommandCenterEvent::FatalError(format!("Failed to truncate file {:?} to {}: {}", file_path, total_size, e))).expect("Failed to send message. This should never happen.");
+            cc_sender.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError, format!("Failed to truncate file {:?} to {}: {}", file_path, total_size, e)))).expect("Failed to send message. This should never happen.");
             return;
         }
 

@@ -20,8 +20,11 @@ use util_layer::url_encoder::url_encode_fast;
 use util_layer::constants;
 use util_layer::{FileInfo, UploadConfig};
 use walkdir::WalkDir;
+use util_layer::error_codes::FatalError;
+use util_layer::error_codes::FatalErrorCode::{DiskIoError, RequestFailure, Unknown};
+use util_layer::snow_errors::SnowCopyError;
 
-pub async fn upload(ctx: Arc<UploadConfig>) {
+pub async fn upload(ctx: Arc<UploadConfig>) -> Option<FatalError> {
     let cancellation_token = CancellationToken::new();
     let cc = CommandCenter::new_upload(&ctx, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
@@ -37,7 +40,15 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
     let task_sem = Arc::new(Semaphore::new(open_files_sem.available_permits()));
     let buffer_pool = BufferPool::new(buffer_pool_size, CHUNK_SIZE as usize);
 
-    let bucket_created = bucket_creation_handle.await.unwrap();
+    let bucket_created = match bucket_creation_handle.await {
+        Ok(Ok(created)) => created,
+        Ok(Err(e)) => {
+            return Some(FatalError::new(RequestFailure, format!("Bucket creation failed: {:?}", e)));
+        }
+        Err(join_error) => {
+            return Some(FatalError::new(Unknown, format!("Task join error during bucket creation: {:?}", join_error)));
+        }
+    };
 
     if !bucket_created {
         //We did not create the bucket, so check for already uploaded files
@@ -56,7 +67,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
     upload_files_from_stream(ctx, &mut files_to_upload_stream, task_sem, runtime, s3client).await;
 
     drop(cc_tx);
-    cc_handle.await.unwrap();
+    cc_handle.await.unwrap()
 }
 
 async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream: &mut Receiver<Result<FileInfo, Error>>, task_sem: Arc<Semaphore>, runtime: Arc<UploadRuntime>, aws_client: Arc<S3Client>) {
@@ -91,17 +102,15 @@ async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream
     while let Some(_) = join_set.join_next().await {};
 }
 
-fn create_bucket_if_not_exist(ctx: &Arc<UploadConfig>, client: &Arc<S3Client>) -> JoinHandle<bool> {
+fn create_bucket_if_not_exist(ctx: &Arc<UploadConfig>, client: &Arc<S3Client>) -> JoinHandle<Result<bool, SnowCopyError>> {
     let bucket_creation_handle = {
         let client = client.clone();
         let bucket = ctx.bucket.clone();
         tokio::spawn(async move {
             match client.create_bucket(&bucket).await {
-                Ok(Some(_)) => true, // Bucket created
-                Ok(None) => false, // Bucket already exists
-                Err(e) => {
-                    panic!("Failed to create bucket: {:?}", e);
-                }
+                Ok(Some(_)) => Ok(true), // Bucket created
+                Ok(None) => Ok(false), // Bucket already exists
+                Err(e) => Err(e),
             }
         })
     };
@@ -112,7 +121,7 @@ async fn upload_file(ctx: Arc<UploadConfig>, aws_client: Arc<S3Client>, runtime:
     let file = File::open(&*file_info.file_path);
 
     if let Err(e) = file { //Hopefully, we should be on top of ulimit through auto-tuning
-        runtime.cc_tx.send(CommandCenterEvent::FatalError(format!("Error opening file {}: {}", file_info.file_path.to_str().unwrap(), e))).expect("Failed to send message to command center. Should never happen.");
+        runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError,format!("Error opening file {}: {}", file_info.file_path.to_str().unwrap(), e)))).expect("Failed to send message to command center. Should never happen.");
         return;
     }
     let file = Arc::new(file.unwrap());
@@ -198,7 +207,7 @@ async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<Upl
                     runtime_clone.cc_tx.send(CommandCenterEvent::PartTransferred(metrics)).expect("Failed to send message to command center. Should never happen.");
                 }
                 Err(e) => {
-                    CommandCenterEvent::FatalError(format!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e));
+                    CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, format!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e)));
                 }
             }
         });
@@ -290,7 +299,7 @@ fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSende
                                        drop(permit);
                                     }
                                     Err(e) => {
-                                        cc_tx.send(CommandCenterEvent::FatalError(format!("Error getting metadata for file {}: {}", file_info.file_path.to_str().unwrap(), e))).expect("Should never fail.");
+                                        cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, format!("Error getting metadata for file {}: {}", file_info.file_path.to_str().unwrap(), e)))).expect("Should never fail.");
                                     }
                                 }
                             });

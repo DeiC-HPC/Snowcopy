@@ -314,7 +314,8 @@ pub fn parse_arguments() -> ArgMatches {
                 .value_parser(clap::value_parser!(usize))
                 .num_args(1),
         )
-        .after_help("Examples:\n  up:   snowcopy file.txt profile:bucket\n  down: snowcopy profile:bucket/file.txt .")
+        .after_help("Examples:\n  up:   snowcopy my-folder profile:bucket\n  up:   snowcopy file.txt profile:bucket\n  down: snowcopy profile:bucket .")
+        .after_help("Note this is still alpha, so use with caution.")
         .get_matches();
     matches
 }
