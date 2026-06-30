@@ -45,10 +45,9 @@ where
             Err(err) => {
                 if !err.is_retryable() {
                     cc_tx
-                        .send(CommandCenterEvent::FatalError(format!(
-                            "{}: Error type: {}. Error: {}. Debug: {:?}. Not retrying.",
+                        .send(CommandCenterEvent::Log(format!(
+                            "{}: Error: {}. Debug: {:?}. Not retrying.",
                             message,
-                            std::any::type_name::<E>(),
                             err,
                             err
                         )))

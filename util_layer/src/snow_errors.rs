@@ -149,12 +149,13 @@ impl RetryableError for SnowCopyError {
             SnowCopyError::Aws(_) => true, // Conservatively retry AWS SDK errors
             SnowCopyError::Http(s) => {
                 // Retryable HTTP status codes:
+                // 408: Request Timeout
                 // 429: Too Many Requests / Slow Down
                 // 500: Internal Server Error
                 // 502: Bad Gateway
                 // 503: Service Unavailable
                 // 504: Gateway Timeout
-                matches!(*s, 429 | 500 | 502 | 503 | 504)
+                matches!(*s, 408 | 429 | 500 | 502 | 503 | 504)
             }
             SnowCopyError::Transport(_) => {
                 // Transport errors like "connection closed before full body" are often retryable
@@ -471,7 +472,7 @@ impl fmt::Display for S3Error {
             S3Error::RequestTimeout => "Your socket connection to the server was not read from or written to within the timeout period.",
             S3Error::RequestTimeTooSkewed => "The difference between the requested time and the server's time is too large.",
             S3Error::RequestTorrentOfBucketError => "Requesting the torrent file of a bucket is not permitted.",
-            S3Error::SignatureDoesNotMatch => "The request signature we calculated does not match the signature you provided.",
+            S3Error::SignatureDoesNotMatch => "The request signature the s3 server calculated does not match the signature snowcopy provided.",
             S3Error::ServiceUnavailable => "Reduce your request rate.",
             S3Error::SlowDown => "Reduce your request rate.",
             S3Error::TemporaryRedirect => "You are being redirected to the bucket while optimization is taking place.",

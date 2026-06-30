@@ -35,7 +35,7 @@ pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfi
 
     let mut body = resp.into_body();
 
-    let (bytes_read, hash) = download_body_to_buffer_and_offload_to_disk_writers(start, fd, disk_write_tx, &mut body, tracker, (end - start + 1) as usize, hash_algo).await?; //TODO AJON: dependency inject
+    let (bytes_read, hash) = download_body_to_buffer_and_offload_to_disk_writers(start, fd, disk_write_tx, &mut body, tracker, (end - start + 1) as usize, hash_algo).await?;
 
     if bytes_read != end - start + 1 {
         return Err(SnowCopyError::RetryableError(format!("Partial download failed. Expected {} bytes, got {}", end - start + 1, bytes_read)));

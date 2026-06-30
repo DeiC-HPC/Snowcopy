@@ -65,7 +65,6 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
     while let Some(object) = object_channel.recv().await {
         //Ensure parent directories exist
         if let Err(e) = ensure_parent_dirs_exist(&object.local_path, &mut created_dirs) {
-            eprintln!("Failed to create directories for {:?}: {}", object.local_path, e);
             cc_tx.send(CommandCenterEvent::FatalError(format!("Failed to create directories for {:?}: {}", object.local_path, e))).expect("Failed to send message. This should never happen.");
             continue;
         }
@@ -202,9 +201,9 @@ fn should_download_object(object: &mut S3Object) -> bool {
 async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConfig>, object: S3Object, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, download_file_concurrency: usize, disk_write_tx: Sender<WriteMsg>, cancellation_token: CancellationToken) {
     let multipart_integrity_verification = config.md5_checksum_integrity && reconstructable_multipart_etag(&object);
 
-    if object.size > DOWNLOAD_MULTIPART_THRESHOLD as i64 || multipart_integrity_verification {
+    if (object.size > DOWNLOAD_MULTIPART_THRESHOLD as i64 && !object.sha256_checksum.is_none()) || multipart_integrity_verification { //if sha256_checksum is present without multipart-etag download the simple way
         let file_path = object.local_path.clone();
-        let key = object.key.clone();
+        let key = object.aws_uri_encoded_key.clone();
         let total_size = object.size as u64;
 
         let file = match File::create(&file_path) {
@@ -256,7 +255,7 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
         //simple download
         let file_info = Arc::new(FileInfo {
             file_path: object.local_path.clone(),
-            aws_uri_encoded_key: object.aws_uri_encoded_key.clone(), //TODO AJON: I don't think download need this at all. When changing to use tower, refactor this.
+            aws_uri_encoded_key: object.aws_uri_encoded_key.clone(),
             file_size: object.size as u64,
             modified_time: object.modified_time,
         });
@@ -265,7 +264,7 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
         let query_uri = String::new();
 
         let integrity_result = download_full_file_and_check_integrity(pool_client.clone(), config.clone(), object.clone(), req_sem.clone(), cc_sender.clone(), disk_write_tx.clone(), file_info.clone(), canonical_uri.clone(), query_uri.clone(), cancellation_token.clone()).await;
-        if let Err(IntegrityError(msg)) = integrity_result { //TODO JON: only if its integrity failed.
+        if let Err(IntegrityError(msg)) = integrity_result {
             cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, msg))).expect("Failed to send message. This should never happen.");
 
             let integrity_result = download_full_file_and_check_integrity(pool_client, config, object.clone(), req_sem, cc_sender.clone(), disk_write_tx, file_info, canonical_uri, query_uri, cancellation_token).await;
@@ -323,7 +322,6 @@ async fn download_full_file_and_check_integrity(pool_client: Arc<HyperClient>, c
             }
         }
         Err(e) => {
-            cc_sender.send(CommandCenterEvent::FatalError(format!("Failed to download {}: {}", object.key, e))).expect("Failed to send message");
             return Err(e);
         }
     }

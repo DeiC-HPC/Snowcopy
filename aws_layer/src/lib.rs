@@ -1,4 +1,3 @@
-use util_layer::url_encoder::url_encode_fast;
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::retry::RetryConfig;
 use aws_config::timeout::TimeoutConfig;
@@ -6,7 +5,6 @@ use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3::config::{Builder, Credentials, ProvideCredentials, RequestChecksumCalculation, ResponseChecksumValidation};
 use aws_sdk_s3::operation::create_bucket::CreateBucketOutput;
 use aws_sdk_s3::operation::get_object::GetObjectOutput;
-use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client;
 use std::path::Path;
@@ -15,13 +13,13 @@ use std::time::Duration;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::cc_util::Status::Transferring;
 use util_layer::constants::{MULTIPART_UPLOAD_METADATA_UNIFORM_CHUNK_SIZE_KEY, PAYLOAD_SHA256_METADATA_KEY};
-use util_layer::snow_errors::{SnowCopyError, S3Error};
+use util_layer::snow_errors::{S3Error, SnowCopyError};
 use util_layer::time::float_string_to_time;
+use util_layer::url_encoder::url_encode_fast;
 use util_layer::{constants, EndpointConfig, S3Object};
 
 pub struct S3Client {
@@ -116,8 +114,9 @@ impl S3Client {
         .await
     }
 
-    pub async fn stream_head_objects_from_bucket_in_separate_task(&self, bucket: &str, prefix: &str, dest: &Path, token: CancellationToken) ->  mpsc::Receiver<S3Object> {
+    pub async fn stream_head_objects_from_bucket_in_separate_task(&self, bucket: &str, prefix: &str, dest: &Path, cancellation_token: CancellationToken) ->  mpsc::Receiver<S3Object> {
         let (tx, rx) = mpsc::channel::<S3Object>(constants::DISCOVERY_LIMIT_DOWNLOAD as usize);
+        let (page_tx, mut page_rx) = mpsc::channel::<aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output>(3); //1 page is at most 1000 results
 
         let bucket_clone = bucket.to_owned();
         let prefix_clone = prefix.to_owned();
@@ -125,60 +124,94 @@ impl S3Client {
         let cc_tx = self.cc_tx.clone();
         let client = self.aws_sdk_client.clone();
 
+        let cancellation_token_fetch = cancellation_token.clone();
+        let cc_tx_fetch = cc_tx.clone();
+        let bucket_fetch = bucket_clone.clone();
+        let prefix_fetch = prefix_clone.clone();
+
+        // Fetching task
         tokio::spawn(async move {
-            // List objects with pagination
-            let mut paginator = client //TODO JON: how can we retry this easily?
-                .list_objects_v2()
-                .bucket(bucket_clone)
-                .prefix(prefix_clone.clone())
-                .into_paginator()
-                .send();
+            let mut next_page_continuation_token: Option<String> = None;
 
-            let mut join_set = JoinSet::new();
-
-            while let Some(result) = paginator.next().await {
-                if token.is_cancelled() {
+            loop {
+                if cancellation_token_fetch.is_cancelled() {
                     break;
                 }
-                match result {
-                    Ok(output) => {
-                        let tx_clone = tx.clone();
-                        let sender_clone = cc_tx.clone();
-                        let dest_clone_inner = dest_clone.clone();
 
-                        join_set.spawn(async move {
-                            for object in output.contents() {
-                                if let (Some(key), Some(size)) = (object.key(), object.size) {
-                                    // Map S3 key to local file path
-                                    let local_path = util_layer::s3_key_to_path(dest_clone_inner.as_path(), key);
+                let bucket_clone_inner = bucket_fetch.clone();
+                let prefix_clone_inner = prefix_fetch.clone();
+                let client_inner = client.clone();
+                let next_page_continuation_token_clone = next_page_continuation_token.clone();
 
-                                    let s3_object = S3Object {
-                                        key: key.to_string(),
-                                        aws_uri_encoded_key: url_encode_fast(key, true),
-                                        local_path,
-                                        size,
-                                        modified_time : None, //No fallback value. Either we have the one from s3 metadata or we dont care
-                                        chunk_size: None,
-                                        etag: None,
-                                        sha256_checksum: None,
-                                    };
-
-                                    let _ = sender_clone.send(CommandCenterEvent::FileDiscovered(size as u64));
-                                    // Send object through channel
-                                    tx_clone.send(s3_object).await.expect("Failed to send S3 object to channel");
-                                }
+                match util_layer::retry::retry_on_failure_async(
+                    move || {
+                        let bucket_clone_inner = bucket_clone_inner.clone();
+                        let prefix_clone_inner = prefix_clone_inner.clone();
+                        let client_inner = client_inner.clone();
+                        let token_clone = next_page_continuation_token_clone.clone();
+                        async move {
+                            let mut request = client_inner
+                                .list_objects_v2()
+                                .bucket(bucket_clone_inner)
+                                .prefix(prefix_clone_inner);
+                            
+                            if let Some(t) = token_clone {
+                                request = request.continuation_token(t);
                             }
-                        });
+
+                            request.send().await.map_err(SnowCopyError::from)
+                        }
+                    },
+                    cc_tx_fetch.clone(),
+                    format!("Listing objects in bucket {} with prefix {}", bucket_fetch, prefix_fetch),
+                ).await {
+                    Ok(output) => {
+                        next_page_continuation_token = output.next_continuation_token().map(|s| s.to_string());
+                        
+                        if page_tx.send(output).await.is_err() {
+                            break;
+                        }
+
+                        if next_page_continuation_token.is_none() {
+                            break;
+                        }
                     }
-                    Err(e) => {
-                        cc_tx.send(CommandCenterEvent::FatalError(format!("Error listing objects: {:?}", e))).expect("Failed to send message. This should never happen.");
+                    Err(_) => {
                         break;
                     }
                 }
             }
+        });
 
-            // Wait for all processing tasks to complete
-            while let Some(_) = join_set.join_next().await {}
+        // Processing task
+        tokio::spawn(async move {
+            while let Some(output) = page_rx.recv().await {
+                if cancellation_token.is_cancelled() {
+                    break;
+                }
+
+                let contents = output.contents().to_vec();
+
+                for object in contents {
+                    if let (Some(key), Some(size)) = (object.key(), object.size) {
+                        let local_path = util_layer::s3_key_to_path(dest_clone.as_path(), key);
+
+                        let s3_object = S3Object {
+                            key: key.to_string(),
+                            aws_uri_encoded_key: url_encode_fast(key, true),
+                            local_path,
+                            size,
+                            modified_time: None,
+                            chunk_size: None,
+                            etag: None,
+                            sha256_checksum: None,
+                        };
+
+                        let _ = cc_tx.send(CommandCenterEvent::FileDiscovered(size as u64));
+                        tx.send(s3_object).await.expect("Failed to send S3 object to channel");
+                    }
+                }
+            }
 
             let _ = cc_tx.send(CommandCenterEvent::StatusChanged(Transferring));
         });
@@ -201,25 +234,16 @@ async fn complete_multipart_upload(
         .set_parts(Some(parts))
         .build();
 
-    match client
+    client
         .complete_multipart_upload()
         .bucket(bucket)
         .key(key)
         .upload_id(upload_id)
         .multipart_upload(completed_multipart_upload)
         .send()
-        .await {
-        Ok(_) => {
-            Ok(())
-        },
-        Err(e) => {
-            if let Some(status) = e.raw_response().map(|r| r.status()) {
-                eprintln!("HTTP status code: {}", status);
-            }
-            eprintln!("Error completing multipart upload for key {}: {:?}", key, e);
-            Err(SnowCopyError::from(e))
-        }
-    }
+        .await
+        .map(|_| ())
+        .map_err(|e| SnowCopyError::from(e))
 }
 
 async fn create_client_from_config_endpoint(config: &EndpointConfig) -> Client {
