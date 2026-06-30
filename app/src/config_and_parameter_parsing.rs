@@ -190,7 +190,7 @@ pub async fn gather_credentials(profile_name: &str) -> anyhow::Result<EndpointCo
 pub fn parse_arguments() -> ArgMatches {
     let matches = Command::new("snowcopy")
         .version("0.1.0-alpha.1")
-        .about("Fast S3 copy tool")
+        .about("Fast S3 copy tool - ALPHA, use with caution.")
         .subcommand_required(false)
         .arg_required_else_help(true)
         .subcommand(
@@ -315,7 +315,6 @@ pub fn parse_arguments() -> ArgMatches {
                 .num_args(1),
         )
         .after_help("Examples:\n  up:   snowcopy my-folder profile:bucket\n  up:   snowcopy file.txt profile:bucket\n  down: snowcopy profile:bucket .")
-        .after_help("Note this is still alpha, so use with caution.")
         .get_matches();
     matches
 }
