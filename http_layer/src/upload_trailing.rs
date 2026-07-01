@@ -328,7 +328,10 @@ impl Body for StreamingFileChunkedBody {
                     drop(file_lock);
 
                     if bytes_read != to_read {
-                        panic!("Expected to read {} bytes, but read {} bytes", to_read, bytes_read);
+                        return Poll::Ready(Some(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            format!("Expected to read {} bytes, but read {} bytes", to_read, bytes_read),
+                        ))));
                     }
 
                     if bytes_read == 0 { //TODO JON: We have this information but are wasting a system call to check that we are done
