@@ -67,11 +67,10 @@ impl CommandCenter {
             cancellation_token_of_all_ongoing_tasks
         }
     }
-
-    #[allow(dead_code)]
-    pub fn new_list(config: &util_layer::ListConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken) -> Self {
+    
+    pub fn new_list(_config: &util_layer::ListConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken) -> Self {
         CommandCenter {
-            silent: config.silent,
+            silent: true, //This will make command_center not print any information. The list function will print the list of objects.
             stats: false,
             mode: Mode::List,
             cancellation_token_of_all_ongoing_tasks

@@ -178,8 +178,8 @@ impl S3Client {
                             break;
                         }
                     }
-                    Err(_) => {
-                        cc_tx_fetch.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, format!("Listing objects in bucket {}. Possible endpoint misconfiguration.", bucket_fetch)))).expect("Failed to send fatal error event");
+                    Err(e) => {
+                        cc_tx_fetch.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, e.to_string()))).expect("Failed to send fatal error event");
                         break;
                     }
                 }

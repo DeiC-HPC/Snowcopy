@@ -62,7 +62,6 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                 SnowConfig::List(ListConfig {
                     endpoint,
                     bucket,
-                    silent,
                     req_limit: req_limit_overwrite,
                 })
             } else {
