@@ -263,13 +263,9 @@ where
                 }
 
                 match status {
-                    Some(status) => SnowCopyError::Aws(format!( //TODO JON: Just map directly to HTTP?
-                        "S3 service error: HTTP status {}, code {}, message: {}, details: {:?}",
-                        status,
-                        code,
-                        message,
-                        source
-                    )),
+                    Some(403) => SnowCopyError::S3(S3Error::AccessDenied),
+                    Some(404) => SnowCopyError::Http(404),
+                    Some(status) => SnowCopyError::Http(status),
                     None => SnowCopyError::Aws(format!(
                         "S3 service error: code {}, message: {}, details: {:?}",
                         code,
@@ -281,11 +277,7 @@ where
 
             SdkError::ResponseError(response_err) => {
                 match status {
-                    Some(status) => SnowCopyError::Aws(format!(
-                        "AWS SDK response error: HTTP status {}, {:?}",
-                        status,
-                        response_err
-                    )),
+                    Some(status) => SnowCopyError::Http(status),
                     None => SnowCopyError::Aws(format!(
                         "AWS SDK response error: {:?}",
                         response_err

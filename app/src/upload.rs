@@ -25,6 +25,10 @@ use util_layer::{FileInfo, UploadConfig};
 use walkdir::WalkDir;
 
 pub async fn upload(ctx: Arc<UploadConfig>) -> Option<FatalError> {
+    if !ctx.local_path.to_path_buf().exists(){
+        return Some(FatalError::new(DiskIoError, format!("Local path does not exist: {}", ctx.local_path.to_string_lossy())));
+    }
+
     let cancellation_token = CancellationToken::new();
     let cc = CommandCenter::new_upload(&ctx, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
@@ -43,7 +47,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) -> Option<FatalError> {
     let bucket_created = match bucket_creation_handle.await {
         Ok(Ok(created)) => created,
         Ok(Err(e)) => {
-            return Some(FatalError::new(RequestFailure, format!("Bucket creation failed: {:?}", e)));
+            return Some(FatalError::new(RequestFailure, format!("Bucket creation failed: {}", e)));
         }
         Err(join_error) => {
             return Some(FatalError::new(Unknown, format!("Task join error during bucket creation: {:?}", join_error)));
