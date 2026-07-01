@@ -450,7 +450,7 @@ impl fmt::Display for S3Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let msg = match self {
             S3Error::AccessControlListNotSupported => "The bucket does not allow ACLs.",
-            S3Error::AccessDenied => "Access Denied",
+            S3Error::AccessDenied => "Access Denied. Likely endpoint misconfiguration.",
             S3Error::AccessPointAlreadyOwnedByYou => "An access point with an identical name already exists in your account.",
             S3Error::AccountProblem => "There is a problem with your AWS account that prevents the action from completing successfully.",
             S3Error::AllAccessDisabled => "All access to this Amazon S3 resource has been disabled.",
