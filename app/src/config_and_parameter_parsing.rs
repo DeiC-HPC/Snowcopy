@@ -42,13 +42,17 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
             let sub_m = sub_matches.expect("subcommand matches required for ls/rm");
             let path_str = sub_m.get_one::<String>("path").expect("path is required for ls/rm");
             let pattern = PathPattern::parse(path_str);
-            let (profile, bucket) = match pattern {
+            let (profile, bucket_opt) = match pattern {
                 PathPattern::S3 { profile, bucket, .. } => {
-                    if let Err(e) = PathPattern::validate_bucket_name(&bucket) {
-                        eprintln!("Error: Invalid bucket name '{}': {}", bucket, e);
-                        std::process::exit(1);
+                    if !bucket.is_empty() {
+                        if let Err(e) = PathPattern::validate_bucket_name(&bucket) {
+                            eprintln!("Error: Invalid bucket name '{}': {}", bucket, e);
+                            std::process::exit(1);
+                        }
+                        (profile, Some(bucket))
+                    } else {
+                        (profile, None)
                     }
-                    (profile, bucket)
                 }
                 PathPattern::Local(_) => {
                     eprintln!("Error: ls and rm require an S3 path (profile:bucket/)");
@@ -61,10 +65,16 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
             if mode == Mode::List {
                 SnowConfig::List(ListConfig {
                     endpoint,
-                    bucket,
+                    bucket: bucket_opt,
                     req_limit: req_limit_overwrite,
                 })
             } else {
+                let bucket = if let Some(b) = bucket_opt {
+                    b
+                } else {
+                    eprintln!("Error: rm requires a bucket name (profile:bucket)");
+                    std::process::exit(1);
+                };
                 SnowConfig::Remove(RemoveConfig {
                     endpoint,
                     bucket,
@@ -198,12 +208,12 @@ pub fn parse_arguments() -> ArgMatches {
         )
         .subcommand(
             Command::new("rm")
-                .about("Remove a resource")
+                .about("Remove a bucket")
                 .arg(Arg::new("path").required(true).index(1))
         )
         .subcommand(
             Command::new("ls")
-                .about("List resources")
+                .about("List buckets and bucket contents")
                 .arg(Arg::new("path").required(true).index(1))
         )
         .subcommand(

@@ -246,6 +246,24 @@ impl S3Client {
 
         rx
     }
+
+    pub async fn list_buckets(&self) -> Result<Vec<String>, SnowCopyError> {
+        util_layer::retry::retry_on_failure_async(
+            || async {
+                let output = self.aws_sdk_client.list_buckets().send().await.map_err(|e| SnowCopyError::from(e))?;
+
+                let buckets = output
+                    .buckets()
+                    .iter()
+                    .filter_map(|b| b.name().map(|s| s.to_string()))
+                    .collect();
+
+                Ok(buckets)
+            },
+            self.cc_tx.clone(),
+            "Listing buckets".to_string(),
+        ).await
+    }
 }
 
 pub type CompletedPartAws = CompletedPart;

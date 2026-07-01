@@ -71,7 +71,7 @@ async fn main() {
             res
         }
         SnowConfig::List(config) => {
-            list::list_bucket(config).await
+            list::list(config).await
         }
         
         SnowConfig::Remove(config) => {
