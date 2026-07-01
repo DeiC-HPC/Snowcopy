@@ -15,7 +15,6 @@ pub(crate) async fn list_bucket(ctx: ListConfig) -> Option<FatalError> {
 
     let mut object_channel = s3client.stream_head_objects_from_bucket_in_separate_task(&ctx.bucket, "", &PathBuf::new(), cancellation_token.clone()).await; //TODO JON: add prefix later
 
-    println!("Listing objects in bucket {}:", ctx.bucket);
     while let Some(object) = object_channel.recv().await {
         println!("{}", object.key);
     }

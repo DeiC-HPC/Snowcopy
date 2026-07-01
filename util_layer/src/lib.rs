@@ -131,7 +131,7 @@ pub struct RemoveConfig {
     pub endpoint: EndpointConfig,
     pub bucket: String,
     pub silent: bool,
-    pub req_limit: Option<usize>,
+    pub req_limit_overwrite: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
