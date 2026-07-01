@@ -3,14 +3,16 @@ pub mod constants;
 pub mod cc_util;
 pub mod time;
 pub mod retry;
-pub mod pattern;
+pub mod bucket_and_path_parser;
 pub mod snow_errors;
 pub mod download;
 pub mod url_encoder;
+pub mod error_codes;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::string::ToString;
 use std::time::SystemTime;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
@@ -114,6 +116,7 @@ pub struct DownloadConfig {
     pub open_file_limit_overwrite: Option<usize>,
     pub bucket: String,
     pub local_path: PathBuf,
+    pub prefix: String,
 }
 
 #[derive(Debug, Clone)]

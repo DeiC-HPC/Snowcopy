@@ -2,6 +2,9 @@ use std::fmt;
 use std::error::Error;
 use std::io;
 use hyper;
+use aws_sdk_s3::error::ProvideErrorMetadata;
+use aws_sdk_s3::error::SdkError;
+use crate::retry::RetryableError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum S3Error {
@@ -93,6 +96,8 @@ pub enum SnowCopyError {
     /// Service-level S3 error.
     /// The response was successfully received and parsed, and contains an S3-specific error code.
     S3(S3Error),
+    /// AWS SDK Error
+    Aws(String),
     /// Protocol-level response.
     /// The request failed with an HTTP status code, but no S3-specific error code was found in the body.
     Http(u16),
@@ -106,36 +111,51 @@ pub enum SnowCopyError {
     Hyper(hyper::Error),
     /// The server returned a successful response, but it was missing data required by the client.
     MissingRequiredHeader(&'static str),
+    /// Generic retryable error
+    RetryableError(String),
+    /// Integrity Error
+    IntegrityError(String),
+    /// The operation was canceled.
+    Canceled,
+    /// If we cannot convert the error into a SnowCopyError.
+    Unknown,
 }
 
 impl fmt::Display for SnowCopyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SnowCopyError::S3(e) => write!(f, "S3 service error: {}", e),
+            SnowCopyError::Aws(m) => write!(f, "AWS SDK error: {}", m),
             SnowCopyError::Http(s) => write!(f, "HTTP protocol error (status {}): no S3 error code", s),
             SnowCopyError::Transport(m) => write!(f, "Transport failure: {}", m),
             SnowCopyError::Io(e) => write!(f, "IO failure: {}", e),
             SnowCopyError::Parse(m) => write!(f, "Parsing failure: {}", m),
             SnowCopyError::Hyper(e) => write!(f, "Hyper error: {}", e),
             SnowCopyError::MissingRequiredHeader(header) => write!(f, "Invalid response: missing required `{}` header", header),
+            SnowCopyError::RetryableError(s) => write!(f, "Retryable error: {}", s),
+            SnowCopyError::IntegrityError(s) => write!(f, "Integrity error: {}", s),
+            SnowCopyError::Canceled => write!(f, "Operation canceled"),
+            SnowCopyError::Unknown => write!(f, "Unknown error"),
         }
     }
 }
 
 impl Error for SnowCopyError {}
 
-impl SnowCopyError {
-    pub fn is_retryable(&self) -> bool {
+impl RetryableError for SnowCopyError {
+    fn is_retryable(&self) -> bool {
         match self {
             SnowCopyError::S3(e) => e.is_retryable(),
+            SnowCopyError::Aws(_) => true, // Conservatively retry AWS SDK errors
             SnowCopyError::Http(s) => {
                 // Retryable HTTP status codes:
+                // 408: Request Timeout
                 // 429: Too Many Requests / Slow Down
                 // 500: Internal Server Error
                 // 502: Bad Gateway
                 // 503: Service Unavailable
                 // 504: Gateway Timeout
-                matches!(*s, 429 | 500 | 502 | 503 | 504)
+                matches!(*s, 408 | 429 | 500 | 502 | 503 | 504)
             }
             SnowCopyError::Transport(_) => {
                 // Transport errors like "connection closed before full body" are often retryable
@@ -158,7 +178,6 @@ impl SnowCopyError {
                 }
             }
             SnowCopyError::Parse(_) => {
-                // Parsing errors are usually not retryable (data is corrupted or format changed)
                 false
             }
             SnowCopyError::Hyper(_) => {
@@ -172,6 +191,18 @@ impl SnowCopyError {
                 // the multipart upload. Retrying the part is usually safe.
                 true
             }
+
+            SnowCopyError::RetryableError(_) => {
+                true
+            }
+
+            SnowCopyError::IntegrityError(_) => {
+                true
+            }
+
+            SnowCopyError::Canceled => false,
+
+            SnowCopyError::Unknown => false,
         }
     }
 }
@@ -185,6 +216,117 @@ impl From<io::Error> for SnowCopyError {
 impl From<hyper::Error> for SnowCopyError {
     fn from(err: hyper::Error) -> Self {
         SnowCopyError::Hyper(err)
+    }
+}
+
+impl From<tokio::sync::AcquireError> for SnowCopyError {
+    fn from(err: tokio::sync::AcquireError) -> Self {
+        SnowCopyError::Transport(err.to_string())
+    }
+}
+
+impl<T> From<tokio::sync::mpsc::error::SendError<T>> for SnowCopyError {
+    fn from(err: tokio::sync::mpsc::error::SendError<T>) -> Self {
+        SnowCopyError::Transport(err.to_string())
+    }
+}
+
+impl From<openssl::error::ErrorStack> for SnowCopyError {
+    fn from(err: openssl::error::ErrorStack) -> Self {
+        SnowCopyError::Parse(err.to_string())
+    }
+}
+
+impl From<hyper_util::client::legacy::Error> for SnowCopyError {
+    fn from(err: hyper_util::client::legacy::Error) -> Self {
+        SnowCopyError::Transport(err.to_string())
+    }
+}
+
+impl<E> From<SdkError<E>> for SnowCopyError
+where
+    E: ProvideErrorMetadata + std::fmt::Debug,
+{
+    fn from(err: SdkError<E>) -> Self {
+        let status = err
+            .raw_response()
+            .map(|response| response.status().as_u16());
+
+        match err {
+            SdkError::ServiceError(service_err) => {
+                let source = service_err.err();
+                let code = source.code().unwrap_or("unknown code");
+                let message = source.message().unwrap_or("missing reason");
+
+                if let Some(s3_err) = S3Error::from_code(code) {
+                    return SnowCopyError::S3(s3_err);
+                }
+
+                match status {
+                    Some(403) => SnowCopyError::S3(S3Error::AccessDenied),
+                    Some(404) => SnowCopyError::Http(404),
+                    Some(status) => SnowCopyError::Http(status),
+                    None => SnowCopyError::Aws(format!(
+                        "S3 service error: code {}, message: {}, details: {:?}",
+                        code,
+                        message,
+                        source
+                    )),
+                }
+            }
+
+            SdkError::ResponseError(response_err) => {
+                match status {
+                    Some(status) => SnowCopyError::Http(status),
+                    None => SnowCopyError::Aws(format!(
+                        "AWS SDK response error: {:?}",
+                        response_err
+                    )),
+                }
+            }
+
+            SdkError::DispatchFailure(dispatch_err) => {
+                SnowCopyError::Transport(format!(
+                    "AWS SDK dispatch failure: {:?}. This often means the endpoint URL is wrong, DNS failed, TLS failed, or the server closed the connection.",
+                    dispatch_err
+                ))
+            }
+
+            SdkError::TimeoutError(timeout_err) => {
+                SnowCopyError::Transport(format!(
+                    "AWS SDK timeout: {:?}",
+                    timeout_err
+                ))
+            }
+
+            SdkError::ConstructionFailure(construction_err) => {
+                SnowCopyError::Aws(format!(
+                    "AWS SDK request construction failure: {:?}",
+                    construction_err
+                ))
+            }
+
+            other => {
+                SnowCopyError::Aws(format!(
+                    "AWS SDK error: {}",
+                    other
+                ))
+            }
+        }
+    }
+}
+impl From<aws_sdk_s3::Error> for SnowCopyError {
+    fn from(err: aws_sdk_s3::Error) -> Self {
+        let code = err.code().unwrap_or("unknown code");
+        if let Some(s3_err) = S3Error::from_code(code) {
+            SnowCopyError::S3(s3_err)
+        } else {
+            SnowCopyError::Aws(format!(
+                "{}: {}",
+                code,
+                err.message().unwrap_or("missing reason")
+            ))
+        }
     }
 }
 
@@ -308,7 +450,7 @@ impl fmt::Display for S3Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let msg = match self {
             S3Error::AccessControlListNotSupported => "The bucket does not allow ACLs.",
-            S3Error::AccessDenied => "Access Denied",
+            S3Error::AccessDenied => "Access Denied. Likely endpoint misconfiguration.",
             S3Error::AccessPointAlreadyOwnedByYou => "An access point with an identical name already exists in your account.",
             S3Error::AccountProblem => "There is a problem with your AWS account that prevents the action from completing successfully.",
             S3Error::AllAccessDisabled => "All access to this Amazon S3 resource has been disabled.",
@@ -379,7 +521,7 @@ impl fmt::Display for S3Error {
             S3Error::RequestTimeout => "Your socket connection to the server was not read from or written to within the timeout period.",
             S3Error::RequestTimeTooSkewed => "The difference between the requested time and the server's time is too large.",
             S3Error::RequestTorrentOfBucketError => "Requesting the torrent file of a bucket is not permitted.",
-            S3Error::SignatureDoesNotMatch => "The request signature we calculated does not match the signature you provided.",
+            S3Error::SignatureDoesNotMatch => "The request signature the s3 server calculated does not match the signature snowcopy provided.",
             S3Error::ServiceUnavailable => "Reduce your request rate.",
             S3Error::SlowDown => "Reduce your request rate.",
             S3Error::TemporaryRedirect => "You are being redirected to the bucket while optimization is taking place.",

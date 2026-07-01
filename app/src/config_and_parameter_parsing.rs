@@ -1,5 +1,5 @@
 use clap::{Arg, ArgMatches, Command};
-use util_layer::pattern::PathPattern;
+use util_layer::bucket_and_path_parser::PathPattern;
 use util_layer::{ConfigModeConfig, DownloadConfig, EndpointConfig, ListConfig, Mode, RemoveConfig, SnowConfig, TransferMethod, UploadConfig};
 
 pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatches) -> SnowConfig {
@@ -82,9 +82,10 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
             let md5_checksum_integrity = matches.get_one::<bool>("md5_checksum_integrity").copied().unwrap_or(true);
             let trailing = matches.get_flag("trailing");
             let trailing_small = matches.get_flag("trailing-small");
-            let trailing_chunk_size_val = matches.get_one::<usize>("trailing-chunk-size").copied().unwrap_or(8 * 1024 * 1024); //TODO JON: We should not have this value here.
+            let trailing_chunk_size_val = matches.get_one::<usize>("trailing-chunk-size").copied().unwrap_or(1 * 1024 * 1024); //TODO JON: We should not have this value here.
             let open_file_limit_overwrite = matches.get_one::<usize>("open-file-limit").copied();
             let transfer_method = TransferMethod::from_str(transfer_method_str).expect(format!("Transfer method {} unknown", transfer_method_str).as_str());
+            let prefix = "".to_string(); //TODO JON: We will add prefixing after release
 
             let src_str = matches.get_one::<String>("src").unwrap();
             let dest_str = matches.get_one::<String>("dest").unwrap();
@@ -144,6 +145,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                     open_file_limit_overwrite,
                     bucket,
                     local_path,
+                    prefix
                 })
             }
         }
@@ -188,7 +190,7 @@ pub async fn gather_credentials(profile_name: &str) -> anyhow::Result<EndpointCo
 pub fn parse_arguments() -> ArgMatches {
     let matches = Command::new("snowcopy")
         .version("0.1.0-alpha.1")
-        .about("Fast S3 copy tool")
+        .about("Fast S3 copy tool - ALPHA, use with caution.")
         .subcommand_required(false)
         .arg_required_else_help(true)
         .subcommand(
@@ -312,7 +314,7 @@ pub fn parse_arguments() -> ArgMatches {
                 .value_parser(clap::value_parser!(usize))
                 .num_args(1),
         )
-        .after_help("Examples:\n  up:   snowcopy file.txt profile:bucket\n  down: snowcopy profile:bucket/file.txt .")
+        .after_help("Examples:\n  up:   snowcopy my-folder profile:bucket\n  up:   snowcopy file.txt profile:bucket\n  down: snowcopy profile:bucket .")
         .get_matches();
     matches
 }

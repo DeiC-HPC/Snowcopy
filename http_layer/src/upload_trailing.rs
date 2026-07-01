@@ -1,71 +1,50 @@
-use std::io::Write;
+use crate::signer::{sha256_hex, ChunkSigner, CredentialScope};
+use crate::{signer, HyperClient, ReadAt, StreamingBody};
+use bytes::Bytes;
+use http_body_util::BodyExt;
+use hyper::body::{Body, Frame};
+use hyper::{Method, Request};
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::SystemTime;
 use tokio::sync::Semaphore;
-use tokio::time::Instant;
-use tokio::fs::File;
-use http_body_util::{BodyExt};
-use tokio::io::{AsyncRead, AsyncSeekExt};
-use hyper::{Method, Request};
-use hyper::body::{Body, Frame};
-use bytes::Bytes;
-use util_layer::{FileInfo, UploadConfig};
-use util_layer::cc_util::CcLoadAndTransfer;
 use util_layer::constants::{AMZ_CHECKSUM_SHA256, AMZ_CHUNK_SIGNATURE_HEADER, AMZ_STREAMING_TRAILER, AMZ_TRAILER_SIGNATURE, AWS_ALGORITHM, CHUNK_SIGNATURE_LENGTH, EMPTY_PAYLOAD_SHA256, TRAILER_HASH_LENGTH};
 use util_layer::snow_errors::SnowCopyError;
-use crate::{signer, PoolClient, StreamingBody};
-use crate::signer::{sha256_hex, ChunkSigner, CredentialScope};
+use util_layer::{FileInfo, UploadConfig};
 
 /// Upload a file using streaming for trailing headers.
 pub async fn put_file_streaming(
     ctx: Arc<UploadConfig>,
+    file: Arc<File>,
     file_info: Arc<FileInfo>,
     from: u64,
     amount: u64,
-    client: &PoolClient,
+    client: &HyperClient,
     file_sem: Arc<Semaphore>,
-    req_sem: Arc<Semaphore>,
-    canonical_uri: Arc<String>,
+    req_sem: &Semaphore,
+    canonical_uri: &String,
     query_uri: &String,
-    open_file_limit: Arc<Semaphore>,
-) -> anyhow::Result<(String, CcLoadAndTransfer)> {
-    let file_permit_start = Instant::now();
-    let open_file_lock = open_file_limit.acquire().await?;
-    let file_permit_elapsed = file_permit_start.elapsed();
-
-    let file_work_start = Instant::now();
-    let mut file = File::open(&*file_info.file_path).await?;
-
-    if from > 0 {
-        file.seek(std::io::SeekFrom::Start(from)).await?;
-    }
-
+) -> Result<(String, u64), SnowCopyError> {
     let req = create_streaming_req_trailing_checksum(
         ctx.clone(),
-        canonical_uri.clone(),
+        canonical_uri,
         query_uri,
         file,
+        from,
         amount,
         file_info.modified_time,
         file_sem,
         ctx.trailing_chunk_size
     )?;
 
-    let file_work_elapsed = file_work_start.elapsed();
-
-    let req_permit_start = Instant::now();
     let permit = req_sem.acquire().await?;
-    let req_permit_elapsed = req_permit_start.elapsed();
-
-    let req_work_start = Instant::now();
-    let resp = client.request(req).await?;
-    let req_work_elapsed = req_work_start.elapsed();
+    let resp = client.request(req).await.map_err(SnowCopyError::from)?;
 
     drop(permit);
-    drop(open_file_lock);
 
     let status = resp.status();
     let etag = resp
@@ -85,25 +64,20 @@ pub async fn put_file_streaming(
         return Err(SnowCopyError::MissingRequiredHeader("etag").into());
     }
 
-    Ok((etag.unwrap(), CcLoadAndTransfer {
-        amount,
-        file_sem_work_time_secs: file_work_elapsed.as_secs_f64(),
-        file_sem_acquire_time_secs: file_permit_elapsed.as_secs_f64(),
-        req_sem_work_time_secs: req_work_elapsed.as_secs_f64(),
-        req_sem_acquire_time_secs: req_permit_elapsed.as_secs_f64(),
-    }))
+    Ok((etag.unwrap(), amount))
 }
 
 fn create_streaming_req_trailing_checksum(
     ctx: Arc<UploadConfig>,
-    canonical_uri: Arc<String>,
+    canonical_uri: &String,
     query_uri: &String,
-    file: File,
+    file: Arc<File>,
+    file_offset: u64,
     file_size: u64,
     modified_time: Option<SystemTime>,
     file_sem: Arc<Semaphore>,
     chunk_size: u64,
-) -> anyhow::Result<Request<StreamingBody>> {
+) -> Result<Request<StreamingBody>, SnowCopyError> {
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
         region: ctx.endpoint.s3_region.clone(),
@@ -151,7 +125,7 @@ fn create_streaming_req_trailing_checksum(
         &credential_scope,
         AWS_ALGORITHM,
         &signed_headers,
-        canonical_uri.clone(),
+        canonical_uri,
         query_uri,
     );
 
@@ -165,6 +139,7 @@ fn create_streaming_req_trailing_checksum(
 
     let streaming_body = StreamingFileChunkedBody::new(
         file,
+        file_offset,
         file_size,
         file_sem,
         signing_key,
@@ -198,7 +173,9 @@ impl Unpin for StreamingFileChunkedBody {}
 /// Inner state that can be safely mutated
 pub struct StreamingFileChunkedBodyInner {
     /// The raw payload data
-    file: Option<Pin<Box<tokio::fs::File>>>,
+    file: Arc<File>,
+    /// Offset in the file to start reading from
+    file_offset: u64,
     /// Remaining bytes to read from the file
     remaining: u64,
     /// Semaphore to protect file access
@@ -320,10 +297,12 @@ impl Body for StreamingFileChunkedBody {
     type Data = Bytes;
     type Error = std::io::Error;
 
+    //TODO JON: this should be rewritten completely. We should have a spawn_blocking that reads frames into a queue.
+    //TODO JON: this poll frame should be async, so it should wait on the queue for ready frames.
     fn poll_frame(
         mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Option<anyhow::Result<Frame<Self::Data>, Self::Error>>> {
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let inner = &mut self.inner;
 
         loop {
@@ -336,45 +315,38 @@ impl Body for StreamingFileChunkedBody {
                     }
 
                     let file_lock = inner.file_sem.acquire();
-                    let file = inner.file.as_mut().expect("file should exist").as_mut();
+                    let file = inner.file.clone();
 
                     let to_read = std::cmp::min(inner.chunk_size, inner.remaining) as usize;
                     let to_read_digits = Self::extract_bytes_read_digits(to_read);
                     let data_index = to_read_digits + CHUNK_SIGNATURE_LENGTH;            // "<data_index>;chunk-signature=<FixedLengthChunkSignature>\r\n"
                     inner.chunk_buf.resize(data_index + to_read + 2, 0);     // Resize to ChunkSignature + Data length + "\r\n"
                     let buf = &mut inner.chunk_buf[data_index..data_index + to_read];    // Buf is offset to reserve space for chunk signature
-                    let mut read_buf = tokio::io::ReadBuf::new(buf);
 
-                    match file.poll_read(cx, &mut read_buf) {
-                        Poll::Ready(Ok(())) => {
-                            let bytes_read = read_buf.filled().len();
-                            drop(file_lock);
+                    let bytes_read = file.read_at_offset(buf, inner.file_offset)?;
+                    inner.file_offset += bytes_read as u64; //We need to update the offset after each read.
+                    drop(file_lock);
 
-                            if bytes_read != to_read {
-                                panic!("Expected to read {} bytes, but read {} bytes", to_read, bytes_read);
-                            }
-
-                            if bytes_read == 0 {
-                                // EOF
-                                inner.state = StreamingChunkedState::FinalChunk;
-                                continue;
-                            }
-
-                            inner.checksum_hasher.as_mut().expect("Hasher should have been created").update(read_buf.filled()).expect("Failed to update SHA256 hasher");
-
-                            inner.remaining -= bytes_read as u64;
-                            inner.format_data_chunk(data_index, bytes_read);
-
-                            let data = std::mem::take(&mut inner.chunk_buf);
-                            return Poll::Ready(Some(Ok(Frame::data(Bytes::from(data)))));
-                        }
-                        Poll::Ready(Err(e)) => {
-                            return Poll::Ready(Some(Err(e)));
-                        }
-                        Poll::Pending => {
-                            return Poll::Pending;
-                        }
+                    if bytes_read != to_read {
+                        return Poll::Ready(Some(Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            format!("Expected to read {} bytes, but read {} bytes", to_read, bytes_read),
+                        ))));
                     }
+
+                    if bytes_read == 0 { //TODO JON: We have this information but are wasting a system call to check that we are done
+                        // EOF
+                        inner.state = StreamingChunkedState::FinalChunk;
+                        continue;
+                    }
+
+                    inner.checksum_hasher.as_mut().expect("Hasher should have been created").update(buf).expect("Failed to update SHA256 hasher");
+
+                    inner.remaining -= bytes_read as u64;
+                    inner.format_data_chunk(data_index, bytes_read);
+
+                    let data = std::mem::take(&mut inner.chunk_buf);
+                    return Poll::Ready(Some(Ok(Frame::data(Bytes::from(data)))));
                 }
 
                 StreamingChunkedState::FinalChunk => {
@@ -408,7 +380,8 @@ pub struct StreamingFileChunkedBody {
 
 impl StreamingFileChunkedBody {
     pub fn new(
-        file: File,
+        file: Arc<File>,
+        file_offset: u64,
         file_size: u64,
         file_sem: Arc<Semaphore>,
         signing_key: [u8; 32],
@@ -420,7 +393,8 @@ impl StreamingFileChunkedBody {
     ) -> Self {
         Self {
             inner: StreamingFileChunkedBodyInner {
-                file: Some(Box::pin(file)),
+                file,
+                file_offset,
                 remaining: file_size,
                 file_sem,
                 chunk_signer: ChunkSigner::new(&signing_key),

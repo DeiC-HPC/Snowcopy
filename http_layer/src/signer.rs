@@ -1,11 +1,10 @@
 use openssl::hash::{Hasher, MessageDigest};
 use openssl::pkey::PKey;
-use openssl::sign::Signer;
 use openssl::sha::sha256;
+use openssl::sign::Signer;
 use std::collections::HashMap;
-use std::sync::Arc;
 use util_layer::constants::{AMZ_CHUNK_SIGNATURE_HEADER, AMZ_TRAILER_SIGNATURE, AWS_CHUNK_PAYLOAD_ALGORITHM, AWS_CHUNK_TRAILER_ALGORITHM, EMPTY_PAYLOAD_SHA256};
-use util_layer::{EndpointConfig};
+use util_layer::EndpointConfig;
 
 pub struct CredentialScope {
     pub(crate) timestamp: chrono::DateTime<chrono::Utc>,
@@ -109,7 +108,7 @@ pub fn get_s3_auth_header_and_signature(
     credential_scope: &CredentialScope,
     algorithm: &str,
     signed_headers_sorted: &HashMap<String, String>,
-    canonical_uri: Arc<String>,
+    canonical_uri: &String,
     query_url: &String,
 ) -> (String, String) {
     let mut headers: Vec<(&str, &str)> = Vec::with_capacity(signed_headers_sorted.len());
@@ -183,7 +182,7 @@ pub fn get_s3_auth_header(
     credential_scope: &CredentialScope,
     algorithm: &str,
     signed_headers: &HashMap<String, String>,
-    canonical_uri: Arc<String>,
+    canonical_uri: &String,
     query_uri: &String,
 ) -> String {
     let (auth, _) =
