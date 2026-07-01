@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use directories::ProjectDirs;
 use anyhow::{Result, Context};
 use std::fs;
-use util_layer::Endpoint;
+use util_layer::{ConfigModeConfig, Endpoint};
 #[cfg(test)]
 use util_layer::EndpointConfig;
 
@@ -53,6 +53,10 @@ pub fn get_config_path() -> Result<PathBuf> {
 
 pub fn load_config() -> Result<AppConfig> {
     let path = get_config_path()?;
+    load_config_from_path(path)
+}
+
+pub fn load_config_from_path(path: PathBuf) -> Result<AppConfig> {
     if !path.exists() {
         return Ok(AppConfig::default());
     }
@@ -76,6 +80,10 @@ pub fn load_config() -> Result<AppConfig> {
 
 pub fn save_config(config: &AppConfig) -> Result<()> {
     let path = get_config_path()?;
+    save_config_to_path(config, path)
+}
+
+pub fn save_config_to_path(config: &AppConfig, path: PathBuf) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -84,8 +92,8 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn run_tui() -> Result<()> {
-    tui::run()
+pub fn run_tui(config: ConfigModeConfig) -> Result<()> {
+    tui::run(config)
 }
 
 #[cfg(test)]
@@ -147,7 +155,7 @@ mod tests {
             ],
         };
 
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         
         // 1. Select Endpoint A and Region field
         app.list_state.select(Some(0));
@@ -198,7 +206,7 @@ mod tests {
             ],
         };
 
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         
         // 1. Select Endpoint A and Region field
         app.list_state.select(Some(0));

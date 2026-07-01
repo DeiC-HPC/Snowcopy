@@ -3,6 +3,8 @@ use util_layer::bucket_and_path_parser::PathPattern;
 use util_layer::{ConfigModeConfig, DownloadConfig, EndpointConfig, ListConfig, Mode, RemoveConfig, SnowConfig, TransferMethod, UploadConfig};
 
 pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatches) -> SnowConfig {
+    let config_path = matches.get_one::<String>("config").map(std::path::PathBuf::from);
+
     let (mode, sub_matches) = match matches.subcommand() {
         Some(("config", m)) => (Mode::Config, Some(m)),
         Some(("rm", m)) => (Mode::Remove, Some(m)),
@@ -36,7 +38,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
 
     match mode {
         Mode::Config => {
-            SnowConfig::Config(ConfigModeConfig { silent })
+            SnowConfig::Config(ConfigModeConfig { silent, config_path })
         }
         Mode::List | Mode::Remove => {
             let sub_m = sub_matches.expect("subcommand matches required for ls/rm");
@@ -60,7 +62,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                 }
             };
 
-            let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile).await;
+            let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, config_path.as_ref()).await;
 
             if mode == Mode::List {
                 SnowConfig::List(ListConfig {
@@ -123,7 +125,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                 _ => unreachable!(),
             };
 
-            let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile).await;
+            let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, config_path.as_ref()).await;
 
             if mode == Mode::Upload {
                 SnowConfig::Upload(UploadConfig {
@@ -161,8 +163,8 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
     }
 }
 
-async fn load_endpoint_and_stop_program_with_error_if_it_fails(profile: &String) -> EndpointConfig {
-    let endpoint = match gather_credentials(&profile).await {
+async fn load_endpoint_and_stop_program_with_error_if_it_fails(profile: &String, config_path: Option<&std::path::PathBuf>) -> EndpointConfig {
+    let endpoint = match gather_credentials(&profile, config_path).await {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("Error loading configuration for profile '{}': {}\nRun \"snowcopy config\" to configure profiles", profile, e);
@@ -172,8 +174,12 @@ async fn load_endpoint_and_stop_program_with_error_if_it_fails(profile: &String)
     endpoint
 }
 
-pub async fn gather_credentials(profile_name: &str) -> anyhow::Result<EndpointConfig> {
-    let app_config = config::load_config()?;
+pub async fn gather_credentials(profile_name: &str, config_path: Option<&std::path::PathBuf>) -> anyhow::Result<EndpointConfig> {
+    let app_config = if let Some(path) = config_path {
+        config::load_config_from_path(path.clone())?
+    } else {
+        config::load_config()?
+    };
 
     let matches: Vec<_> = app_config
         .endpoints
@@ -219,6 +225,15 @@ pub fn parse_arguments() -> ArgMatches {
         .subcommand(
             Command::new("engine")
                 .about("Engine command")
+        )
+        .arg(
+            Arg::new("config")
+                .long("config")
+                .value_name("FILE")
+                .help("Path to a config file to use instead of the default")
+                .required(false)
+                .num_args(1)
+                .global(true),
         )
         .arg(
             Arg::new("src")
