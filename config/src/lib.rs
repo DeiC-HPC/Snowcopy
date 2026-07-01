@@ -53,6 +53,10 @@ pub fn get_config_path() -> Result<PathBuf> {
 
 pub fn load_config() -> Result<AppConfig> {
     let path = get_config_path()?;
+    load_config_from_path(path)
+}
+
+pub fn load_config_from_path(path: PathBuf) -> Result<AppConfig> {
     if !path.exists() {
         return Ok(AppConfig::default());
     }
