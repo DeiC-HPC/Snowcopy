@@ -1,14 +1,6 @@
 Run project with:
 run --package snowcopy --bin snowcopy -- my-file.txt lumio:rusty-rust-delete-me5
 
-Add config.json to project file with following structure:
-
-{
-  "s3_access_key": "<SomeKey>",
-  "s3_secret_key": "<SomeKey>",
-  "s3_url": "https://lumidata.eu"
-}
-
 
 Add one the following to run config to log aws client requests:
 RUST_LOG=aws_smithy_http=trace cargo run
