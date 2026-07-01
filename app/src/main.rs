@@ -9,6 +9,7 @@ mod download;
 mod command_center;
 mod config_and_parameter_parsing;
 mod error_print;
+mod list;
 
 use std::time::Instant;
 use std::sync::Arc;
@@ -68,11 +69,10 @@ async fn main() {
             }
             res
         }
-        SnowConfig::List(_config) => {
-            //TODO later: call ls with lsConfig
-            println!("Not implemented yet.");
-            None
+        SnowConfig::List(config) => {
+            list::list_bucket(config).await
         }
+        
         SnowConfig::Remove(_config) => {
             //TODO later: call remove with removeConfig
             println!("Not implemented yet.");

@@ -123,7 +123,6 @@ pub struct DownloadConfig {
 pub struct ListConfig {
     pub endpoint: EndpointConfig,
     pub bucket: String,
-    pub silent: bool,
     pub req_limit: Option<usize>,
 }
 
