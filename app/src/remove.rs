@@ -20,7 +20,7 @@ pub async fn remove(ctx: RemoveConfig) -> Option<FatalError> {
     let req_sem = Arc::new(auto_tune_delete(&ctx, cc_tx.clone()));
     let mut join_set = tokio::task::JoinSet::new();
 
-    println!("Deleting objects in bucket {}...", ctx.bucket);
+    println!("Deleting bucket {}...", ctx.bucket);
     while let Some(object) = object_channel.recv().await {
         let s3client_clone = s3client.clone();
         let bucket = ctx.bucket.clone();
