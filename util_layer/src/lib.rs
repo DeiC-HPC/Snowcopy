@@ -122,7 +122,7 @@ pub struct DownloadConfig {
 #[derive(Debug, Clone)]
 pub struct ListConfig {
     pub endpoint: EndpointConfig,
-    pub bucket: String,
+    pub bucket: Option<String>,
     pub req_limit: Option<usize>,
 }
 
