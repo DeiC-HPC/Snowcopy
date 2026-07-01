@@ -1,5 +1,5 @@
 # Snowcopy
-Snowcopy is an easy to use, fast S3 transfer command line tool, with strong data integrity checking.
+Snowcopy is an easy-to-use, fast S3 transfer command line tool with strong data integrity checking.
 
 Main features:
 * Auto-tuning parallelization and memory usage based on client hardware, for effortless performance out of the box.
@@ -20,7 +20,7 @@ Which will display a clickable TUI for the user to input the credentials and URL
 ![config tui](readme/config-example.png)
 
 
-When transferring files, Snowcopy use the [src:dst] patten, where the left expression from and the right is to:
+When transferring files, Snowcopy use the [src:dst] pattern:
 
 ```
 Upload:
