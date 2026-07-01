@@ -38,7 +38,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
 
     match mode {
         Mode::Config => {
-            SnowConfig::Config(ConfigModeConfig { silent })
+            SnowConfig::Config(ConfigModeConfig { silent, config_path })
         }
         Mode::List | Mode::Remove => {
             let sub_m = sub_matches.expect("subcommand matches required for ls/rm");
@@ -220,9 +220,10 @@ pub fn parse_arguments() -> ArgMatches {
             Arg::new("config")
                 .long("config")
                 .value_name("FILE")
-                .help("Specific config file to use")
+                .help("Path to a config file to use instead of the default")
                 .required(false)
-                .num_args(1),
+                .num_args(1)
+                .global(true),
         )
         .arg(
             Arg::new("src")

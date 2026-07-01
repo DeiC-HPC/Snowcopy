@@ -78,8 +78,8 @@ async fn main() {
             println!("Not implemented yet.");
             None
         }
-        SnowConfig::Config(_config) => {
-            if let Err(e) = config::run_tui() {
+        SnowConfig::Config(config) => {
+            if let Err(e) = config::run_tui(config.config_path) {
                 Some(FatalError::new(
                     FatalErrorCode::Unknown,
                     format!("Error running config: {}", e),

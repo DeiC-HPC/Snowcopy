@@ -137,6 +137,7 @@ pub struct RemoveConfig {
 #[derive(Debug, Clone)]
 pub struct ConfigModeConfig {
     pub silent: bool,
+    pub config_path: Option<PathBuf>,
 }
 
 pub trait S3ConfigTrait {

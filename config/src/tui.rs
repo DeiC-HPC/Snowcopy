@@ -1,6 +1,6 @@
-use crate::{load_config, save_config, AppConfig};
+use crate::{load_config, load_config_from_path, save_config, save_config_to_path, AppConfig};
 use util_layer::{Endpoint, EndpointConfig};
-use anyhow::Result;
+use anyhow::{Result, Context};
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
@@ -17,7 +17,7 @@ use ratatui::{
 };
 use std::io;
 
-pub fn run() -> Result<()> {
+pub fn run(config_path: Option<std::path::PathBuf>) -> Result<()> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -27,7 +27,7 @@ pub fn run() -> Result<()> {
     terminal.clear()?;
 
     // create app and run it
-    let res = run_app(&mut terminal);
+    let res = run_app(&mut terminal, config_path);
 
     terminal.clear()?;
     // restore terminal
@@ -68,6 +68,7 @@ pub(crate) enum Field {
 
 pub(crate) struct App {
     pub(crate) config: AppConfig,
+    pub(crate) config_path: Option<std::path::PathBuf>,
     pub(crate) list_state: ListState,
     pub(crate) input_mode: InputMode,
     pub(crate) focus: Focus,
@@ -80,13 +81,14 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub(crate) fn new(config: AppConfig) -> App {
+    pub(crate) fn new(config: AppConfig, config_path: Option<std::path::PathBuf>) -> App {
         let mut list_state = ListState::default();
         if !config.endpoints.is_empty() {
             list_state.select(Some(0));
         }
         App {
             config,
+            config_path,
             list_state,
             input_mode: InputMode::Normal,
             focus: Focus::Endpoints,
@@ -248,16 +250,27 @@ impl App {
             }
         }
         self.input_mode = InputMode::Normal;
-        save_config(&self.config)
+        if let Some(path) = &self.config_path {
+            save_config_to_path(&self.config, path.clone())
+        } else {
+            save_config(&self.config)
+        }
     }
 }
 
-fn run_app<B: Backend>(terminal: &mut Terminal<B>) -> Result<()> 
+fn run_app<B: Backend>(terminal: &mut Terminal<B>, config_path: Option<std::path::PathBuf>) -> Result<()> 
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let config = load_config()?;
-    let mut app = App::new(config);
+    let config = if let Some(path) = &config_path {
+        if path.is_dir() {
+            anyhow::bail!("Config path {} is a directory", path.display());
+        }
+        load_config_from_path(path.clone()).with_context(|| format!("Failed to load config from {}", path.display()))?
+    } else {
+        load_config()?
+    };
+    let mut app = App::new(config, config_path);
 
     if app.config.endpoints.is_empty() {
         app.add_endpoint()?;

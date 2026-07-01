@@ -80,6 +80,10 @@ pub fn load_config_from_path(path: PathBuf) -> Result<AppConfig> {
 
 pub fn save_config(config: &AppConfig) -> Result<()> {
     let path = get_config_path()?;
+    save_config_to_path(config, path)
+}
+
+pub fn save_config_to_path(config: &AppConfig, path: PathBuf) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -88,8 +92,8 @@ pub fn save_config(config: &AppConfig) -> Result<()> {
     Ok(())
 }
 
-pub fn run_tui() -> Result<()> {
-    tui::run()
+pub fn run_tui(config_path: Option<PathBuf>) -> Result<()> {
+    tui::run(config_path)
 }
 
 #[cfg(test)]
@@ -151,7 +155,7 @@ mod tests {
             ],
         };
 
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         
         // 1. Select Endpoint A and Region field
         app.list_state.select(Some(0));
@@ -202,7 +206,7 @@ mod tests {
             ],
         };
 
-        let mut app = App::new(config);
+        let mut app = App::new(config, None);
         
         // 1. Select Endpoint A and Region field
         app.list_state.select(Some(0));
