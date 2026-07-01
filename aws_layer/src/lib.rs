@@ -91,6 +91,31 @@ impl S3Client {
         .await
     }
 
+    pub async fn delete_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<(), SnowCopyError> {
+        util_layer::retry::retry_on_failure_async(
+            || async { delete_object(self.aws_sdk_client(), bucket, key).await },
+            self.cc_tx.clone(),
+            format!("Deleting object {}", key),
+        )
+        .await
+    }
+
+    pub async fn delete_bucket(
+        &self,
+        bucket: &str,
+    ) -> Result<(), SnowCopyError> {
+        util_layer::retry::retry_on_failure_async(
+            || async { delete_bucket(self.aws_sdk_client(), bucket).await },
+            self.cc_tx.clone(),
+            format!("Deleting bucket {}", bucket),
+        )
+        .await
+    }
+
     pub async fn create_multipart_upload(
         &self,
         bucket: &str,
@@ -243,6 +268,34 @@ async fn complete_multipart_upload(
         .key(key)
         .upload_id(upload_id)
         .multipart_upload(completed_multipart_upload)
+        .send()
+        .await
+        .map(|_| ())
+        .map_err(|e| SnowCopyError::from(e))
+}
+
+async fn delete_object(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+) -> Result<(), SnowCopyError> {
+    client
+        .delete_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .map(|_| ())
+        .map_err(|e| SnowCopyError::from(e))
+}
+
+async fn delete_bucket(
+    client: &Client,
+    bucket: &str,
+) -> Result<(), SnowCopyError> {
+    client
+        .delete_bucket()
+        .bucket(bucket)
         .send()
         .await
         .map(|_| ())

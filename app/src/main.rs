@@ -10,6 +10,7 @@ mod command_center;
 mod config_and_parameter_parsing;
 mod error_print;
 mod list;
+mod remove;
 
 use std::time::Instant;
 use std::sync::Arc;
@@ -73,10 +74,13 @@ async fn main() {
             list::list_bucket(config).await
         }
         
-        SnowConfig::Remove(_config) => {
-            //TODO later: call remove with removeConfig
-            println!("Not implemented yet.");
-            None
+        SnowConfig::Remove(config) => {
+            let silent = config.silent;
+            let res = remove::remove(config).await;
+            if !silent {
+                println!("Program execution time: {:.2?}", start_time.elapsed());
+            }
+            res
         }
         SnowConfig::Config(_config) => {
             if let Err(e) = config::run_tui() {

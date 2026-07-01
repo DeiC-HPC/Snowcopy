@@ -69,7 +69,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                     endpoint,
                     bucket,
                     silent,
-                    req_limit: req_limit_overwrite,
+                    req_limit_overwrite,
                 })
             }
         }
