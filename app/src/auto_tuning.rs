@@ -85,6 +85,17 @@ pub fn auto_tune_download(config: Arc<DownloadConfig>, cc_tx: UnboundedSender<Co
     (file_sem, req_sem, download_file_concurrency)
 }
 
+pub fn auto_tune_delete(config: &util_layer::RemoveConfig, cc_tx: UnboundedSender<CommandCenterEvent>) -> Semaphore {
+    let current_path = PathBuf::from(".");
+    let (_, mut req_limit, _, _, _) = auto_tune_internal(&current_path, cc_tx.clone());
+
+    if let Some(override_value) = config.req_limit_overwrite {
+        req_limit = override_value;
+    }
+
+    Semaphore::new(req_limit)
+}
+
 fn auto_tune_internal(
     path: &Path,
     cc_tx: UnboundedSender<CommandCenterEvent>,

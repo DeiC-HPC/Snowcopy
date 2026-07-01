@@ -122,7 +122,7 @@ pub struct DownloadConfig {
 #[derive(Debug, Clone)]
 pub struct ListConfig {
     pub endpoint: EndpointConfig,
-    pub bucket: String,
+    pub bucket: Option<String>,
     pub req_limit: Option<usize>,
 }
 
@@ -131,7 +131,7 @@ pub struct RemoveConfig {
     pub endpoint: EndpointConfig,
     pub bucket: String,
     pub silent: bool,
-    pub req_limit: Option<usize>,
+    pub req_limit_overwrite: Option<usize>,
 }
 
 #[derive(Debug, Clone)]

@@ -38,6 +38,10 @@ impl PathPattern {
         }
     }
 
+    pub fn is_bucket_empty(bucket: &str) -> bool {
+        bucket.is_empty()
+    }
+
     /// Validates an S3 bucket name according to AWS rules.
     /// Returns Ok(()) if valid, or a descriptive error message if invalid.
     ///
@@ -126,6 +130,14 @@ mod tests {
 
     #[test]
     fn test_parse_s3() {
+        assert_eq!(
+            PathPattern::parse("lumi:"),
+            PathPattern::S3 {
+                profile: "lumi".to_string(),
+                bucket: "".to_string(),
+                key: None
+            }
+        );
         assert_eq!(
             PathPattern::parse("lumi:my-bucket"),
             PathPattern::S3 {

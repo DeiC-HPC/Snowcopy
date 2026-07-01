@@ -6,18 +6,30 @@ use util_layer::error_codes::FatalError;
 use util_layer::ListConfig;
 use crate::command_center::{CommandCenter, CC};
 
-pub(crate) async fn list_bucket(ctx: ListConfig) -> Option<FatalError> {
+pub(crate) async fn list(ctx: ListConfig) -> Option<FatalError> {
     let cancellation_token = CancellationToken::new();
     let cc = CommandCenter::new_list(&ctx, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
 
     let s3client = Arc::new(S3Client::new(&ctx.endpoint, cc_tx.clone()).await);
 
-    let mut object_channel = s3client.stream_head_objects_from_bucket_in_separate_task(&ctx.bucket, "", &PathBuf::new(), cancellation_token.clone()).await; //TODO JON: add prefix later
+    if let Some(bucket) = &ctx.bucket { //list bucket contents
+        let mut object_channel = s3client.stream_head_objects_from_bucket_in_separate_task(bucket, "", &PathBuf::new(), cancellation_token.clone()).await; //TODO JON: add prefix later
 
-    println!("Listing objects in bucket {}:", ctx.bucket);
-    while let Some(object) = object_channel.recv().await {
-        println!("{}", object.key);
+        while let Some(object) = object_channel.recv().await {
+            println!("{}", object.key);
+        }
+    } else { //list buckets
+        match s3client.list_buckets().await {
+            Ok(buckets) => {
+                for bucket in buckets {
+                    println!("{}", bucket);
+                }
+            }
+            Err(e) => {
+                let _ = cc_tx.send(util_layer::cc_util::CommandCenterEvent::FatalErrorEvent(FatalError::new(util_layer::error_codes::FatalErrorCode::RequestFailure, format!("Failed to list buckets: {}", e))));
+            }
+        }
     }
 
     drop(s3client);
