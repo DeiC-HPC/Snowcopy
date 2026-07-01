@@ -1,5 +1,5 @@
 use crate::{load_config, load_config_from_path, save_config, save_config_to_path, AppConfig};
-use util_layer::{Endpoint, EndpointConfig};
+use util_layer::{ConfigModeConfig, Endpoint, EndpointConfig};
 use anyhow::{Result, Context};
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{
@@ -17,7 +17,7 @@ use ratatui::{
 };
 use std::io;
 
-pub fn run(config_path: Option<std::path::PathBuf>) -> Result<()> {
+pub fn run(config: ConfigModeConfig) -> Result<()> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -27,7 +27,7 @@ pub fn run(config_path: Option<std::path::PathBuf>) -> Result<()> {
     terminal.clear()?;
 
     // create app and run it
-    let res = run_app(&mut terminal, config_path);
+    let res = run_app(&mut terminal, config.config_path);
 
     terminal.clear()?;
     // restore terminal

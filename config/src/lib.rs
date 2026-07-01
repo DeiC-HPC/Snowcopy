@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use directories::ProjectDirs;
 use anyhow::{Result, Context};
 use std::fs;
-use util_layer::Endpoint;
+use util_layer::{ConfigModeConfig, Endpoint};
 #[cfg(test)]
 use util_layer::EndpointConfig;
 
@@ -92,8 +92,8 @@ pub fn save_config_to_path(config: &AppConfig, path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-pub fn run_tui(config_path: Option<PathBuf>) -> Result<()> {
-    tui::run(config_path)
+pub fn run_tui(config: ConfigModeConfig) -> Result<()> {
+    tui::run(config)
 }
 
 #[cfg(test)]

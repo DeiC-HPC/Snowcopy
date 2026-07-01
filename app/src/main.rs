@@ -83,7 +83,7 @@ async fn main() {
             res
         }
         SnowConfig::Config(config) => {
-            if let Err(e) = config::run_tui(config.config_path) {
+            if let Err(e) = config::run_tui(config) {
                 Some(FatalError::new(
                     FatalErrorCode::Unknown,
                     format!("Error running config: {}", e),
