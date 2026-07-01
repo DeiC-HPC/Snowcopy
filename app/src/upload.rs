@@ -14,15 +14,15 @@ use tokio::sync::{mpsc, Mutex, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::{CommandCenterEvent, Status};
-use util_layer::constants::CHUNK_SIZE;
-use util_layer::retry::retry_on_failure_async;
-use util_layer::url_encoder::url_encode_fast;
 use util_layer::constants;
-use util_layer::{FileInfo, UploadConfig};
-use walkdir::WalkDir;
+use util_layer::constants::CHUNK_SIZE;
 use util_layer::error_codes::FatalError;
 use util_layer::error_codes::FatalErrorCode::{DiskIoError, RequestFailure, Unknown};
+use util_layer::retry::retry_on_failure_async;
 use util_layer::snow_errors::SnowCopyError;
+use util_layer::url_encoder::url_encode_fast;
+use util_layer::{FileInfo, UploadConfig};
+use walkdir::WalkDir;
 
 pub async fn upload(ctx: Arc<UploadConfig>) -> Option<FatalError> {
     let cancellation_token = CancellationToken::new();
@@ -89,7 +89,7 @@ async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream
                         });
                     }
                     Some(Err(e)) => {
-                        panic!("Error walking directory: {}", e);
+                        runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError, format!("Error walking directory: {}", e)))).expect("Failed to send message to command center. Should never happen.");
                     }
                     None => break,
                 }
