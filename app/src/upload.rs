@@ -140,14 +140,14 @@ async fn upload_file(ctx: Arc<UploadConfig>, aws_client: Arc<S3Client>, runtime:
 async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<S3Client>, runtime: Arc<UploadRuntime>, file_info: Arc<FileInfo>, file: Arc<File>) {
     let chunk_amount = (file_info.file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-    let upload_id = aws_client.create_multipart_upload(&ctx.bucket, &*file_info.aws_uri_encoded_key, file_info.modified_time, CHUNK_SIZE).await.unwrap();
+    let upload_id = aws_client.create_multipart_upload(&ctx.bucket, &*file_info.key, file_info.modified_time, CHUNK_SIZE).await.unwrap();
 
     let completed_parts: Arc<Mutex<Vec<CompletedPartAws>>> = Arc::new(Mutex::new(Vec::new()));
 
     upload_each_chunk_with_retry(&ctx, &runtime, &file_info, file, &upload_id, chunk_amount, &completed_parts).await;
 
     let completed_parts = Arc::try_unwrap(completed_parts).unwrap().into_inner();
-    aws_client.complete_multipart_upload(&ctx.bucket, &*file_info.aws_uri_encoded_key, &upload_id, completed_parts).await.unwrap();
+    aws_client.complete_multipart_upload(&ctx.bucket, &*file_info.key, &upload_id, completed_parts).await.unwrap();
     let _ = runtime.cc_tx.send(CommandCenterEvent::FileTransferred(file_info.file_size));
 }
 
@@ -284,7 +284,7 @@ fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSende
 
                             checker_set.spawn(async move {
                                 let metadata = tokio::select! {
-                                    res = client.get_s3_metadata(&bucket, &file_info.aws_uri_encoded_key) => res,
+                                    res = client.get_s3_metadata(&bucket, &file_info.key) => res,
                                     _ = cancellation_token.cancelled() => {
                                         drop(permit);
                                         return;
@@ -357,9 +357,15 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
 
         cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).expect("Failed to send message to command center. Should never happen.");
 
-        let key = base_path.file_name().unwrap().to_str().unwrap();
+        let key = &util_layer::path_to_s3_key(base_path.to_str().unwrap());
         let aws_uri_encoded_key = url_encode_fast(key, true);
-        let file_info = FileInfo { file_path : base_path, aws_uri_encoded_key, file_size, modified_time };
+        let file_info = FileInfo {
+            file_path: base_path,
+            aws_uri_encoded_key,
+            key: String::from(key),
+            file_size,
+            modified_time,
+        };
         tx.send(Ok(file_info)).await.unwrap();
         let _ = cc_tx.send(CommandCenterEvent::StatusChanged(Status::Transferring));
 
@@ -385,11 +391,12 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
                         let relative_path = file_path.strip_prefix(&base_path_for_relative)
                             .expect("base_path_for_relative should be a prefix of file_path. This error should never occur.");
 
-                        let aws_uri_encoded_key: String = url_encode_fast(&util_layer::path_to_s3_key(relative_path.to_str().unwrap()), true);
+                        let key = &util_layer::path_to_s3_key(relative_path.to_str().unwrap());
+                        let aws_uri_encoded_key: String = url_encode_fast(key, true);
 
                         cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).expect("Failed to send message to command center. Should never happen.");
 
-                        let file_info = FileInfo { file_path, aws_uri_encoded_key, file_size, modified_time };
+                        let file_info = FileInfo { file_path, aws_uri_encoded_key, key: String::from(key), file_size, modified_time };
                         tx.blocking_send(Ok(file_info)).expect("Failed to send message. Should never happen.");
                     }
                 }

@@ -258,6 +258,7 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
         let file_info = Arc::new(FileInfo {
             file_path: object.local_path.clone(),
             aws_uri_encoded_key: object.aws_uri_encoded_key.clone(),
+            key: object.key.clone(),
             file_size: object.size as u64,
             modified_time: object.modified_time,
         });
