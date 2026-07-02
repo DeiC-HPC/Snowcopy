@@ -192,6 +192,7 @@ pub struct S3Object {
 pub struct FileInfo {
     pub file_path: PathBuf,
     pub aws_uri_encoded_key: String,
+    pub key: String,
     pub file_size: u64,
     pub modified_time: Option<SystemTime>,
 }
