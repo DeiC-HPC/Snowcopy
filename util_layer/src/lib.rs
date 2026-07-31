@@ -94,6 +94,7 @@ pub struct UploadConfig {
     pub file_limit_overwrite: Option<usize>,
     pub req_limit_overwrite: Option<usize>,
     pub silent: bool,
+    pub verbose: bool,
     pub stats: bool,
     pub trailing_chunk_size: u64,
     pub trailing: bool,
@@ -112,6 +113,7 @@ pub struct DownloadConfig {
     pub req_limit_overwrite: Option<usize>,
     pub download_concurrency_overwrite: Option<usize>,
     pub silent: bool,
+    pub verbose: bool,
     pub stats: bool,
     pub open_file_limit_overwrite: Option<usize>,
     pub bucket: String,
@@ -124,6 +126,7 @@ pub struct ListConfig {
     pub endpoint: EndpointConfig,
     pub bucket: Option<String>,
     pub req_limit: Option<usize>,
+    pub verbose: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +134,7 @@ pub struct RemoveConfig {
     pub endpoint: EndpointConfig,
     pub bucket: String,
     pub silent: bool,
+    pub verbose: bool,
     pub req_limit_overwrite: Option<usize>,
 }
 
@@ -142,11 +146,15 @@ pub struct ConfigModeConfig {
 
 pub trait S3ConfigTrait {
     fn endpoint(&self) -> &EndpointConfig;
+    fn verbose(&self) -> bool;
 }
 
 impl S3ConfigTrait for UploadConfig {
     fn endpoint(&self) -> &EndpointConfig {
         &self.endpoint
+    }
+    fn verbose(&self) -> bool {
+        self.verbose
     }
 }
 
@@ -154,17 +162,26 @@ impl S3ConfigTrait for DownloadConfig {
     fn endpoint(&self) -> &EndpointConfig {
         &self.endpoint
     }
+    fn verbose(&self) -> bool {
+        self.verbose
+    }
 }
 
 impl S3ConfigTrait for ListConfig {
     fn endpoint(&self) -> &EndpointConfig {
         &self.endpoint
     }
+    fn verbose(&self) -> bool {
+        self.verbose
+    }
 }
 
 impl S3ConfigTrait for RemoveConfig {
     fn endpoint(&self) -> &EndpointConfig {
         &self.endpoint
+    }
+    fn verbose(&self) -> bool {
+        self.verbose
     }
 }
 

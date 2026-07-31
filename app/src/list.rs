@@ -11,7 +11,7 @@ pub(crate) async fn list(ctx: ListConfig) -> Option<FatalError> {
     let cc = CommandCenter::new_list(&ctx, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
 
-    let s3client = Arc::new(S3Client::new(&ctx.endpoint, cc_tx.clone()).await);
+    let s3client = Arc::new(S3Client::new(&ctx.endpoint, cc_tx.clone(), ctx.verbose).await);
 
     if let Some(bucket) = &ctx.bucket { //list bucket contents
         let mut object_channel = s3client.stream_head_objects_from_bucket_in_separate_task(bucket, "", &PathBuf::new(), cancellation_token.clone()).await; //TODO JON: add prefix later

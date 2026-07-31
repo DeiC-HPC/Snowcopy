@@ -6,7 +6,7 @@ use std::io::Error;
 use std::path::PathBuf;
 
 use aws_layer::{CompletedPartAws, S3Client};
-use http_layer::{build_https_client, BufferPool, HyperClient};
+use http_layer::{BufferPool, HyperClient};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::mpsc::{Receiver, UnboundedSender};
@@ -35,10 +35,10 @@ pub async fn upload(ctx: Arc<UploadConfig>) -> Option<FatalError> {
 
     let mut files_to_upload_stream = walk_directory_async(ctx.local_path.to_path_buf(), cc_tx.clone(), cancellation_token.clone()).await;
 
-    let s3client = Arc::new(S3Client::new(&ctx.endpoint, cc_tx.clone()).await);
+    let s3client = Arc::new(S3Client::new(&ctx.endpoint, cc_tx.clone(), ctx.verbose).await);
     let bucket_creation_handle = create_bucket_if_not_exist(&ctx, &s3client);
 
-    let hyper_client = build_https_client();
+    let hyper_client = http_layer::build_https_client();
     let (active_file_io_sem, req_sem, open_files_sem, buffer_pool_size) = auto_tuning::auto_tune_upload(ctx.clone(), cc_tx.clone());
 
     let task_sem = Arc::new(Semaphore::new(open_files_sem.available_permits()));
@@ -188,7 +188,7 @@ async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<Upl
                         if ctx.trailing {
                             http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri).await
                         } else {
-                            http_layer::put_file_range(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
+                            http_layer::put_file_range(ctx, file, file_info, start_pos, amount, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri, runtime.cc_tx.clone()).await
                         }
                     }
                 },
@@ -239,7 +239,7 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, 
                 if ctx.trailing_small {
                     http_layer::upload_trailing::put_file_streaming(ctx, file, file_info, 0, amount, &runtime.hyper_client, runtime.file_sem.clone(), &runtime.req_sem, &canonical_uri, &query_uri).await
                 } else {
-                    http_layer::put_file(ctx, file, file_info, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await
+                    http_layer::put_file(ctx, file, file_info, &runtime.hyper_client, &runtime.file_sem, &runtime.req_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri, runtime.cc_tx.clone()).await
                 }
             }
         }, runtime.cc_tx.clone(),
@@ -357,8 +357,8 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
 
         cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).expect("Failed to send message to command center. Should never happen.");
 
-        let key = &util_layer::path_to_s3_key(base_path.to_str().unwrap());
-        let aws_uri_encoded_key = url_encode_fast(key, true);
+        let key = base_path.file_name().unwrap().to_string_lossy().into_owned();
+        let aws_uri_encoded_key = url_encode_fast(&key, true);
         let file_info = FileInfo {
             file_path: base_path,
             aws_uri_encoded_key,

@@ -34,6 +34,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
     };
 
     let silent = matches.get_flag("silent");
+    let verbose = matches.get_flag("verbose");
     let req_limit_overwrite = matches.get_one::<usize>("req_limit").copied();
 
     match mode {
@@ -69,6 +70,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                     endpoint,
                     bucket: bucket_opt,
                     req_limit: req_limit_overwrite,
+                    verbose,
                 })
             } else {
                 let bucket = if let Some(b) = bucket_opt {
@@ -81,6 +83,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                     endpoint,
                     bucket,
                     silent,
+                    verbose,
                     req_limit_overwrite,
                 })
             }
@@ -135,6 +138,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                     file_limit_overwrite,
                     req_limit_overwrite,
                     silent,
+                    verbose,
                     stats,
                     trailing_chunk_size: trailing_chunk_size_val as u64,
                     trailing,
@@ -152,6 +156,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                     req_limit_overwrite,
                     download_concurrency_overwrite,
                     silent,
+                    verbose,
                     stats,
                     open_file_limit_overwrite,
                     bucket,
@@ -337,6 +342,13 @@ pub fn parse_arguments() -> ArgMatches {
                 .required(false)
                 .value_parser(clap::value_parser!(usize))
                 .num_args(1),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .help("Verbose mode (print http headers)")
+                .action(clap::ArgAction::SetTrue),
         )
         .after_help("Examples:\n  up:   snowcopy my-folder profile:bucket\n  up:   snowcopy file.txt profile:bucket\n  down: snowcopy profile:bucket .")
         .get_matches();
