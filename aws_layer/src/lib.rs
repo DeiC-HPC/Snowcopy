@@ -1,3 +1,5 @@
+mod logging;
+
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::retry::RetryConfig;
 use aws_config::timeout::TimeoutConfig;
@@ -17,12 +19,12 @@ use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::cc_util::Status::Transferring;
 use util_layer::constants::{MULTIPART_UPLOAD_METADATA_UNIFORM_CHUNK_SIZE_KEY, PAYLOAD_SHA256_METADATA_KEY};
+use util_layer::error_codes::FatalError;
+use util_layer::error_codes::FatalErrorCode::RequestFailure;
 use util_layer::snow_errors::{S3Error, SnowCopyError};
 use util_layer::time::float_string_to_time;
 use util_layer::url_encoder::url_encode_fast;
 use util_layer::{constants, EndpointConfig, S3Object};
-use util_layer::error_codes::FatalError;
-use util_layer::error_codes::FatalErrorCode::RequestFailure;
 
 pub struct S3Client {
     aws_sdk_client: Arc<Client>,
@@ -30,9 +32,9 @@ pub struct S3Client {
 }
 
 impl S3Client {
-    pub async fn new(config: &EndpointConfig, cc_tx: UnboundedSender<CommandCenterEvent>) -> Self {
+    pub async fn new(config: &EndpointConfig, cc_tx: UnboundedSender<CommandCenterEvent>, verbose: bool) -> Self {
         Self {
-            aws_sdk_client: Arc::new(create_client_from_config_endpoint(config).await), cc_tx
+            aws_sdk_client: Arc::new(create_client_from_config_endpoint(config, cc_tx.clone(), verbose).await), cc_tx
         }
     }
 
@@ -320,11 +322,11 @@ async fn delete_bucket(
         .map_err(|e| SnowCopyError::from(e))
 }
 
-async fn create_client_from_config_endpoint(config: &EndpointConfig) -> Client {
-    create_aws_sdk_client(&config.s3_access_key, &config.s3_secret_key, &config.s3_url, &config.s3_region).await
+async fn create_client_from_config_endpoint(config: &EndpointConfig, cc_tx: UnboundedSender<CommandCenterEvent>, verbose: bool) -> Client {
+    create_aws_sdk_client(&config.s3_access_key, &config.s3_secret_key, &config.s3_url, &config.s3_region, cc_tx, verbose).await
 }
 
-async fn create_aws_sdk_client(access_key: &str, secret_key: &str, url: &str, region: &str) -> Client {
+async fn create_aws_sdk_client(access_key: &str, secret_key: &str, url: &str, region: &str, cc_tx: UnboundedSender<CommandCenterEvent>, verbose: bool) -> Client {
     let region = Region::new(region.to_string());
 
     let creds = Credentials::new(
@@ -350,13 +352,18 @@ async fn create_aws_sdk_client(access_key: &str, secret_key: &str, url: &str, re
     let retry_config = RetryConfig::standard()
         .with_max_attempts(1);
 
-    let s3_conf = Builder::from(&shared_config)
+    let mut s3_conf_builder = Builder::from(&shared_config)
         .force_path_style(true)
         .request_checksum_calculation(RequestChecksumCalculation::WhenRequired)
         .response_checksum_validation(ResponseChecksumValidation::WhenRequired)
         .timeout_config(timeout_config)
-        .retry_config(retry_config)
-        .build();
+        .retry_config(retry_config);
+
+    if verbose {
+        s3_conf_builder = s3_conf_builder.interceptor(logging::LoggingInterceptor { cc_tx: cc_tx.clone() });
+    }
+
+    let s3_conf = s3_conf_builder.build();
 
 
     let client = Client::from_conf(s3_conf);

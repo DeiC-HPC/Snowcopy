@@ -49,7 +49,7 @@ pub async fn download(ctx: Arc<DownloadConfig>) -> Option<FatalError> {
     let cc = CommandCenter::new_download(&ctx, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
 
-    let client = Arc::new(S3Client::new(&ctx.endpoint, cc_tx.clone()).await);
+    let client = Arc::new(S3Client::new(&ctx.endpoint, cc_tx.clone(), ctx.verbose).await);
     let object_channel = client.stream_head_objects_from_bucket_in_separate_task(&ctx.bucket, &ctx.prefix, &ctx.local_path, cancellation_token.clone()).await;
     let mut object_channel = fetch_object_metadata_and_filter_already_downloaded(&ctx, &cc_tx, client, object_channel, cancellation_token.clone()).await;
 
@@ -283,6 +283,8 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
 }
 
 async fn download_full_file_and_check_integrity(pool_client: Arc<HyperClient>, config: Arc<DownloadConfig>, object: S3Object, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, disk_write_tx: Sender<WriteMsg>, file_info: Arc<FileInfo>, canonical_uri: Arc<String>, query_uri: String, cancellation_token: CancellationToken) -> Result<(), SnowCopyError> {
+    let cc_sender_clone = cc_sender.clone();
+    let retry_cc_sender = cc_sender.clone();
     let result = select! {
         _ = cancellation_token.cancelled() => {
             return Err(SnowCopyError::Canceled);
@@ -296,11 +298,12 @@ async fn download_full_file_and_check_integrity(pool_client: Arc<HyperClient>, c
             let query_uri = query_uri.clone();
             let req_sem = req_sem.clone();
             let disk_write_tx = disk_write_tx.clone();
+            let cc_sender_clone = cc_sender_clone.clone();
 
             async move {
-                http_layer::download::get_file(config, file_info, &pool_client, &canonical_uri, &query_uri, req_sem, disk_write_tx).await
+                http_layer::download::get_file(config, file_info, &pool_client, &canonical_uri, &query_uri, req_sem, disk_write_tx, cc_sender_clone).await
             }
-        }, cc_sender.clone(),format!("Downloading {}", object.key)) => result
+        }, retry_cc_sender,format!("Downloading {}", object.key)) => result
     };
 
     match result {
@@ -418,9 +421,10 @@ fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadC
                     let disk_write_tx = disk_write_tx.clone();
                     let tracker = tracker.clone();
                     let hash_algo = hash_algo.clone();
+                    let cc_sender = cc_sender.clone();
 
                     async move {
-                        http_layer::download::download_file_range(start, end, config, &pool_client, req_sem, &canonical_uri, &query_uri, file, disk_write_tx, tracker, hash_algo).await
+                        http_layer::download::download_file_range(start, end, config, &pool_client, req_sem, &canonical_uri, &query_uri, file, disk_write_tx, tracker, hash_algo, cc_sender).await
                     }
                 }, cc_sender.clone(),format!("Downloading part (bytes {} to {}) of {}", start, end, canonical_uri)) => res,
 

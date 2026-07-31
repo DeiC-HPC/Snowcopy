@@ -1,5 +1,6 @@
 use hyper::{Request, Response};
-use tracing::debug;
+use tokio::sync::mpsc::UnboundedSender;
+use util_layer::cc_util::CommandCenterEvent;
 
 fn is_sensitive(name: &hyper::header::HeaderName) -> bool {
     matches!(
@@ -8,7 +9,7 @@ fn is_sensitive(name: &hyper::header::HeaderName) -> bool {
     )
 }
 
-pub fn log_request_headers<B>(req: &Request<B>) {
+pub fn log_request_headers<B>(req: &Request<B>, cc_tx: UnboundedSender<CommandCenterEvent>) {
     let headers_str = req.headers().iter()
         .map(|(name, value)| {
             if is_sensitive(name) {
@@ -20,15 +21,17 @@ pub fn log_request_headers<B>(req: &Request<B>) {
         .collect::<Vec<_>>()
         .join("\n");
 
-    debug!(
-        method = %req.method(), 
-        uri = %req.uri(), 
-        headers = %format!("\n{}", headers_str),
-        "outgoing request"
+    let log_msg = format!(
+        "outgoing request\nmethod: {}\nuri: {}\nheaders:\n{}",
+        req.method(),
+        req.uri(),
+        headers_str
     );
+
+    cc_tx.send(CommandCenterEvent::Log(log_msg)).expect("Failed to send log event to Command Center");
 }
 
-pub fn log_response_headers<B>(resp: &Response<B>) {
+pub fn log_response_headers<B>(resp: &Response<B>, cc_tx: UnboundedSender<CommandCenterEvent>) {
     let headers_str = resp.headers().iter()
         .map(|(name, value)| {
             if is_sensitive(name) {
@@ -40,9 +43,11 @@ pub fn log_response_headers<B>(resp: &Response<B>) {
         .collect::<Vec<_>>()
         .join("\n");
 
-    debug!(
-        status = %resp.status(), 
-        headers = %format!("\n{}", headers_str),
-        "incoming response"
+    let log_msg = format!(
+        "incoming response\nstatus: {}\nheaders:\n{}",
+        resp.status(),
+        headers_str
     );
+
+    cc_tx.send(CommandCenterEvent::Log(log_msg)).expect("Failed to send log event to Command Center");
 }
