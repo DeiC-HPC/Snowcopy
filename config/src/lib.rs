@@ -107,7 +107,7 @@ mod tests {
             config: Some(EndpointConfig {
                 s3_access_key: "key".to_string(),
                 s3_secret_key: "secret".to_string(),
-                s3_url: "url".to_string(),
+                s3_url: "https://test.com".to_string(),
                 s3_region: "us-east-1".to_string(),
             }),
             settings: None,

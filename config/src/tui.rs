@@ -50,6 +50,7 @@ pub(crate) enum InputMode {
     Normal,
     Editing,
     ConfirmDelete,
+    HttpWarning,
 }
 
 pub(crate) enum Focus {
@@ -238,9 +239,17 @@ impl App {
                     endpoint.config.as_mut().unwrap().s3_secret_key = self.edit_buffer.clone();
                 }
                 Field::Url => {
+                    let new_url = self.edit_buffer.trim().to_string();
+                    let is_http = matches!(util_layer::url_parser::validate_s3_endpoint(&new_url), util_layer::url_parser::S3EndpointType::HTTP);
+                    
                     let endpoint = &mut self.config.endpoints[i];
                     if endpoint.config.is_none() { endpoint.config = Some(EndpointConfig::default()); }
                     endpoint.config.as_mut().unwrap().s3_url = self.edit_buffer.clone();
+
+                    if is_http {
+                        self.input_mode = InputMode::HttpWarning;
+                        return Ok(());
+                    }
                 }
                 Field::Region => {
                     let endpoint = &mut self.config.endpoints[i];
@@ -352,6 +361,17 @@ where
                     }
                     KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
                         app.input_mode = InputMode::Normal;
+                    }
+                    _ => {}
+                },
+                InputMode::HttpWarning => match key.code {
+                    KeyCode::Enter | KeyCode::Esc | KeyCode::Char(' ') => {
+                        app.input_mode = InputMode::Normal;
+                        if let Some(path) = &app.config_path {
+                            save_config_to_path(&app.config, path.clone())?;
+                        } else {
+                            save_config(&app.config)?;
+                        }
                     }
                     _ => {}
                 },
@@ -605,6 +625,11 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             } else if !e.is_complete() {
                 label = format!("⚠ {}", label);
                 style = style.fg(Color::Yellow);
+            } else if let Some(config) = &e.config {
+                if is_http(config) {
+                    label = format!("🔒 {}", label);
+                    style = style.fg(Color::LightYellow);
+                }
             }
             ListItem::new(label).style(style)
         })
@@ -672,7 +697,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 let display_value: &str = if is_selected {
                     match app.input_mode {
                         InputMode::Editing => app.edit_buffer.as_str(),
-                        InputMode::Normal | InputMode::ConfirmDelete => *value,
+                        InputMode::Normal | InputMode::ConfirmDelete | InputMode::HttpWarning => *value,
                     }
                 } else {
                     *value
@@ -684,6 +709,18 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                         display_value.trim().is_empty()
                     }
                     Field::Region => false,
+                };
+
+                let is_invalid_url = if let Field::Url = field {
+                    matches!(util_layer::url_parser::validate_s3_endpoint(display_value), util_layer::url_parser::S3EndpointType::Invalid) && !display_value.trim().is_empty()
+                } else {
+                    false
+                };
+
+                let is_http_url = if let Field::Url = field {
+                    matches!(util_layer::url_parser::validate_s3_endpoint(display_value), util_layer::url_parser::S3EndpointType::HTTP)
+                } else {
+                    false
                 };
 
                 if is_selected {
@@ -699,13 +736,17 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
 
                 if is_duplicate_name {
                     style = style.fg(Color::Red);
-                } else if is_incomplete {
-                    style = style.fg(Color::Yellow);
+                } else if is_incomplete || is_http_url || is_invalid_url {
+                    style = style.fg(Color::LightYellow);
                 }
 
                 let mut block = Block::default().title(*label).borders(Borders::ALL);
                 if is_duplicate_name {
                     block = block.title(" Change! Names must be unique.");
+                } else if is_invalid_url {
+                    block = block.title("🔺 Invalid URL");
+                } else if is_http_url {
+                    block = block.title("⚠ Insecure HTTP Protocol");
                 } else if is_incomplete {
                     block = block.title("⚠");
                 }
@@ -754,6 +795,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             f.render_widget(example, example_area);
         }
     }
+}
 
     let footer_area = chunks[2];
     f.render_widget(TuiClear, footer_area); // Clear the footer area, so no artifacts remain
@@ -860,10 +902,67 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 current_x += width + 1;
             }
         }
+        InputMode::HttpWarning => {
+            footer_spans.push(Span::styled("WARNING: Using HTTP is insecure! ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)));
+            footer_spans.push(Span::raw("Press Enter/Esc to acknowledge."));
+        }
     }
 
     let footer = Paragraph::new(Line::from(footer_spans))
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(footer, footer_area);
+
+    if let InputMode::HttpWarning = app.input_mode {
+        let area = centered_rect(60, 20, f.area());
+        f.render_widget(TuiClear, area); //this clears out the background
+        let warning_text = vec![
+            Line::from(vec![Span::styled("Insecure Protocol Warning", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD))]),
+            Line::from(""),
+            Line::from("The endpoint you specified uses the HTTP protocol."),
+            Line::from("This is insecure and can expose your credentials."),
+            Line::from(""),
+            Line::from("It is strongly recommended to use HTTPS instead."),
+            Line::from(""),
+            Line::from(vec![Span::styled("Press Enter, Esc or Space to acknowledge", Style::default().add_modifier(Modifier::ITALIC))]),
+        ];
+        let block = Block::default()
+            .title(" Security Risk ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Red));
+        let p = Paragraph::new(warning_text)
+            .block(block)
+            .alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(p, area);
+    }
 }
+
+fn is_http(config: &EndpointConfig) -> bool {
+    matches!(util_layer::url_parser::validate_s3_endpoint(&config.s3_url), util_layer::url_parser::S3EndpointType::HTTP)
+}
+
+/// helper function to create a centered rect using up certain percentage of the available rect `r`
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_y) / 2),
+                Constraint::Percentage(percent_y),
+                Constraint::Percentage((100 - percent_y) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(r);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(
+            [
+                Constraint::Percentage((100 - percent_x) / 2),
+                Constraint::Percentage(percent_x),
+                Constraint::Percentage((100 - percent_x) / 2),
+            ]
+            .as_ref(),
+        )
+        .split(popup_layout[1])[1]
 }
