@@ -64,7 +64,7 @@ impl Endpoint {
         if let Some(config) = &self.config {
             !config.s3_access_key.trim().is_empty()
                 && !config.s3_secret_key.trim().is_empty()
-                && !matches!(url_parser::validate_s3_endpoint(&config.s3_url), url_parser::S3EndpointType::Invalid)
+                && !matches!(url_parser::validate_s3_endpoint(config.s3_url.trim()), url_parser::S3EndpointType::Invalid)
         } else {
             false
         }

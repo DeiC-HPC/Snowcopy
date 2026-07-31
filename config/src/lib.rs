@@ -317,4 +317,56 @@ mod tests {
         
         cleanup(&config_path);
     }
+
+    #[test]
+    fn test_tui_trim_whitespace_on_save() {
+        use crate::tui::{App, Field};
+        let config = AppConfig {
+            version: 1,
+            global: GlobalConfig::default(),
+            endpoints: vec![
+                Endpoint {
+                    name: "EndpointA".to_string(),
+                    config: Some(EndpointConfig {
+                        s3_access_key: "key".to_string(),
+                        s3_secret_key: "secret".to_string(),
+                        s3_url: "url".to_string(),
+                        s3_region: "region".to_string(),
+                    }),
+                    settings: None,
+                },
+            ],
+        };
+
+        let mut app = App::new(config, None);
+        app.list_state.select(Some(0));
+
+        // Test URL trimming
+        app.selected_field = Field::Url;
+        app.start_editing();
+        app.edit_buffer = "\t  https://lumi.com  \n".to_string();
+        app.save_edit().unwrap();
+        assert_eq!(app.config.endpoints[0].config.as_ref().unwrap().s3_url, "https://lumi.com");
+
+        // Test Access Key trimming
+        app.selected_field = Field::AccessKey;
+        app.start_editing();
+        app.edit_buffer = "  my_access_key  ".to_string();
+        app.save_edit().unwrap();
+        assert_eq!(app.config.endpoints[0].config.as_ref().unwrap().s3_access_key, "my_access_key");
+
+        // Test Secret Key trimming
+        app.selected_field = Field::SecretKey;
+        app.start_editing();
+        app.edit_buffer = "\tsecret\t".to_string();
+        app.save_edit().unwrap();
+        assert_eq!(app.config.endpoints[0].config.as_ref().unwrap().s3_secret_key, "secret");
+
+        // Test Region trimming
+        app.selected_field = Field::Region;
+        app.start_editing();
+        app.edit_buffer = "  us-east-1  ".to_string();
+        app.save_edit().unwrap();
+        assert_eq!(app.config.endpoints[0].config.as_ref().unwrap().s3_region, "us-east-1");
+    }
 }

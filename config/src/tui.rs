@@ -16,12 +16,13 @@ use ratatui::{
     Terminal,
 };
 use std::io;
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 
 pub fn run(config: ConfigModeConfig) -> Result<()> {
     // setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, Clear(ClearType::All), EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, Clear(ClearType::All), EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -34,6 +35,7 @@ pub fn run(config: ConfigModeConfig) -> Result<()> {
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
+        DisableBracketedPaste,
         LeaveAlternateScreen,
         DisableMouseCapture
     )?;
@@ -231,12 +233,12 @@ impl App {
                 Field::AccessKey => {
                     let endpoint = &mut self.config.endpoints[i];
                     if endpoint.config.is_none() { endpoint.config = Some(EndpointConfig::default()); }
-                    endpoint.config.as_mut().unwrap().s3_access_key = self.edit_buffer.clone();
+                    endpoint.config.as_mut().unwrap().s3_access_key = self.edit_buffer.trim().to_string();
                 }
                 Field::SecretKey => {
                     let endpoint = &mut self.config.endpoints[i];
                     if endpoint.config.is_none() { endpoint.config = Some(EndpointConfig::default()); }
-                    endpoint.config.as_mut().unwrap().s3_secret_key = self.edit_buffer.clone();
+                    endpoint.config.as_mut().unwrap().s3_secret_key = self.edit_buffer.trim().to_string();
                 }
                 Field::Url => {
                     let new_url = self.edit_buffer.trim().to_string();
@@ -244,7 +246,7 @@ impl App {
                     
                     let endpoint = &mut self.config.endpoints[i];
                     if endpoint.config.is_none() { endpoint.config = Some(EndpointConfig::default()); }
-                    endpoint.config.as_mut().unwrap().s3_url = self.edit_buffer.clone();
+                    endpoint.config.as_mut().unwrap().s3_url = self.edit_buffer.trim().to_string();
 
                     if is_http {
                         self.input_mode = InputMode::HttpWarning;
@@ -254,7 +256,7 @@ impl App {
                 Field::Region => {
                     let endpoint = &mut self.config.endpoints[i];
                     if endpoint.config.is_none() { endpoint.config = Some(EndpointConfig::default()); }
-                    endpoint.config.as_mut().unwrap().s3_region = self.edit_buffer.clone();
+                    endpoint.config.as_mut().unwrap().s3_region = self.edit_buffer.trim().to_string();
                 }
             }
         }
@@ -293,7 +295,16 @@ where
         terminal.draw(|f| ui(f, &mut app))?;
 
         let event = event::read()?;
-        if let Event::Key(key) = event {
+        if let Event::Paste(text) = event {
+            if let InputMode::Editing = app.input_mode {
+                if app.selected_field == Field::Name {
+                    app.edit_buffer
+                        .extend(text.chars().filter(|c| c.is_ascii_alphanumeric()));
+                } else {
+                    app.edit_buffer.push_str(&text);
+                }
+            }
+        } else if let Event::Key(key) = event {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
