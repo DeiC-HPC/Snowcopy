@@ -1,6 +1,6 @@
-use crate::{load_config, load_config_from_path, save_config, save_config_to_path, AppConfig};
-use util_layer::{ConfigModeConfig, Endpoint, EndpointConfig};
-use anyhow::{Result, Context};
+use crate::{load_config, save_config, AppConfig};
+use anyhow::{Context, Result};
+use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind},
@@ -16,7 +16,7 @@ use ratatui::{
     Terminal,
 };
 use std::io;
-use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+use util_layer::{ConfigModeConfig, Endpoint, EndpointConfig};
 
 pub fn run(config: ConfigModeConfig) -> Result<()> {
     // setup terminal
@@ -171,7 +171,7 @@ impl App {
         };
         self.config.endpoints.push(new_endpoint);
         self.list_state.select(Some(self.config.endpoints.len() - 1));
-        save_config(&self.config)
+        save_config(&self.config, self.config_path.clone())
     }
 
     fn delete_endpoint(&mut self) -> Result<()> {
@@ -190,7 +190,7 @@ impl App {
                 } else if i >= self.config.endpoints.len() {
                     self.list_state.select(Some(self.config.endpoints.len() - 1));
                 }
-                save_config(&self.config)?;
+                save_config(&self.config, self.config_path.clone())?;
             }
         }
         self.input_mode = InputMode::Normal;
@@ -261,11 +261,7 @@ impl App {
             }
         }
         self.input_mode = InputMode::Normal;
-        if let Some(path) = &self.config_path {
-            save_config_to_path(&self.config, path.clone())
-        } else {
-            save_config(&self.config)
-        }
+        save_config(&self.config, self.config_path.clone())
     }
 }
 
@@ -273,14 +269,8 @@ fn run_app<B: Backend>(terminal: &mut Terminal<B>, config_path: Option<std::path
 where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let config = if let Some(path) = &config_path {
-        if path.is_dir() {
-            anyhow::bail!("Config path {} is a directory", path.display());
-        }
-        load_config_from_path(path.clone()).with_context(|| format!("Failed to load config from {}", path.display()))?
-    } else {
-        load_config()?
-    };
+    let config = load_config(config_path.clone())
+        .with_context(|| format!("Failed to load config"))?;
     let mut app = App::new(config, config_path);
 
     if app.config.endpoints.is_empty() {
@@ -378,11 +368,7 @@ where
                 InputMode::HttpWarning => match key.code {
                     KeyCode::Enter | KeyCode::Esc | KeyCode::Char(' ') => {
                         app.input_mode = InputMode::Normal;
-                        if let Some(path) = &app.config_path {
-                            save_config_to_path(&app.config, path.clone())?;
-                        } else {
-                            save_config(&app.config)?;
-                        }
+                        save_config(&app.config, app.config_path.clone())?;
                     }
                     _ => {}
                 },
@@ -638,7 +624,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 style = style.fg(Color::Yellow);
             } else if let Some(config) = &e.config {
                 if is_http(config) {
-                    label = format!("🔒 {}", label);
+                    label = format!("{}", label);
                     style = style.fg(Color::LightYellow);
                 }
             }

@@ -200,11 +200,7 @@ fn check_http_safeguard(endpoint: &EndpointConfig, use_unsafe_http: bool) {
 }
 
 pub async fn gather_credentials(profile_name: &str, config_path: Option<&std::path::PathBuf>) -> anyhow::Result<EndpointConfig> {
-    let app_config = if let Some(path) = config_path {
-        config::load_config_from_path(path.clone())?
-    } else {
-        config::load_config()?
-    };
+    let app_config = config::load_config(config_path.cloned())?;
 
     let matches: Vec<_> = app_config
         .endpoints
