@@ -51,8 +51,11 @@ pub fn get_config_path() -> Result<PathBuf> {
     Ok(config_dir.join("config.json"))
 }
 
-pub fn load_config() -> Result<AppConfig> {
-    let path = get_config_path()?;
+pub fn load_config(path: Option<PathBuf>) -> Result<AppConfig> {
+    let path = match path {
+        Some(p) => p,
+        None => get_config_path()?,
+    };
     load_config_from_path(path)
 }
 
@@ -78,8 +81,11 @@ pub fn load_config_from_path(path: PathBuf) -> Result<AppConfig> {
     Ok(config)
 }
 
-pub fn save_config(config: &AppConfig) -> Result<()> {
-    let path = get_config_path()?;
+pub fn save_config(config: &AppConfig, path: Option<PathBuf>) -> Result<()> {
+    let path = match path {
+        Some(p) => p,
+        None => get_config_path()?,
+    };
     save_config_to_path(config, path)
 }
 
@@ -107,7 +113,7 @@ mod tests {
             config: Some(EndpointConfig {
                 s3_access_key: "key".to_string(),
                 s3_secret_key: "secret".to_string(),
-                s3_url: "url".to_string(),
+                s3_url: "https://test.com".to_string(),
                 s3_region: "us-east-1".to_string(),
             }),
             settings: None,
@@ -128,6 +134,9 @@ mod tests {
     #[test]
     fn test_tui_data_leak_fix() {
         use crate::tui::{App, Field, Focus, InputMode};
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+
         let config = AppConfig {
             version: 1,
             global: GlobalConfig::default(),
@@ -155,7 +164,7 @@ mod tests {
             ],
         };
 
-        let mut app = App::new(config, None);
+        let mut app = App::new(config, Some(config_path));
         
         // 1. Select Endpoint A and Region field
         app.list_state.select(Some(0));
@@ -189,6 +198,9 @@ mod tests {
     #[test]
     fn test_tui_esc_discards_changes() {
         use crate::tui::{App, Field, InputMode};
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+
         let config = AppConfig {
             version: 1,
             global: GlobalConfig::default(),
@@ -206,7 +218,7 @@ mod tests {
             ],
         };
 
-        let mut app = App::new(config, None);
+        let mut app = App::new(config, Some(config_path));
         
         // 1. Select Endpoint A and Region field
         app.list_state.select(Some(0));
@@ -243,14 +255,8 @@ mod tests {
 
     #[test]
     fn test_config_version_check() {
-        let config_path = std::env::temp_dir().join(format!("snowcopy_test_config_{}.json", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-
-        // Cleanup function
-        let cleanup = |path: &PathBuf| {
-            if path.exists() {
-                let _ = fs::remove_file(path);
-            }
-        };
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
 
         // Test missing version
         let bad_config = serde_json::json!({
@@ -314,7 +320,60 @@ mod tests {
         let result = load_config_from_path(config_path.clone());
         assert!(result.is_ok());
         assert_eq!(result.unwrap().version, 1);
-        
-        cleanup(&config_path);
+    }
+
+    #[test]
+    fn test_tui_trim_whitespace_on_save() {
+        use crate::tui::{App, Field};
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+
+        let config = AppConfig {
+            version: 1,
+            global: GlobalConfig::default(),
+            endpoints: vec![
+                Endpoint {
+                    name: "EndpointA".to_string(),
+                    config: Some(EndpointConfig {
+                        s3_access_key: "key".to_string(),
+                        s3_secret_key: "secret".to_string(),
+                        s3_url: "url".to_string(),
+                        s3_region: "region".to_string(),
+                    }),
+                    settings: None,
+                },
+            ],
+        };
+
+        let mut app = App::new(config, Some(config_path));
+        app.list_state.select(Some(0));
+
+        // Test URL trimming
+        app.selected_field = Field::Url;
+        app.start_editing();
+        app.edit_buffer = "\t  https://lumi.com  \n".to_string();
+        app.save_edit().unwrap();
+        assert_eq!(app.config.endpoints[0].config.as_ref().unwrap().s3_url, "https://lumi.com");
+
+        // Test Access Key trimming
+        app.selected_field = Field::AccessKey;
+        app.start_editing();
+        app.edit_buffer = "  my_access_key  ".to_string();
+        app.save_edit().unwrap();
+        assert_eq!(app.config.endpoints[0].config.as_ref().unwrap().s3_access_key, "my_access_key");
+
+        // Test Secret Key trimming
+        app.selected_field = Field::SecretKey;
+        app.start_editing();
+        app.edit_buffer = "\tsecret\t".to_string();
+        app.save_edit().unwrap();
+        assert_eq!(app.config.endpoints[0].config.as_ref().unwrap().s3_secret_key, "secret");
+
+        // Test Region trimming
+        app.selected_field = Field::Region;
+        app.start_editing();
+        app.edit_buffer = "  us-east-1  ".to_string();
+        app.save_edit().unwrap();
+        assert_eq!(app.config.endpoints[0].config.as_ref().unwrap().s3_region, "us-east-1");
     }
 }

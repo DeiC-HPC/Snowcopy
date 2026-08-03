@@ -96,6 +96,7 @@ async fn test_s3_client() { //TODO JON: after making a test or two more, default
         .arg(&env.config_path)
         .arg(&test_file_path)
         .arg(bucket)
+        .arg("--use-unsafe-http")
         //.arg("-v")
         .output()
         .expect("failed to execute upload");
@@ -111,6 +112,7 @@ async fn test_s3_client() { //TODO JON: after making a test or two more, default
         .arg("--config")
         .arg(&env.config_path)
         .arg(bucket)
+        .arg("--use-unsafe-http")
         .output()
         .expect("failed to execute upload");
 
@@ -131,6 +133,7 @@ async fn test_s3_client() { //TODO JON: after making a test or two more, default
         .arg(&env.config_path)
         .arg(format!("{}/{}", bucket, test_file))
         .arg(&download_path)
+        .arg("--use-unsafe-http")
         //.arg("-v")
         .output()
         .expect("failed to execute download");
