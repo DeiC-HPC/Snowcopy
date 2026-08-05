@@ -11,19 +11,24 @@ mod config_and_parameter_parsing;
 mod error_print;
 mod list;
 mod remove;
+pub mod traits;
 
-use std::time::Instant;
 use std::sync::Arc;
+use std::time::Instant;
 
-use tokio;
-use tracing_subscriber::{fmt, EnvFilter};
-use util_layer::{SnowConfig, TransferMethod};
-use crate::config_and_parameter_parsing::{read_parameters_and_config_to_create_snow_config, parse_arguments};
+use crate::config_and_parameter_parsing::{parse_arguments, read_parameters_and_config_to_create_snow_config};
 use crate::error_print::print_fatal_error;
+use aws_layer::S3Client;
+use http_layer::build_https_client;
+use tokio;
+use tokio_util::sync::CancellationToken;
+use tracing_subscriber::{EnvFilter, fmt};
+use util_layer::{SnowConfig, TransferMethod};
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
 #[cfg(not(target_env = "msvc"))]
 use jemallocator::Jemalloc;
+use crate::command_center::{CC, CommandCenter};
 use util_layer::error_codes::{FatalError, FatalErrorCode};
 
 #[cfg(not(target_env = "msvc"))]
@@ -59,7 +64,15 @@ async fn main() {
             let config = Arc::new(config);
             let silent = config.silent;
             let res = match config.transfer_method {
-                TransferMethod::TokioSelfMade => upload::upload(config).await,
+                TransferMethod::TokioSelfMade => {
+                    let cancellation_token = CancellationToken::new();
+                    let cc = CommandCenter::new_upload(&config, cancellation_token.clone());
+                    let (cc_tx, cc_handle) = cc.start();
+                    let s3client = Arc::new(S3Client::new(&config.endpoint, cc_tx.clone()).await);
+                    let hyper_client = Arc::new(build_https_client());
+
+                    upload::upload(config, s3client, cc_tx, cc_handle, cancellation_token, hyper_client).await
+                },
                 TransferMethod::TransferManager => {
                     transfer_manager::upload(config).await;
                     None

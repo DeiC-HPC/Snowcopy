@@ -53,7 +53,7 @@ impl ChunkSigner {
             + EMPTY_PAYLOAD_SHA256.len() + 1
             + chunk_hash.len();
 
-        let mut string_to_sign = String::with_capacity(capacity);
+        let mut string_to_sign = String::with_capacity(capacity);   // TODO LND REFACTOR: Put this in the util layer and replace other string_to_sign places
         string_to_sign.push_str(AWS_CHUNK_PAYLOAD_ALGORITHM);
         string_to_sign.push('\n');
         string_to_sign.push_str(amz_date);
@@ -110,7 +110,7 @@ pub fn get_s3_auth_header_and_signature(
     signed_headers_sorted: &HashMap<String, String>,
     canonical_uri: &String,
     query_url: &String,
-) -> (String, String) {
+) -> (String, String, [u8; 32]) {
     let mut headers: Vec<(&str, &str)> = Vec::with_capacity(signed_headers_sorted.len());
     for (k, v) in signed_headers_sorted {
         headers.push((k, v));
@@ -173,7 +173,7 @@ pub fn get_s3_auth_header_and_signature(
         algorithm, config.s3_access_key, credential_scope_str, signed_headers_str, signature
     );
 
-    (auth_header, signature)
+    (auth_header, signature, signing_key)
 }
 
 pub fn get_s3_auth_header(
@@ -185,7 +185,7 @@ pub fn get_s3_auth_header(
     canonical_uri: &String,
     query_uri: &String,
 ) -> String {
-    let (auth, _) =
+    let (auth, _, _) =
         get_s3_auth_header_and_signature(method, config, credential_scope, algorithm, signed_headers, canonical_uri, query_uri);
     auth
 }

@@ -1,64 +1,45 @@
-use crate::signer::{sha256_hex, ChunkSigner, CredentialScope};
-use crate::{signer, HyperClient, ReadAt, StreamingBody};
+use crate::signer::{ChunkSigner, CredentialScope, sha256_hex};
+use crate::{StreamingBody, signer};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame};
 use hyper::{Method, Request};
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::Write;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::SystemTime;
 use tokio::sync::Semaphore;
+use util_layer::UploadConfig;
 use util_layer::constants::{AMZ_CHECKSUM_SHA256, AMZ_CHUNK_SIGNATURE_HEADER, AMZ_STREAMING_TRAILER, AMZ_TRAILER_SIGNATURE, AWS_ALGORITHM, CHUNK_SIGNATURE_LENGTH, EMPTY_PAYLOAD_SHA256, TRAILER_HASH_LENGTH};
 use util_layer::snow_errors::SnowCopyError;
-use util_layer::{FileInfo, UploadConfig};
+use util_layer::traits::{FileTrait, HttpExecutor};
 
 /// Upload a file using streaming for trailing headers.
 pub async fn put_file_streaming(
-    ctx: Arc<UploadConfig>,
-    file: Arc<File>,
-    file_info: Arc<FileInfo>,
-    from: u64,
+    req: Request<StreamingBody>,
     amount: u64,
-    client: &HyperClient,
-    file_sem: Arc<Semaphore>,
+    client: Arc<dyn HttpExecutor>,
     req_sem: &Semaphore,
-    canonical_uri: &String,
-    query_uri: &String,
 ) -> Result<(String, u64), SnowCopyError> {
-    let req = create_streaming_req_trailing_checksum(
-        ctx.clone(),
-        canonical_uri,
-        query_uri,
-        file,
-        from,
-        amount,
-        file_info.modified_time,
-        file_sem,
-        ctx.trailing_chunk_size
-    )?;
 
     let permit = req_sem.acquire().await?;
-    let resp = client.request(req).await.map_err(SnowCopyError::from)?;
+    let resp = client.execute_await(req).await.map_err(|e| SnowCopyError::Hyper(e))?;
 
     drop(permit);
 
-    let status = resp.status();
+    let status = resp.status;
     let etag = resp
-        .headers()
+        .headers
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
     if !status.is_success() {
-        let s3_err = crate::map_s3_error(resp).await;
+        let s3_err = crate::map_s3_error_from_http_executor_response(resp).await;
         return Err(s3_err.into());
     }
-
-    resp.into_body().collect().await?;
 
     if etag.is_none() {
         return Err(SnowCopyError::MissingRequiredHeader("etag").into());
@@ -67,13 +48,13 @@ pub async fn put_file_streaming(
     Ok((etag.unwrap(), amount))
 }
 
-fn create_streaming_req_trailing_checksum(
+pub fn create_streaming_req_trailing_checksum(
     ctx: Arc<UploadConfig>,
     canonical_uri: &String,
     query_uri: &String,
-    file: Arc<File>,
+    file: Arc<dyn FileTrait>,
     file_offset: u64,
-    file_size: u64,
+    amount: u64,
     modified_time: Option<SystemTime>,
     file_sem: Arc<Semaphore>,
     chunk_size: u64,
@@ -108,18 +89,18 @@ fn create_streaming_req_trailing_checksum(
         signer::get_amz_content_header(AWS_ALGORITHM),
         AMZ_STREAMING_TRAILER.to_string(),
     );
-    signed_headers.insert("x-amz-decoded-content-length".to_string(), file_size.to_string());
+    signed_headers.insert("x-amz-decoded-content-length".to_string(), amount.to_string());
     signed_headers.insert("x-amz-trailer".to_string(), AMZ_CHECKSUM_SHA256.to_string());
 
     let encoded_len = signer::aws_chunked_trailer_encoded_length(
-        file_size,
+        amount,
         chunk_size,
         AMZ_CHECKSUM_SHA256,    // TODO LND: We might want to support multiple checksums in the future (with their own trailer hash length)
         TRAILER_HASH_LENGTH,    // The length of the trailing checksum
     );
     signed_headers.insert("content-length".to_string(), encoded_len.to_string());
 
-    let (auth_header, seed_signature) = signer::get_s3_auth_header_and_signature(
+    let (auth_header, seed_signature, signing_key) = signer::get_s3_auth_header_and_signature(
         "PUT",
         &ctx.endpoint,
         &credential_scope,
@@ -131,16 +112,10 @@ fn create_streaming_req_trailing_checksum(
 
     let uri = crate::format_query(ctx.clone(), canonical_uri, query_uri);
 
-    let signing_key = signer::s3_signing_key(
-        &ctx.endpoint.s3_secret_key,
-        &date_y_m_d,
-        credential_scope.region.as_str(),
-    );
-
-    let streaming_body = StreamingFileChunkedBody::new(
+    let streaming_body = StreamingFileChunkedBody::new( // TODO LND REFACTOR: Iff drawing logic out, then this is a good candidate to separate to improve readability
         file,
         file_offset,
-        file_size,
+        amount,
         file_sem,
         signing_key,
         amz_date,
@@ -173,13 +148,13 @@ impl Unpin for StreamingFileChunkedBody {}
 /// Inner state that can be safely mutated
 pub struct StreamingFileChunkedBodyInner {
     /// The raw payload data
-    file: Arc<File>,
+    file: Arc<dyn FileTrait>,
     /// Offset in the file to start reading from
     file_offset: u64,
     /// Remaining bytes to read from the file
     remaining: u64,
     /// Semaphore to protect file access
-    file_sem: Arc<Semaphore>,
+    file_sem: Arc<Semaphore>,       // TODO LND REFACTOR: Is this only necessary for some scenarios (non-multipart uploads)?
     /// Chunk signer with premade Signing key for chunk signatures
     chunk_signer: ChunkSigner,
     /// AMZ date string (format: 20060102T150405Z)
@@ -199,7 +174,7 @@ pub struct StreamingFileChunkedBodyInner {
     /// Current read position in buf
     state: StreamingChunkedState,
     /// Chunk size (in kB)
-    chunk_size: u64,
+    chunk_size: u64,    // TODO LND REFACTOR: Should avoid having 2 concepts with the same name - trailing chunk size and upload chunk size (the one that determines whether a file is multipart or not)
 }
 
 impl StreamingFileChunkedBodyInner {
@@ -318,7 +293,7 @@ impl Body for StreamingFileChunkedBody {
                     let file = inner.file.clone();
 
                     let to_read = std::cmp::min(inner.chunk_size, inner.remaining) as usize;
-                    let to_read_digits = Self::extract_bytes_read_digits(to_read);
+                    let to_read_digits = hex_digit_count(to_read);
                     let data_index = to_read_digits + CHUNK_SIGNATURE_LENGTH;            // "<data_index>;chunk-signature=<FixedLengthChunkSignature>\r\n"
                     inner.chunk_buf.resize(data_index + to_read + 2, 0);     // Resize to ChunkSignature + Data length + "\r\n"
                     let buf = &mut inner.chunk_buf[data_index..data_index + to_read];    // Buf is offset to reserve space for chunk signature
@@ -380,7 +355,7 @@ pub struct StreamingFileChunkedBody {
 
 impl StreamingFileChunkedBody {
     pub fn new(
-        file: Arc<File>,
+        file: Arc<dyn FileTrait>,
         file_offset: u64,
         file_size: u64,
         file_sem: Arc<Semaphore>,
@@ -414,21 +389,6 @@ impl StreamingFileChunkedBody {
     pub fn into_streaming_body(self) -> StreamingBody {
         BodyExt::boxed(self)
     }
-
-    fn extract_bytes_read_digits(bytes_read: usize) -> usize {
-        match bytes_read {
-            0..=0xF => 1,
-            0..=0xFF => 2,
-            0..=0xFFF => 3,
-            0..=0xFFFF => 4,
-            0..=0xF_FFFF => 5,
-            0..=0xFF_FFFF => 6,
-            0..=0xFFF_FFFF => 7,
-            0..=0xFFFF_FFFF => 8,
-            0..=0xF_FFFF_FFFF => 9,
-            _ => panic!("Unsupported number of bytes: {}", bytes_read),
-        }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -461,4 +421,20 @@ fn find_length_of_chunk_data_as_hex(buf: &mut [u8], mut n: usize) -> usize {
         n >>= 4;
     }
     digits
+}
+
+/// Finds the number of hex digits needed to represent the given value.
+fn hex_digit_count(value: usize) -> usize {
+    match value {
+        0..=0xF => 1,
+        0..=0xFF => 2,
+        0..=0xFFF => 3,
+        0..=0xFFFF => 4,
+        0..=0xF_FFFF => 5,
+        0..=0xFF_FFFF => 6,
+        0..=0xFFF_FFFF => 7,
+        0..=0xFFFF_FFFF => 8,
+        0..=0xF_FFFF_FFFF => 9,
+        _ => panic!("Value size too large for hex digit count: {}", value),
+    }
 }

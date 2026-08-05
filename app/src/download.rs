@@ -4,7 +4,6 @@ use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 use aws_layer::S3Client;
 use http_layer::filesystem_checker::is_valid_s3_key_for_local_filesystem;
 use http_layer::integrity::{reconstructable_multipart_etag, IntegrityAlgorithm};
-use http_layer::HyperClient;
 use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
@@ -26,6 +25,7 @@ use util_layer::{DownloadConfig, FileInfo, S3Object};
 use SnowCopyError::IntegrityError;
 use util_layer::error_codes::FatalError;
 use util_layer::error_codes::FatalErrorCode::{DiskIoError, RequestFailure, ServerStateChangeDuringExecution};
+use util_layer::traits::HyperClient;
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.

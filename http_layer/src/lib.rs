@@ -7,7 +7,6 @@ pub mod filesystem_checker;
 
 use crate::signer::CredentialScope;
 use bytes::Bytes;
-use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request};
 use hyper_util::{
@@ -18,13 +17,13 @@ use openssl::base64;
 use openssl::hash::{Hasher, MessageDigest};
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::fs::File;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
 use util_layer::constants::AWS_ALGORITHM;
 use util_layer::snow_errors::{S3Error, SnowCopyError};
-use util_layer::{FileInfo, S3ConfigTrait, UploadConfig};
+use util_layer::{FileInfo, HttpExecutorResponse, S3ConfigTrait, StreamingBody, UploadConfig};
+use util_layer::traits::{FileTrait, HttpExecutor, HyperClient};
 
 const READ_BUFFER_SIZE: usize = 256 * 1024;
 pub struct BufferPool {
@@ -66,10 +65,6 @@ impl BufferPool {
     }
 }
 
-// Public type aliases so app can use the exact type
-pub type Https = hyper_rustls::HttpsConnector<HttpConnector>;
-pub type StreamingBody = BoxBody<Bytes, std::io::Error>;
-pub type HyperClient = Client<Https, StreamingBody>;
 
 pub fn build_https_client() -> HyperClient {
     use hyper_rustls::HttpsConnectorBuilder;
@@ -89,54 +84,47 @@ pub fn build_https_client() -> HyperClient {
     Client::builder(TokioExecutor::new()).build(https)
 }
 
-pub async fn put_file(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: Arc<FileInfo>, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64), SnowCopyError> {
-    let req = create_in_memory_body_put_with_hashes(file, 0, None, ctx, file_info.clone(), file_sem, buffer_pool, canonical_uri, query_uri).await?;
+pub async fn put_file(req: Request<StreamingBody>, file_info: Arc<FileInfo>, client: Arc<dyn HttpExecutor>, req_sem: &Semaphore) -> Result<(String, u64), SnowCopyError> {
 
     let permit = req_sem.acquire().await?;
-    let resp = client.request(req).await?;
+    let resp = client.execute_await(req).await?;
 
-    let status = resp.status();
+    let status = resp.status;
     if !status.is_success() {
-        let s3_err = map_s3_error(resp).await;
+        let s3_err = map_s3_error_from_http_executor_response(resp).await;
         drop(permit);
         return Err(s3_err.into());
     }
 
     let etag = resp // TODO LND: Unused currently
-        .headers()
+        .headers
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
     //drain body so the connection can be returned to the pool.
-    resp.into_body().collect().await?;
     drop(permit);
 
     Ok((etag.unwrap(), file_info.file_size))
 }
 
-pub async fn put_file_range(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: Arc<FileInfo>, from: u64, amount: u64, client: &HyperClient, file_sem: &Semaphore, req_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<(String, u64), SnowCopyError> {
-    let req = create_in_memory_body_put_with_hashes(file, from, Some(amount), ctx, file_info, file_sem, buffer_pool, canonical_uri, query_uri).await?;
-
+pub async fn put_file_range(amount: u64, client: Arc<dyn HttpExecutor>, req_sem: &Semaphore, req: Request<StreamingBody>) -> Result<(String, u64), SnowCopyError> {
     let permit = req_sem.acquire().await.expect("Should never fail");
 
-    let resp = client.request(req).await?; //send_with_logging(client, req).await?;
+    let resp = client.execute_await(req).await?; //send_with_logging(client, req).await?;
     drop(permit);
 
-    let status = resp.status();
+    let status = resp.status;
     let etag = resp
-        .headers()
+        .headers
         .get("etag")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
     if !status.is_success() {
-        let s3_err = map_s3_error(resp).await;
+        let s3_err = map_s3_error_from_http_executor_response(resp).await;
         return Err(s3_err.into());
     }
-
-    // Drain body so the connection can be returned to the pool.
-    resp.into_body().collect().await?;
 
     if etag.is_none() {
         return Err(SnowCopyError::MissingRequiredHeader("etag").into());
@@ -145,13 +133,9 @@ pub async fn put_file_range(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: 
     Ok((etag.unwrap(), amount))
 }
 
-async fn create_in_memory_body_put_with_hashes(file: Arc<File>, start: u64, amount_option: Option<u64>, ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, file_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<Request<StreamingBody>, SnowCopyError> {
+// TODO LND REFACTOR: This is a crucial area for testing - extract logic into smaller functions - Hashing, reading, requestBuilding etc
+pub async fn create_in_memory_body_put_with_hashes(file: Arc<dyn FileTrait>, start: u64, amount: u64, ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, file_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<Request<StreamingBody>, SnowCopyError> {
     let file_lock = file_sem.acquire().await?;
-
-    let amount = match amount_option {
-        Some(v) => v,
-        None => file.metadata()?.len(),
-    };
 
     // Ensure the buffer is large enough if amount > chunk_size,
     // though in this app amount is expected to be <= CHUNK_SIZE.
@@ -361,23 +345,17 @@ pub async fn map_s3_error(resp: hyper::Response<hyper::body::Incoming>) -> SnowC
     }
 }
 
+pub async fn map_s3_error_from_http_executor_response(resp: HttpExecutorResponse) -> SnowCopyError {
+    let status = resp.status;
 
-#[cfg(unix)]
-impl ReadAt for File {
-    fn read_at_offset(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
-        use std::os::unix::fs::FileExt;
-        self.read_at(buf, offset)
+    let body_str = match String::from_utf8(resp.body) {
+        Ok(s) => s,
+        Err(e) => return SnowCopyError::Parse(format!("Body was not valid UTF-8: {}", e)),
+    };
+
+    if let Some(s3_err) = S3Error::from_xml(&body_str) {
+        SnowCopyError::S3(s3_err)
+    } else {
+        SnowCopyError::Http(status.as_u16())
     }
-}
-
-#[cfg(windows)]
-impl ReadAt for File {
-    fn read_at_offset(&self, buf: &mut[u8], offset: u64) -> std::io::Result<usize> {
-        use std::os::windows::fs::FileExt;
-        self.seek_read(buf, offset)
-    }
-}
-
-trait ReadAt { //Abstract to make it more testable
-    fn read_at_offset(&self, buf: &mut[u8], offset: u64) -> std::io::Result<usize>;
 }

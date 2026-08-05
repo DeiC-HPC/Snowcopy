@@ -39,7 +39,7 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
 pub fn auto_tune_upload(config: Arc<UploadConfig>, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Semaphore, Semaphore, Semaphore, usize) {
     let (mut file_limit, mut req_limit, mut open_files_sem, buffer_pool_size, _) = auto_tune_internal(&config.local_path, cc_tx.clone());
 
-    if let Some(override_value) = config.file_limit_overwrite {
+    if let Some(override_value) = config.file_limit_overwrite { // TODO LND REFACTOR: Type guards here! Ensure proper error handling of it
         file_limit = override_value;
     }
     if let Some(override_value) = config.req_limit_overwrite {
@@ -96,7 +96,7 @@ pub fn auto_tune_delete(config: &util_layer::RemoveConfig, cc_tx: UnboundedSende
     Semaphore::new(req_limit)
 }
 
-fn auto_tune_internal(
+fn auto_tune_internal(  // TODO LND REFACTOR: Instead of testing the entire auto_tune_internal, extract the logic into testable smaller functions
     path: &Path,
     cc_tx: UnboundedSender<CommandCenterEvent>,
 ) -> (usize, usize, usize, usize, usize) {

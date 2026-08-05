@@ -87,7 +87,7 @@ impl CommandCenter {
     }
 }
 
-impl CC for CommandCenter {
+impl CC for CommandCenter { // TODO LND REFACTOR: Consider making it take inputs for testing
     fn start(&self) -> (UnboundedSender<CommandCenterEvent>, JoinHandle<Option<FatalError>>) {
         let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel::<CommandCenterEvent>();
 

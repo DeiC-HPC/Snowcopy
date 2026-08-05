@@ -9,7 +9,10 @@ serde_json = "1.0"
 url = "2.5.8"
 tokio = { version = "1", features = ["full"] }
 hyper = "1"
+hyper-rustls = "0.27"
 bytes = "1.11.1"
 openssl = "0.10.81"
 hyper-util = "0.1.20"
 aws-sdk-s3 = { version = "1", default-features = false }
+http-body-util = "0.1"
+mockall = "0.15.0"
