@@ -1,0 +1,1 @@
+pub const RETRY_ATTEMPT_MESSAGE : String = "Attempting again as it might have been corrupted during transfer";
