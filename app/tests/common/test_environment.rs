@@ -1,13 +1,13 @@
+use crate::common::proxy_handler::ProxyHandler;
 use crate::common::test_constants::*;
-use std::path::{Path, PathBuf};
-use std::{env, fs};
+use crate::common::test_file_handler::TestFileHandler;
+use crate::common::test_snowcopy_runner::SnowcopyOutput;
+use std::path::PathBuf;
+use std::env;
 use testcontainers::core::{IntoContainerPort, Mount, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use uuid::Uuid;
-use crate::common::proxy_handler::ProxyHandler;
-use crate::common::test_file_handler::TestFileHandler;
-use crate::common::test_snowcopy_runner::SnowcopyRunnerOutput;
 
 #[allow(dead_code)]
 pub struct TestEnv {
@@ -21,7 +21,7 @@ pub struct TestEnv {
 }
 
 impl TestEnv {
-    pub fn run_snowcopy_command(&self, command: String) -> SnowcopyRunnerOutput {
+    pub fn run_snowcopy_command(&self, command: String) -> SnowcopyOutput {
         let output = assert_cmd::Command::cargo_bin("snowcopy")
             .unwrap()
             .arg("--config")
@@ -32,10 +32,10 @@ impl TestEnv {
             .output()
             .expect("failed to execute snowcopy");
 
-        SnowcopyRunnerOutput::new(output)
+        SnowcopyOutput::new(output)
     }
 
-    pub fn snowcopy_upload_test_upload_folder(&self) -> SnowcopyRunnerOutput {
+    pub fn snowcopy_upload_test_upload_folder(&self) -> SnowcopyOutput {
         let upload = format!("{} {}:{}", self.test_file_handler.upload_folder().to_str().unwrap(), DEFAULT_S3_PROFILE, self.unique_bucket);
         let output = self.run_snowcopy_command(upload);
         assert!(output.is_success(), "Upload failed: {}", output.get_combined_logs());
@@ -43,10 +43,33 @@ impl TestEnv {
         output
     }
 
-    pub fn snowcopy_download_bucket_to_download_folder(&self) -> SnowcopyRunnerOutput {
+    pub fn snowcopy_download_bucket_to_download_folder(&self) -> SnowcopyOutput {
         let download = format!("{}:{} {}", DEFAULT_S3_PROFILE, self.unique_bucket, self.test_file_handler.download_folder().to_str().unwrap());
         let output = self.run_snowcopy_command(download);
-        assert!(output.is_success(), "Upload failed: {}", output.get_combined_logs());
+        assert!(output.is_success(), "Download failed: {}", output.get_combined_logs());
+
+        output
+    }
+
+    pub fn snowcopy_list_bucket(&self) -> SnowcopyOutput {
+        let list = format!("ls {}:{}", DEFAULT_S3_PROFILE, self.unique_bucket);
+        let output = self.run_snowcopy_command(list);
+        assert!(output.is_success(), "List failed: {}", output.get_combined_logs());
+
+        output
+    }
+
+    pub fn snowcopy_list_all_buckets_on_server(&self) -> SnowcopyOutput {
+        let list = format!("ls {}:", DEFAULT_S3_PROFILE);
+        let output = self.run_snowcopy_command(list);
+        assert!(output.is_success(), "List failed: {}", output.get_combined_logs());
+
+        output
+    }
+    pub fn snowcopy_delete_bucket(&self) -> SnowcopyOutput {
+        let delete = format!("rm {}:{}", DEFAULT_S3_PROFILE, self.unique_bucket);
+        let output = self.run_snowcopy_command(delete);
+        assert!(output.is_success(), "Delete failed: {}", output.get_combined_logs());
 
         output
     }
@@ -107,7 +130,7 @@ pub(crate) async fn get_default_test_env() -> TestEnv {
     let proxy_handler = ProxyHandler::new(format!("http://127.0.0.1:{}", mitm_handler_port));
 
     let test_file_handler = TestFileHandler::new();
-    write_config_file(test_file_handler.config_path(), S3_ACCESS_KEY, S3_SECRET_KEY, &proxy_endpoint, DEFAULT_S3_PROFILE);
+    test_file_handler.write_config_file(S3_ACCESS_KEY, S3_SECRET_KEY, &proxy_endpoint, DEFAULT_S3_PROFILE);
     let unique_bucket = format!("test-bucket-{}", Uuid::new_v4());
 
     TestEnv {
@@ -119,27 +142,4 @@ pub(crate) async fn get_default_test_env() -> TestEnv {
         unique_bucket,
         proxy_handler,
     }
-}
-
-fn write_config_file(config_path: &Path, s3_access_key: &str, s3_secret_key: &str, s3_url: &str, name : &str) {
-    let config_content = serde_json::json!({
-        "version": 1,
-        "global": {
-            "s3_region": "us-east-1"
-        },
-        "endpoints": [
-            {
-                "name": name,
-                "config": {
-                    "s3_access_key": s3_access_key,
-                    "s3_secret_key": s3_secret_key,
-                    "s3_url": s3_url,
-                    "s3_region": "us-east-1"
-                }
-            }
-        ]
-    });
-
-    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-    fs::write(config_path, serde_json::to_string_pretty(&config_content).unwrap()).unwrap();
 }

@@ -1,8 +1,10 @@
-use std::collections::{HashMap, HashSet};
-use uuid::Uuid;
 use crate::common::test_constants::SNOWCOPY_TEST_DATA_BASE_DIR_PREFIX;
+use crate::common::test_file_util;
+use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::PathBuf;
-use crate::common::{test_file_handler, test_file_util};
+use uuid::Uuid;
 
 pub struct TestFileHandler {
     config_path: PathBuf,
@@ -10,7 +12,7 @@ pub struct TestFileHandler {
     upload_folder: PathBuf,
     download_folder: PathBuf,
 }
-
+#[allow(dead_code)]
 impl TestFileHandler {
     pub fn new() -> Self {
         let base_path =std::env::temp_dir().join(SNOWCOPY_TEST_DATA_BASE_DIR_PREFIX).join(Uuid::new_v4().to_string());
@@ -43,7 +45,7 @@ impl TestFileHandler {
     /// - `("subfolder/file.txt", 100)` creates a file with size 100 KB.
     pub fn create_files_in_upload_folder_with_sizes_in_kb(
         &self,
-        files: HashMap<&str, usize>,
+        files: &HashMap<&str, usize>,
     ) {
         let prefix = "This line is 1 kb ";
         let line_of_size_1kb = format!("{}{}\n", prefix, "a".repeat(1024 - prefix.len() - 1));
@@ -52,7 +54,7 @@ impl TestFileHandler {
         for (file_name, line_count) in files {
             let file_path = self.upload_folder.join(file_name);
             std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
-            let content = std::iter::repeat_n(line_of_size_1kb.as_str(), line_count)
+            let content = std::iter::repeat_n(line_of_size_1kb.as_str(), *line_count)
                 .collect::<String>();
             std::fs::write(file_path, content).unwrap();
         }
@@ -112,6 +114,33 @@ impl TestFileHandler {
 
             test_file_util::assert_files_match(&upload_file, &download_file);
         }
+    }
+
+    pub fn write_config(&self, contents: &Value) {
+        fs::create_dir_all(&self.config_path.parent().unwrap()).unwrap();
+        fs::write(&self.config_path, serde_json::to_string_pretty(contents).unwrap()).unwrap();
+    }
+
+    pub fn write_config_file(&self, s3_access_key: &str, s3_secret_key: &str, s3_url: &str, name : &str) {
+        let config_content = serde_json::json!({
+            "version": 1,
+            "global": {
+                "s3_region": "us-east-1"
+            },
+            "endpoints": [
+                {
+                    "name": name,
+                    "config": {
+                        "s3_access_key": s3_access_key,
+                        "s3_secret_key": s3_secret_key,
+                        "s3_url": s3_url,
+                        "s3_region": "us-east-1"
+                    }
+                }
+            ]
+        });
+
+        Self::write_config(&self, &config_content);
     }
 }
 

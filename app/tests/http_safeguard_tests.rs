@@ -1,8 +1,9 @@
 use assert_cmd::Command;
-use std::fs;
 mod common;
 
 use crate::common::test_file_handler::TestFileHandler;
+use common::test_snowcopy_runner::SnowcopyOutput;
+use util_layer::error_codes::FatalErrorCode::HttpUnsafeError;
 
 #[test]
 fn test_http_safeguard() {
@@ -35,7 +36,7 @@ fn test_http_safeguard() {
         ]
     });
 
-    fs::write(file_handler.config_path(), serde_json::to_string_pretty(&config_content).unwrap()).unwrap();
+    file_handler.write_config(&config_content);
 
     // Test failure without flag for HTTP
     let output = Command::cargo_bin("snowcopy")
@@ -47,14 +48,10 @@ fn test_http_safeguard() {
         .output()
         .expect("failed to execute snowcopy");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    println!("STDOUT: {}", stdout);
-    println!("STDERR: {}", stderr);
-
-    assert!(!output.status.success());
-    assert!(stderr.contains("uses the insecure HTTP protocol"));
-    assert!(stderr.contains("use the --use-unsafe-http flag"));
+    let output = SnowcopyOutput::new(output);
+    assert!(output.is_failure(HttpUnsafeError), "{}", output.get_combined_logs());
+    assert!(output.get_stderr().contains("uses the insecure HTTP protocol"));
+    assert!(output.get_stderr().contains("use the --use-unsafe-http flag"));
 
     // Test success with flag for HTTP (it might fail later because example.com is not an S3 server, but it should pass the safeguard)
     let output = Command::cargo_bin("snowcopy")

@@ -10,7 +10,7 @@ async fn test_download_corruption_retry() {
     let env = get_default_test_env().await;
 
     let test_file_name = "corruption_test.txt";
-    env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(HashMap::from([
+    env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&HashMap::from([
         (test_file_name, 1),
     ]));
     env.snowcopy_upload_test_upload_folder();
