@@ -1,11 +1,12 @@
 use assert_cmd::Command;
 use std::fs;
-use tempfile::tempdir;
+mod common;
+
+use crate::common::test_file_handler::TestFileHandler;
 
 #[test]
 fn test_http_safeguard() {
-    let temp_dir = tempdir().unwrap();
-    let config_path = temp_dir.path().join("config.json");
+    let file_handler = TestFileHandler::new();
 
     let config_content = serde_json::json!({
         "version": 1,
@@ -34,13 +35,13 @@ fn test_http_safeguard() {
         ]
     });
 
-    fs::write(&config_path, serde_json::to_string_pretty(&config_content).unwrap()).unwrap();
+    fs::write(file_handler.config_path(), serde_json::to_string_pretty(&config_content).unwrap()).unwrap();
 
     // Test failure without flag for HTTP
     let output = Command::cargo_bin("snowcopy")
         .unwrap()
         .arg("--config")
-        .arg(&config_path)
+        .arg(file_handler.config_path())
         .arg("ls")
         .arg("http_profile:bucket")
         .output()
@@ -59,7 +60,7 @@ fn test_http_safeguard() {
     let output = Command::cargo_bin("snowcopy")
         .unwrap()
         .arg("--config")
-        .arg(&config_path)
+        .arg(file_handler.config_path())
         .arg("--use-unsafe-http")
         .arg("ls")
         .arg("http_profile:bucket")
@@ -74,7 +75,7 @@ fn test_http_safeguard() {
     let output = Command::cargo_bin("snowcopy")
         .unwrap()
         .arg("--config")
-        .arg(&config_path)
+        .arg(file_handler.config_path())
         .arg("ls")
         .arg("https_profile:bucket")
         .output()
