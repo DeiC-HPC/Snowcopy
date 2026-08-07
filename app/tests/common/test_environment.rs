@@ -76,6 +76,7 @@ impl TestEnv {
 }
 
 pub(crate) async fn get_default_test_env() -> TestEnv {
+    let mino_name = format!("minio-real-{}", Uuid::new_v4());
     println!("Starting minio and mitmproxy in docker...");
     // 1. Start MinIO
     let minio_container = GenericImage::new("minio/minio", "latest")
@@ -84,7 +85,7 @@ pub(crate) async fn get_default_test_env() -> TestEnv {
         .with_env_var("MINIO_ROOT_USER", S3_ACCESS_KEY)
         .with_env_var("MINIO_ROOT_PASSWORD", S3_SECRET_KEY)
         .with_network(DOCKER_NETWORK_NAME)
-        .with_container_name("minio-real")
+        .with_container_name(mino_name.clone())
         .with_cmd([
             "server", "/data",
             "--console-address", ":9001",
@@ -99,6 +100,7 @@ pub(crate) async fn get_default_test_env() -> TestEnv {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
     let script_path = PathBuf::from(manifest_dir).join("tests").join("common").join("mitm_scripts").join("proxy_addon.py");
 
+    let mitm_name = format!("mitm-proxy-{}", Uuid::new_v4());
     let mitm_container: ContainerAsync<GenericImage> = GenericImage::new("mitmproxy/mitmproxy", "latest")
         .with_exposed_port(PROXY_DOCKER_PORT.tcp())
         .with_exposed_port(CONTROL_PORT.tcp())
@@ -108,11 +110,11 @@ pub(crate) async fn get_default_test_env() -> TestEnv {
             "/home/mitmproxy/script.py",
         ))
         .with_network(DOCKER_NETWORK_NAME)
-        .with_container_name("mitm-proxy")
+        .with_container_name(&mitm_name)
         .with_cmd([
             "mitmdump",
             "-s", "/home/mitmproxy/script.py",
-            "--mode", "reverse:http://minio-real:9000",
+            "--mode", format!("reverse:http://{}:9000", mino_name).as_str(),
             "--set", "ssl_insecure=true",
             "--set", "termlog=true",
             "--set", "keep_host_header=true",
