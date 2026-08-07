@@ -46,25 +46,7 @@ impl ChunkSigner {
         prev_signature: &str,
         chunk_hash: &str,
     ) -> String {
-        let capacity = AWS_CHUNK_PAYLOAD_ALGORITHM.len() + 1    // Matches size + 1 for the newline
-            + amz_date.len() + 1
-            + credential_scope.len() + 1
-            + prev_signature.len() + 1
-            + EMPTY_PAYLOAD_SHA256.len() + 1
-            + chunk_hash.len();
-
-        let mut string_to_sign = String::with_capacity(capacity);   // TODO LND REFACTOR: Put this in the util layer and replace other string_to_sign places
-        string_to_sign.push_str(AWS_CHUNK_PAYLOAD_ALGORITHM);
-        string_to_sign.push('\n');
-        string_to_sign.push_str(amz_date);
-        string_to_sign.push('\n');
-        string_to_sign.push_str(credential_scope);
-        string_to_sign.push('\n');
-        string_to_sign.push_str(prev_signature);
-        string_to_sign.push('\n');
-        string_to_sign.push_str(EMPTY_PAYLOAD_SHA256);
-        string_to_sign.push('\n');
-        string_to_sign.push_str(chunk_hash);
+        let string_to_sign = push_elements_to_string(&[AWS_CHUNK_PAYLOAD_ALGORITHM, amz_date, credential_scope, prev_signature, EMPTY_PAYLOAD_SHA256, chunk_hash]);
 
         hex::encode(self.sign(string_to_sign.as_bytes()))
     }
@@ -82,14 +64,7 @@ impl ChunkSigner {
         let trailer_line = format!("{}:{}\n", trailer_name.to_lowercase(), trailer_value);
         let trailer_hash = sha256_hex(trailer_line.as_bytes());
 
-        let string_to_sign = format!(
-            "{}\n{}\n{}\n{}\n{}",
-            AWS_CHUNK_TRAILER_ALGORITHM,
-            amz_date,
-            credential_scope,
-            prev_signature,
-            trailer_hash
-        );
+        let string_to_sign = push_elements_to_string(&[AWS_CHUNK_TRAILER_ALGORITHM, amz_date, credential_scope, prev_signature, EMPTY_PAYLOAD_SHA256, trailer_hash.as_str()]);
 
         hex::encode(self.sign(string_to_sign.as_bytes()))
     }
@@ -157,13 +132,13 @@ pub fn get_s3_auth_header_and_signature(
     let hex_sha256 = sha256_hex(canonical_request.as_bytes());
 
     let timestamp_iso = credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string();
-    let string_to_sign = format!(
-        "{}\n{}\n{}\n{}",
-        algorithm,
-        timestamp_iso,
-        credential_scope_str,
-        hex_sha256
+    let string_to_sign = push_elements_to_string(
+        &[algorithm,
+        timestamp_iso.as_str(),
+        credential_scope_str.as_str(),
+        hex_sha256.as_str()]
     );
+
 
     let signing_key = s3_signing_key(&config.s3_secret_key, &date_y_m_d, credential_scope.region.as_str());
     let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
@@ -276,4 +251,34 @@ pub fn aws_chunked_trailer_encoded_length(
     total += 2; // final "\r\n"
 
     total
+}
+
+/**
+ * Pushes a list of elements to a string, separated by newline characters.
+ */
+fn push_elements_to_string(elements: &[&str]) -> String {
+    let capacity = elements.iter().map(|element| element.len()).sum::<usize>()
+        + elements.len().saturating_sub(1);
+    let mut string_to_sign = String::with_capacity(capacity);
+
+    for (index, element) in elements.iter().enumerate() {
+        if index > 0 {
+            string_to_sign.push('\n');
+        }
+        string_to_sign.push_str(element);
+    }
+    string_to_sign
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::signer::*;
+
+    
+    #[test]
+    fn test_push_elements_to_string() {
+        let elements = ["element1", "element2", "element3"];
+        let result = push_elements_to_string(&elements);
+        assert_eq!(result, "element1\nelement2\nelement3");
+    }
 }
