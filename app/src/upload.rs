@@ -539,10 +539,10 @@ mod tests {
         )
     }
 
-    fn test_file_info() -> Arc<FileInfo> {
+    fn test_file_info(file_size: u64) -> Arc<FileInfo> {
         Arc::new(FileInfo{
             file_path: PathBuf::new(),
-            file_size: 0,
+            file_size,
             key: String::new(),
             aws_uri_encoded_key: String::new(),
             modified_time: None,
@@ -563,8 +563,10 @@ mod tests {
     async fn single_upload_sends_fatal_error_when_file_open_fails() {
         let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel();
 
+        let file_size = 1;
+
         let config = Arc::new(test_upload_config(None));
-        let file_info = test_file_info();
+        let file_info = test_file_info(file_size);
         let runtime = test_upload_runtime(cc_tx.clone());
 
         let mut mock_file_handler = MockFileHandler::new();
@@ -574,7 +576,7 @@ mod tests {
             config,
             file_info,
             runtime,
-            Arc::new(mock_http_executor()),
+            Arc::new(mock_http_executor(file_size as usize)),
             Arc::new(mock_file_handler),
             cc_tx,
             CancellationToken::new(),
@@ -598,19 +600,21 @@ mod tests {
 
     #[tokio::test]
     async fn single_upload_passes() {
-        let (cc_tx, cc_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let expected_file_size = 1;
 
         let config = Arc::new(test_upload_config(None));
-        let file_info = test_file_info();
+        let file_info = test_file_info(expected_file_size);
         let runtime = test_upload_runtime(cc_tx.clone());
 
-        //let mock_file = make_mock_file();
         let mut mock_file_handler = MockFileHandler::new();
 
         mock_file_handler.expect_open_file()
-            .returning(|_| Ok(Arc::new(mock_file())));
+            .times(1)
+            .returning(move |_| Ok(Arc::new(mock_file(expected_file_size.clone() as usize))));
 
-        let mock_http_executor = mock_http_executor();
+        let mock_http_executor = mock_http_executor(expected_file_size as usize);
 
         let single_upload = SingleUpload::new(
             config,
@@ -623,11 +627,34 @@ mod tests {
         );
 
         single_upload.upload_file().await;
+        let mut saw_part_transferred = false;
+        let mut saw_file_transferred = false;
+        let mut saw_fatal_error = false;
+
+        while let Ok(event) = cc_rx.try_recv() {
+            match event {
+                CommandCenterEvent::PartTransferred(_) => {
+                    saw_part_transferred = true;
+                }
+                CommandCenterEvent::FileTransferred(bytes) => {
+                    saw_file_transferred = true;
+                    assert_eq!(bytes, expected_file_size);
+                }
+                CommandCenterEvent::FatalErrorEvent(err) => {
+                    saw_fatal_error = true;
+                    assert!(!saw_fatal_error, "unexpected fatal error: {:?}", err);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_part_transferred);
+        assert!(saw_file_transferred);
     }
 
-    fn mock_http_executor() -> MockHttpExecutor {
+    fn mock_http_executor(file_size: usize) -> MockHttpExecutor {
         let mut mock_http_executor = MockHttpExecutor::new();
-        mock_http_executor.expect_execute_await().returning(|_|
+        mock_http_executor.expect_execute_await().returning(move |_|
             Box::pin(async move {
                 let mut headers = HeaderMap::new();
                 headers.insert("etag", HeaderValue::from_str("etagValue").unwrap());
@@ -635,7 +662,7 @@ mod tests {
                     HttpExecutorResponse {
                         status: StatusCode::OK,
                         headers,
-                        body: vec![],
+                        body: vec![0; file_size],
                     }
                 )
             })
@@ -643,10 +670,10 @@ mod tests {
         mock_http_executor
     }
 
-    fn mock_file() -> MockFileTrait {
+    fn mock_file(len: usize) -> MockFileTrait {
         let mut mock_file = MockFileTrait::new();
-        mock_file.expect_read_at_offset().returning(|_, _| Ok(1));
-        mock_file.expect_length().returning(|| Ok(1));
+        mock_file.expect_read_at_offset().returning(move |_, _| Ok(len));
+        mock_file.expect_length().returning(move || Ok(len as u64));
         mock_file
     }
 }
