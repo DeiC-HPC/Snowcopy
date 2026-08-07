@@ -4,7 +4,7 @@ mod common;
 use common::test_environment::get_default_test_env;
 
 #[tokio::test]
-async fn test_s3_client() {
+async fn test_long_user_flow() {
     let env = get_default_test_env().await;
 
     let files = HashMap::from([
