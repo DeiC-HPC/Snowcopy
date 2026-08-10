@@ -239,7 +239,7 @@ impl StreamingFileChunkedBodyInner {
 
         write!(
             &mut self.chunk_buf,
-            "0;{}={}\r\n\r\n",
+            "0;{}={}\r\n",
             AMZ_CHUNK_SIGNATURE_HEADER,
             empty_sig
         ).unwrap();
