@@ -8,9 +8,11 @@ use std::io::Error;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+
+use std::sync::OnceLock;
 use std::time::SystemTime;
 use tokio::sync::mpsc::{Receiver, UnboundedSender};
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::sync::{Semaphore, mpsc};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::{CommandCenterEvent, Status};
@@ -75,12 +77,11 @@ pub struct MultipartUpload {
     aws_client: Arc<S3Client>,
     http_executor: Arc<dyn HttpExecutor>,
     file_handler: Arc<dyn FileHandler>,
-    cc_tx: UnboundedSender<CommandCenterEvent>,
     cancellation_token: CancellationToken,
 }
 
 impl MultipartUpload {
-    fn new(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, runtime: Arc<UploadRuntime>, aws_client: Arc<S3Client>, http_executor: Arc<dyn HttpExecutor>, file_handler: Arc<dyn FileHandler>, cc_tx: UnboundedSender<CommandCenterEvent>, cancellation_token: CancellationToken) -> Self {
+    fn new(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, runtime: Arc<UploadRuntime>, aws_client: Arc<S3Client>, http_executor: Arc<dyn HttpExecutor>, file_handler: Arc<dyn FileHandler>, cancellation_token: CancellationToken) -> Self {
         Self {
             ctx,
             runtime,
@@ -88,7 +89,6 @@ impl MultipartUpload {
             aws_client,
             http_executor,
             file_handler,
-            cc_tx,
             cancellation_token,
         }
     }
@@ -115,19 +115,17 @@ pub struct SingleUpload {
     file_info: Arc<FileInfo>,
     http_executor: Arc<dyn HttpExecutor>,
     file_handler: Arc<dyn FileHandler>,
-    cc_tx: UnboundedSender<CommandCenterEvent>,
     cancellation_token: CancellationToken,
 }
 
 impl SingleUpload {
-    fn new(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, runtime: Arc<UploadRuntime>, http_executor: Arc<dyn HttpExecutor>, file_handler: Arc<dyn FileHandler>, cc_tx: UnboundedSender<CommandCenterEvent>, cancellation_token: CancellationToken) -> Self {
+    fn new(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, runtime: Arc<UploadRuntime>, http_executor: Arc<dyn HttpExecutor>, file_handler: Arc<dyn FileHandler>, cancellation_token: CancellationToken) -> Self {
         Self {
             ctx,
             runtime,
             file_info,
             http_executor,
             file_handler,
-            cc_tx,
             cancellation_token,
         }
     }
@@ -161,14 +159,14 @@ async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream
                         let aws_client = aws_client.clone();
                         let hyper_http_executor = HyperHttpExecutor::new(hyper_client.clone());
                         if file_info_arc.file_size > CHUNK_SIZE {
-                            let multipart_upload = Box::new(MultipartUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), aws_client.clone(), Arc::new(hyper_http_executor), Arc::new(ActualFileHandler{}), runtime.cc_tx.clone(), runtime.cancellation_token.clone()));
+                            let multipart_upload = Box::new(MultipartUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), aws_client.clone(), Arc::new(hyper_http_executor), Arc::new(ActualFileHandler{}), runtime.cancellation_token.clone()));
                             let permit = task_sem.clone().acquire_owned().await.unwrap();
                             join_set.spawn(async move {
                                 multipart_upload.upload_file().await;
                                 drop(permit);
                             });
                         } else {
-                            let single_upload = Box::new(SingleUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), Arc::new(hyper_http_executor), Arc::new(ActualFileHandler{}), runtime.cc_tx.clone(), runtime.cancellation_token.clone()));
+                            let single_upload = Box::new(SingleUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), Arc::new(hyper_http_executor), Arc::new(ActualFileHandler{}), runtime.cancellation_token.clone()));
                             let permit = task_sem.clone().acquire_owned().await.unwrap();
                             join_set.spawn(async move {
                                 single_upload.upload_file().await;
@@ -210,16 +208,24 @@ async fn upload_with_multipart(multipart: &MultipartUpload, file: Arc<dyn FileTr
 
     let upload_id = multipart.aws_client.create_multipart_upload(&multipart.ctx.bucket, &*multipart.file_info.key, multipart.file_info.modified_time, CHUNK_SIZE).await.unwrap();
 
-    let completed_parts: Arc<Mutex<Vec<CompletedPartAws>>> = Arc::new(Mutex::new(Vec::new()));
+    let completed_parts: Arc<Vec<OnceLock<CompletedPartAws>>> = Arc::new(
+        (0..chunk_amount)
+            .map(|_| OnceLock::new())
+            .collect()
+    );
 
     upload_each_chunk_with_retry(&multipart.ctx, &multipart.runtime, &multipart.file_info, multipart.http_executor.clone(), file, &upload_id, chunk_amount, &completed_parts).await;
 
-    let completed_parts = Arc::try_unwrap(completed_parts).unwrap().into_inner();
+    let completed_parts: Vec<CompletedPartAws> = Arc::try_unwrap(completed_parts).expect("Failed to unwrap Arc, there is a bug in our flow")
+        .into_iter()
+        .map(|slot| slot.into_inner().unwrap())
+        .collect();
+
     multipart.aws_client.complete_multipart_upload(&multipart.ctx.bucket, &*multipart.file_info.key, &upload_id, completed_parts).await.unwrap();
     let _ = multipart.runtime.cc_tx.send(CommandCenterEvent::FileTransferred(multipart.file_info.file_size));
 }
 
-async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<UploadRuntime>, file_info: &Arc<FileInfo>, http_executor: Arc<dyn HttpExecutor>, file: Arc<dyn FileTrait>, upload_id: &String, chunk_amount_u64: u64, completed_parts: &Arc<Mutex<Vec<CompletedPartAws>>>) {
+async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<UploadRuntime>, file_info: &Arc<FileInfo>, http_executor: Arc<dyn HttpExecutor>, file: Arc<dyn FileTrait>, upload_id: &String, chunk_amount_u64: u64, completed_parts: &Arc<Vec<OnceLock<CompletedPartAws>>>) {
     let mut join_set = JoinSet::new();
 
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.aws_uri_encoded_key));
@@ -279,8 +285,14 @@ async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<Upl
                         .e_tag(etag)
                         .part_number(part_number)
                         .build();
-                    completed_parts.lock().await.push(completed_part);
 
+                    match completed_parts[part_number as usize - 1].set(completed_part) { //0 vs 1 indexed
+                        Ok(_) => {}
+                        Err(e) => {
+                            CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, format!("Error uploading part {} of file {}: {:?}", part_number, file_info_clone.file_path.to_str().unwrap(), e)));
+                            return;
+                        }
+                    }
                     runtime_clone.cc_tx.send(CommandCenterEvent::PartTransferred(metrics)).expect("Failed to send message to command center. Should never happen.");
                 }
                 Err(e) => {
@@ -433,8 +445,8 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
 
         cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).expect("Failed to send message to command center. Should never happen.");
 
-        let key = &util_layer::path_to_s3_key(base_path.to_str().unwrap());
-        let aws_uri_encoded_key = url_encode_fast(key, true);
+        let key = base_path.file_name().unwrap().to_string_lossy().into_owned();
+        let aws_uri_encoded_key = url_encode_fast(&key, true);
         let file_info = FileInfo {
             file_path: base_path,
             aws_uri_encoded_key,
@@ -535,6 +547,8 @@ mod tests {
                 open_file_limit_overwrite: None,
                 bucket: String::new(),
                 local_path: PathBuf::new(),
+                use_unsafe_http: true,
+                verbose: false,
             }
         )
     }
@@ -578,7 +592,6 @@ mod tests {
             runtime,
             Arc::new(mock_http_executor(file_size as usize)),
             Arc::new(mock_file_handler),
-            cc_tx,
             CancellationToken::new(),
         );
 
@@ -622,7 +635,6 @@ mod tests {
             runtime,
             Arc::new(mock_http_executor),
             Arc::new(mock_file_handler),
-            cc_tx,
             CancellationToken::new(),
         );
 

@@ -19,11 +19,13 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::mpsc::UnboundedSender;
 use url::Url;
 use util_layer::constants::AWS_ALGORITHM;
 use util_layer::snow_errors::{S3Error, SnowCopyError};
 use util_layer::{FileInfo, HttpExecutorResponse, S3ConfigTrait, StreamingBody, UploadConfig};
 use util_layer::traits::{FileTrait, HttpExecutor, HyperClient};
+use util_layer::cc_util::CommandCenterEvent;
 
 const READ_BUFFER_SIZE: usize = 256 * 1024;
 pub struct BufferPool {
@@ -76,7 +78,7 @@ pub fn build_https_client() -> HyperClient {
     let https = HttpsConnectorBuilder::new()
         .with_native_roots()
         .expect("no native root CA certificates found")
-        .https_only()
+        .https_or_http()
         .enable_http1()
         //.enable_http2()
         .wrap_connector(http);
@@ -212,7 +214,7 @@ pub async fn create_in_memory_body_put_with_hashes(file: Arc<dyn FileTrait>, sta
         signer::get_amz_content_header(AWS_ALGORITHM),
         sha256_hex.clone(),
     );
-    header_map.insert("x-amz-checksum-sha256".to_string(), sha256_hex.clone()); //AWS and some clones will check against this
+    //header_map.insert("x-amz-checksum-sha256".to_string(), sha256_hex.clone()); //AWS and some clones will check against this. TODO JON: Should be base64 encoded
     header_map.insert("x-amz-meta-checksum-sha256".to_string(), sha256_hex); //Store as metadata, since clones cannot be trusted
     if let Some(mtime_str) = mtime_str {
         header_map.insert("x-amz-meta-mtime".to_string(), mtime_str);
@@ -286,10 +288,25 @@ fn format_query<T: S3ConfigTrait>(ctx: Arc<T>, canonical_uri: &String, query_uri
     let endpoint = ctx.endpoint();
     let url_parsed = Url::parse(&endpoint.s3_url).expect("Invalid S3 URL");
     let host = url_parsed.host_str().unwrap_or("");
-    if query_uri.is_empty() {
-        format!("https://{}{}", host, canonical_uri)
+    let port = url_parsed.port();
+    let scheme = url_parsed.scheme();
+
+    let host_with_port = if let Some(p) = port {
+        format!("{}:{}", host, p)
     } else {
-        format!("https://{}{}?{}", host, canonical_uri, query_uri)
+        host.to_string()
+    };
+
+    let canonical_uri = if canonical_uri.starts_with('/') {
+        canonical_uri.clone()
+    } else {
+        format!("/{}", canonical_uri)
+    };
+
+    if query_uri.is_empty() {
+        format!("{}://{}{}", scheme, host_with_port, canonical_uri)
+    } else {
+        format!("{}://{}{}?{}", scheme, host_with_port, canonical_uri, query_uri)
     }
 }
 
@@ -316,13 +333,19 @@ impl Drop for PooledBuffer {
     }
 }
 
-pub async fn send_with_logging(
+pub async fn send_request(
     client: &HyperClient,
     req: hyper::Request<StreamingBody>,
+    cc_tx: UnboundedSender<CommandCenterEvent>,
+    logging_enabled: bool,
 ) -> Result<hyper::Response<hyper::body::Incoming>, SnowCopyError> {
-    logging::log_request_headers(&req);
+    if logging_enabled { //TODO JON: This will be fast due to branch prediction, but it might be cleaner to create a client with logging instead of this
+        logging::log_request_headers(&req, cc_tx.clone());
+    }
     let resp = client.request(req).await?;
-    logging::log_response_headers(&resp);
+    if logging_enabled {
+        logging::log_response_headers(&resp, cc_tx);
+    }
     Ok(resp)
 }
 

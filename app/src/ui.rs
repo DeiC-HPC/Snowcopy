@@ -6,6 +6,7 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
+use std::io::IsTerminal;
 pub(crate) use util_layer::ui::UiEvent;
 
 pub trait Ui {
@@ -19,6 +20,7 @@ struct ProgressBarUiInner {
     started: AtomicBool,
     completed: AtomicBool,
     destination_checker_visible: AtomicBool,
+    is_terminal: bool,
 }
 
 pub struct ProgressBarUi {
@@ -49,6 +51,7 @@ impl ProgressBarUi {
         );
         transfer_pb.set_prefix("Discovering");
 
+        let is_terminal = std::io::stderr().is_terminal(); //TODO JON: perhaps hide progress bars?
         Self {
             inner: Arc::new(ProgressBarUiInner {
                 mp,
@@ -57,6 +60,7 @@ impl ProgressBarUi {
                 started: AtomicBool::new(false),
                 completed: AtomicBool::new(false),
                 destination_checker_visible: AtomicBool::new(false),
+                is_terminal
             }),
         }
     }
@@ -152,7 +156,11 @@ impl Ui for ProgressBarUi {
                     }
                     UiEvent::Println(msg) => {
                         let timestamp = Local::now().format("%H:%M:%S");
-                        inner.mp.println(format!("[{}] {}", timestamp, msg)).unwrap();
+                        if inner.is_terminal {
+                            inner.mp.println(format!("[{}] {}", timestamp, msg)).unwrap();
+                        } else {
+                            println!("[{}] {}", timestamp, msg);
+                        }
                     }
                 }
 
@@ -224,6 +232,12 @@ impl Ui for ProgressBarUi {
             }
 
             inner.completed.store(true, Ordering::SeqCst);
+            if !inner.is_terminal {
+                if inner.destination_checker_visible.load(Ordering::SeqCst) {
+                    println!("[{}] Total:    {}", Local::now().format("%H:%M:%S"), inner.destination_checker_pb.message());
+                }
+                println!("[{}] Transfer: {}: {}", Local::now().format("%H:%M:%S"), inner.transfer_pb.prefix(), inner.transfer_pb.message());
+            }
         });
         (ui_tx, handle)
     }
@@ -253,5 +267,35 @@ mod tests {
 
         drop(ui_tx);
         handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pb_ui_non_terminal_output() {
+        let mp = MultiProgress::new();
+        let destination_checker_pb = ProgressBar::hidden();
+        let transfer_pb = mp.add(ProgressBar::new(100));
+
+        // Simulating the ProgressBarUi with is_terminal = false
+        let inner = std::sync::Arc::new(ProgressBarUiInner {
+            mp,
+            destination_checker_pb,
+            transfer_pb,
+            started: AtomicBool::new(true),
+            completed: AtomicBool::new(false),
+            destination_checker_visible: AtomicBool::new(true),
+            is_terminal: false,
+        });
+
+        inner.destination_checker_pb.set_message("Final Total Msg");
+        inner.transfer_pb.set_prefix("Final");
+        inner.transfer_pb.set_message("Transfer Msg");
+
+        // We only check if it doesn't panic and prints correctly with --nocapture
+        if !inner.is_terminal {
+            if inner.destination_checker_visible.load(Ordering::SeqCst) {
+                println!("[{}] Total:    {}", chrono::Local::now().format("%H:%M:%S"), inner.destination_checker_pb.message());
+            }
+            println!("[{}] Transfer: {}: {}", chrono::Local::now().format("%H:%M:%S"), inner.transfer_pb.prefix(), inner.transfer_pb.message());
+        }
     }
 }

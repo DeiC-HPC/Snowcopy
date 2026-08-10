@@ -9,6 +9,7 @@ pub mod download;
 pub mod url_encoder;
 pub mod error_codes;
 pub mod traits;
+pub mod url_parser;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -75,7 +76,7 @@ impl Endpoint {
         if let Some(config) = &self.config {
             !config.s3_access_key.trim().is_empty()
                 && !config.s3_secret_key.trim().is_empty()
-                && !config.s3_url.trim().is_empty()
+                && !matches!(url_parser::validate_s3_endpoint(config.s3_url.trim()), url_parser::S3EndpointType::Invalid)
         } else {
             false
         }
@@ -106,7 +107,9 @@ pub struct UploadConfig {
     pub file_limit_overwrite: Option<usize>,
     pub req_limit_overwrite: Option<usize>,
     pub silent: bool,
+    pub verbose: bool,
     pub stats: bool,
+    pub use_unsafe_http: bool,
     pub trailing_chunk_size: u64,
     pub trailing: bool,
     pub trailing_small: bool,
@@ -124,7 +127,9 @@ pub struct DownloadConfig {
     pub req_limit_overwrite: Option<usize>,
     pub download_concurrency_overwrite: Option<usize>,
     pub silent: bool,
+    pub verbose: bool,
     pub stats: bool,
+    pub use_unsafe_http: bool,
     pub open_file_limit_overwrite: Option<usize>,
     pub bucket: String,
     pub local_path: PathBuf,
@@ -136,6 +141,8 @@ pub struct ListConfig {
     pub endpoint: EndpointConfig,
     pub bucket: Option<String>,
     pub req_limit: Option<usize>,
+    pub verbose: bool,
+    pub use_unsafe_http: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -143,6 +150,8 @@ pub struct RemoveConfig {
     pub endpoint: EndpointConfig,
     pub bucket: String,
     pub silent: bool,
+    pub verbose: bool,
+    pub use_unsafe_http: bool,
     pub req_limit_overwrite: Option<usize>,
 }
 
@@ -154,11 +163,15 @@ pub struct ConfigModeConfig {
 
 pub trait S3ConfigTrait {
     fn endpoint(&self) -> &EndpointConfig;
+    fn verbose(&self) -> bool;
 }
 
 impl S3ConfigTrait for UploadConfig {
     fn endpoint(&self) -> &EndpointConfig {
         &self.endpoint
+    }
+    fn verbose(&self) -> bool {
+        self.verbose
     }
 }
 
@@ -166,17 +179,26 @@ impl S3ConfigTrait for DownloadConfig {
     fn endpoint(&self) -> &EndpointConfig {
         &self.endpoint
     }
+    fn verbose(&self) -> bool {
+        self.verbose
+    }
 }
 
 impl S3ConfigTrait for ListConfig {
     fn endpoint(&self) -> &EndpointConfig {
         &self.endpoint
     }
+    fn verbose(&self) -> bool {
+        self.verbose
+    }
 }
 
 impl S3ConfigTrait for RemoveConfig {
     fn endpoint(&self) -> &EndpointConfig {
         &self.endpoint
+    }
+    fn verbose(&self) -> bool {
+        self.verbose
     }
 }
 

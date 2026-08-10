@@ -11,3 +11,6 @@ serde_json = "1.0"
 directories = "6.0"
 anyhow = "1.0"
 util_layer = { path = "../util_layer"}
+
+[dev-dependencies]
+tempfile = "3.8"

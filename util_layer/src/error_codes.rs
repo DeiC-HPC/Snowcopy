@@ -1,10 +1,11 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub enum FatalErrorCode {
-    DiskIoError = 1,
+    Unknown = 1,
     ServerStateChangeDuringExecution = 2,
     RequestFailure = 3,
-    Unknown = 4,
+    DiskIoError = 4,
+    HttpUnsafeError = 5,
 }
 
 impl FatalErrorCode {

@@ -68,7 +68,7 @@ async fn main() {
                     let cancellation_token = CancellationToken::new();
                     let cc = CommandCenter::new_upload(&config, cancellation_token.clone());
                     let (cc_tx, cc_handle) = cc.start();
-                    let s3client = Arc::new(S3Client::new(&config.endpoint, cc_tx.clone()).await);
+                    let s3client = Arc::new(S3Client::new(&config.endpoint, cc_tx.clone(), config.verbose).await);
                     let hyper_client = Arc::new(build_https_client());
 
                     upload::upload(config, s3client, cc_tx, cc_handle, cancellation_token, hyper_client).await

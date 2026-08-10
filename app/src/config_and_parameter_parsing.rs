@@ -1,6 +1,7 @@
 use clap::{Arg, ArgMatches, Command};
 use util_layer::bucket_and_path_parser::PathPattern;
 use util_layer::{ConfigModeConfig, DownloadConfig, EndpointConfig, ListConfig, Mode, RemoveConfig, SnowConfig, TransferMethod, UploadConfig};
+use util_layer::error_codes::FatalErrorCode::HttpUnsafeError;
 
 pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatches) -> SnowConfig {
     let config_path = matches.get_one::<String>("config").map(std::path::PathBuf::from);
@@ -34,6 +35,8 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
     };
 
     let silent = matches.get_flag("silent");
+    let verbose = matches.get_flag("verbose");
+    let use_unsafe_http = matches.get_flag("use-unsafe-http");
     let req_limit_overwrite = matches.get_one::<usize>("req_limit").copied();
 
     match mode {
@@ -63,12 +66,15 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
             };
 
             let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, config_path.as_ref()).await;
+            check_http_safeguard(&endpoint, use_unsafe_http);
 
             if mode == Mode::List {
                 SnowConfig::List(ListConfig {
                     endpoint,
                     bucket: bucket_opt,
                     req_limit: req_limit_overwrite,
+                    verbose,
+                    use_unsafe_http,
                 })
             } else {
                 let bucket = if let Some(b) = bucket_opt {
@@ -81,6 +87,8 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                     endpoint,
                     bucket,
                     silent,
+                    verbose,
+                    use_unsafe_http,
                     req_limit_overwrite,
                 })
             }
@@ -126,6 +134,7 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
             };
 
             let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, config_path.as_ref()).await;
+            check_http_safeguard(&endpoint, use_unsafe_http);
 
             if mode == Mode::Upload {
                 SnowConfig::Upload(UploadConfig {
@@ -135,7 +144,9 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                     file_limit_overwrite,
                     req_limit_overwrite,
                     silent,
+                    verbose,
                     stats,
+                    use_unsafe_http,
                     trailing_chunk_size: trailing_chunk_size_val as u64,
                     trailing,
                     trailing_small,
@@ -152,7 +163,9 @@ pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatch
                     req_limit_overwrite,
                     download_concurrency_overwrite,
                     silent,
+                    verbose,
                     stats,
+                    use_unsafe_http,
                     open_file_limit_overwrite,
                     bucket,
                     local_path,
@@ -174,12 +187,20 @@ async fn load_endpoint_and_stop_program_with_error_if_it_fails(profile: &String,
     endpoint
 }
 
+fn check_http_safeguard(endpoint: &EndpointConfig, use_unsafe_http: bool) {
+    if !use_unsafe_http {
+        if let util_layer::url_parser::S3EndpointType::HTTP = util_layer::url_parser::validate_s3_endpoint(&endpoint.s3_url) {
+            eprintln!("Error: The endpoint {} uses the insecure HTTP protocol. \
+            Using HTTP can expose your data and credentials to potential security risks such as man-in-the-middle attacks. \
+            It is strongly recommended to use HTTPS instead. \
+            If you still wish to proceed, use the --use-unsafe-http flag.", endpoint.s3_url);
+            std::process::exit(HttpUnsafeError.as_i32());
+        }
+    }
+}
+
 pub async fn gather_credentials(profile_name: &str, config_path: Option<&std::path::PathBuf>) -> anyhow::Result<EndpointConfig> {
-    let app_config = if let Some(path) = config_path {
-        config::load_config_from_path(path.clone())?
-    } else {
-        config::load_config()?
-    };
+    let app_config = config::load_config(config_path.cloned())?;
 
     let matches: Vec<_> = app_config
         .endpoints
@@ -337,6 +358,20 @@ pub fn parse_arguments() -> ArgMatches {
                 .required(false)
                 .value_parser(clap::value_parser!(usize))
                 .num_args(1),
+        )
+        .arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .help("Verbose mode (print http headers)")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("use-unsafe-http")
+                .long("use-unsafe-http")
+                .help("Allow using insecure HTTP endpoints")
+                .action(clap::ArgAction::SetTrue)
+                .global(true),
         )
         .after_help("Examples:\n  up:   snowcopy my-folder profile:bucket\n  up:   snowcopy file.txt profile:bucket\n  down: snowcopy profile:bucket .")
         .get_matches();

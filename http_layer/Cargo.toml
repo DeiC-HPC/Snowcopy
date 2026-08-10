@@ -7,11 +7,10 @@ edition = "2024"
 util_layer = { path = "../util_layer"}
 hyper = { version = "1", features = ["http1"] }
 hyper-util = { version = "0.1", features = ["client","client-legacy","http1","tokio"] }
-hyper-rustls = "0.27"
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "logging", "aws-lc-rs"] }
 http-body-util = "0.1"
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
-tracing = "0.1.44"
 openssl = {version = "0.10.75" , features = ["vendored"] }
 chrono = "0.4.44"
 hex = "0.4.3"

@@ -77,9 +77,9 @@ impl CommandCenter {
         }
     }
 
-    pub fn new_remove(_config: &util_layer::RemoveConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken) -> Self {
+    pub fn new_remove(_config: &util_layer::RemoveConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken, verbose_mode: bool) -> Self {
         CommandCenter {
-            silent: true, //This will make command_center not print any information. TODO JON: Make progress bar for deletion
+            silent: !verbose_mode, //This will make command_center not print any information. TODO JON: Make progress bar for deletion
             stats: false,
             mode: Mode::Remove,
             cancellation_token_of_all_ongoing_tasks
