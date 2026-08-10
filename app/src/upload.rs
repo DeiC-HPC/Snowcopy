@@ -7,10 +7,10 @@ use std::path::PathBuf;
 
 use aws_layer::{CompletedPartAws, S3Client};
 use http_layer::{BufferPool, HyperClient};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 use tokio::sync::mpsc::{Receiver, UnboundedSender};
-use tokio::sync::{mpsc, Mutex, Semaphore};
+use tokio::sync::{mpsc, Semaphore};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::{CommandCenterEvent, Status};
@@ -142,16 +142,24 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<S3Client>
 
     let upload_id = aws_client.create_multipart_upload(&ctx.bucket, &*file_info.key, file_info.modified_time, CHUNK_SIZE).await.unwrap();
 
-    let completed_parts: Arc<Mutex<Vec<CompletedPartAws>>> = Arc::new(Mutex::new(Vec::new()));
+    let completed_parts: Arc<Vec<OnceLock<CompletedPartAws>>> = Arc::new(
+        (0..chunk_amount)
+            .map(|_| OnceLock::new())
+            .collect()
+    );
 
     upload_each_chunk_with_retry(&ctx, &runtime, &file_info, file, &upload_id, chunk_amount, &completed_parts).await;
 
-    let completed_parts = Arc::try_unwrap(completed_parts).unwrap().into_inner();
+    let completed_parts: Vec<CompletedPartAws> = Arc::try_unwrap(completed_parts).expect("Failed to unwrap Arc, there is a bug in our flow")
+        .into_iter()
+        .map(|slot| slot.into_inner().unwrap())
+        .collect();
+
     aws_client.complete_multipart_upload(&ctx.bucket, &*file_info.key, &upload_id, completed_parts).await.unwrap();
     let _ = runtime.cc_tx.send(CommandCenterEvent::FileTransferred(file_info.file_size));
 }
 
-async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<UploadRuntime>, file_info: &Arc<FileInfo>, file: Arc<File>, upload_id: &String, chunk_amount_u64: u64, completed_parts: &Arc<Mutex<Vec<CompletedPartAws>>>) {
+async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<UploadRuntime>, file_info: &Arc<FileInfo>, file: Arc<File>, upload_id: &String, chunk_amount_u64: u64, completed_parts: &Arc<Vec<OnceLock<CompletedPartAws>>>) {
     let mut join_set = JoinSet::new();
 
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.aws_uri_encoded_key));
@@ -206,8 +214,14 @@ async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<Upl
                         .e_tag(etag)
                         .part_number(part_number)
                         .build();
-                    completed_parts.lock().await.push(completed_part);
 
+                    match completed_parts[part_number as usize - 1].set(completed_part) { //0 vs 1 indexed
+                        Ok(_) => {}
+                        Err(e) => {
+                            CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, format!("Error uploading part {} of file {}: {:?}", part_number, file_info_clone.file_path.to_str().unwrap(), e)));
+                            return;
+                        }
+                    }
                     runtime_clone.cc_tx.send(CommandCenterEvent::PartTransferred(metrics)).expect("Failed to send message to command center. Should never happen.");
                 }
                 Err(e) => {

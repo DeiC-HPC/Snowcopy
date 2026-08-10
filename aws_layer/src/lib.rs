@@ -54,6 +54,8 @@ impl S3Client {
         .await
     }
 
+    /// Completes a multipart upload for an object in an S3 bucket.
+    /// Requires the parts list to be sorted.
     pub async fn complete_multipart_upload(
         &self,
         bucket: &str,
