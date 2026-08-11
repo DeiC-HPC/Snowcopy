@@ -24,7 +24,7 @@ use url::Url;
 use util_layer::constants::AWS_ALGORITHM;
 use util_layer::snow_errors::{S3Error, SnowCopyError};
 use util_layer::{FileInfo, HttpExecutorResponse, S3ConfigTrait, StreamingBody, UploadConfig};
-use util_layer::traits::{FileTrait, HttpExecutor, HyperClient};
+use util_layer::traits::{FileObject, HttpExecutor, HyperClient};
 use util_layer::cc_util::CommandCenterEvent;
 
 const READ_BUFFER_SIZE: usize = 256 * 1024;
@@ -136,7 +136,7 @@ pub async fn put_file_range(amount: u64, client: Arc<dyn HttpExecutor>, req_sem:
 }
 
 // TODO LND REFACTOR: This is a crucial area for testing - extract logic into smaller functions - Hashing, reading, requestBuilding etc
-pub async fn create_in_memory_body_put_with_hashes(file: Arc<dyn FileTrait>, start: u64, amount: u64, ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, file_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<Request<StreamingBody>, SnowCopyError> {
+pub async fn create_in_memory_body_put_with_hashes(file: Arc<dyn FileObject>, start: u64, amount: u64, ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, file_sem: &Semaphore, buffer_pool: Arc<BufferPool>, canonical_uri: &String, query_uri: &String) -> Result<Request<StreamingBody>, SnowCopyError> {
     let file_lock = file_sem.acquire().await?;
 
     // Ensure the buffer is large enough if amount > chunk_size,

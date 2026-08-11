@@ -11,8 +11,8 @@ use mockall::automock;
 use crate::{HttpExecutorResponse, StreamingBody};
 
 #[automock]
-pub trait FileTrait: Send + Sync {
-    fn open(file_path: &Path) -> io::Result<Arc<dyn FileTrait>>
+pub trait FileObject: Send + Sync {
+    fn open(file_path: &Path) -> io::Result<Arc<dyn FileObject>>
     where
         Self: Sized;
 
@@ -21,15 +21,15 @@ pub trait FileTrait: Send + Sync {
     fn length(&self) -> io::Result<u64>;
 }
 
-pub struct FileObject {
+pub struct ImplFileObject {
     file: File
 }
 
-impl FileObject {
+impl ImplFileObject {
 }
 
-impl FileTrait for FileObject {
-    fn open(file_path: &Path) -> io::Result<Arc<dyn FileTrait>> {
+impl FileObject for ImplFileObject {
+    fn open(file_path: &Path) -> io::Result<Arc<dyn FileObject>> {
         Ok(Arc::new(Self {
             file: File::open(file_path)?,
         }))
@@ -54,14 +54,14 @@ impl FileTrait for FileObject {
 
 #[automock]
 pub trait FileHandler: Send + Sync {
-    fn open_file(&self, file_path: &Path) -> io::Result<Arc<dyn FileTrait>>;
+    fn open_file(&self, file_path: &Path) -> io::Result<Arc<dyn FileObject>>;
 }
 
-pub struct ActualFileHandler {}
+pub struct ImplFileHandler {}
 
-impl FileHandler for ActualFileHandler {
-    fn open_file(&self, file_path: &Path) -> io::Result<Arc<dyn FileTrait>> {
-        FileObject::open(file_path)
+impl FileHandler for ImplFileHandler {
+    fn open_file(&self, file_path: &Path) -> io::Result<Arc<dyn FileObject>> {
+        ImplFileObject::open(file_path)
     }
 }
 

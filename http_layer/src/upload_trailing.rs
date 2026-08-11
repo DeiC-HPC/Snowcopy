@@ -14,7 +14,7 @@ use tokio::sync::Semaphore;
 use util_layer::UploadConfig;
 use util_layer::constants::{AMZ_CHECKSUM_SHA256, AMZ_CHUNK_SIGNATURE_HEADER, AMZ_STREAMING_TRAILER, AMZ_TRAILER_SIGNATURE, AWS_ALGORITHM, CHUNK_SIGNATURE_LENGTH, EMPTY_PAYLOAD_SHA256, TRAILER_HASH_LENGTH};
 use util_layer::snow_errors::SnowCopyError;
-use util_layer::traits::{FileTrait, HttpExecutor};
+use util_layer::traits::{FileObject, HttpExecutor};
 
 /// Upload a file using streaming for trailing headers.
 pub async fn put_file_streaming(
@@ -52,7 +52,7 @@ pub fn create_streaming_req_trailing_checksum(
     ctx: Arc<UploadConfig>,
     canonical_uri: &String,
     query_uri: &String,
-    file: Arc<dyn FileTrait>,
+    file: Arc<dyn FileObject>,
     file_offset: u64,
     amount: u64,
     modified_time: Option<SystemTime>,
@@ -112,7 +112,7 @@ pub fn create_streaming_req_trailing_checksum(
 
     let uri = crate::format_query(ctx.clone(), canonical_uri, query_uri);
 
-    let streaming_body = StreamingFileChunkedBody::new( // TODO LND REFACTOR: Iff drawing logic out, then this is a good candidate to separate to improve readability
+    let streaming_body = StreamingFileChunkedBody::new(
         file,
         file_offset,
         amount,
@@ -148,13 +148,13 @@ impl Unpin for StreamingFileChunkedBody {}
 /// Inner state that can be safely mutated
 pub struct StreamingFileChunkedBodyInner {
     /// The raw payload data
-    file: Arc<dyn FileTrait>,
+    file: Arc<dyn FileObject>,
     /// Offset in the file to start reading from
     file_offset: u64,
     /// Remaining bytes to read from the file
     remaining: u64,
     /// Semaphore to protect file access
-    file_sem: Arc<Semaphore>,       // TODO LND REFACTOR: Is this only necessary for some scenarios (non-multipart uploads)?
+    file_sem: Arc<Semaphore>,
     /// Chunk signer with premade Signing key for chunk signatures
     chunk_signer: ChunkSigner,
     /// AMZ date string (format: 20060102T150405Z)
@@ -174,7 +174,7 @@ pub struct StreamingFileChunkedBodyInner {
     /// Current read position in buf
     state: StreamingChunkedState,
     /// Chunk size (in kB)
-    chunk_size: u64,    // TODO LND REFACTOR: Should avoid having 2 concepts with the same name - trailing chunk size and upload chunk size (the one that determines whether a file is multipart or not)
+    chunk_size: u64,
 }
 
 impl StreamingFileChunkedBodyInner {
@@ -355,7 +355,7 @@ pub struct StreamingFileChunkedBody {
 
 impl StreamingFileChunkedBody {
     pub fn new(
-        file: Arc<dyn FileTrait>,
+        file: Arc<dyn FileObject>,
         file_offset: u64,
         file_size: u64,
         file_sem: Arc<Semaphore>,

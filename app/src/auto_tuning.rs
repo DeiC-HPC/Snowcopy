@@ -96,7 +96,7 @@ pub fn auto_tune_delete(config: &util_layer::RemoveConfig, cc_tx: UnboundedSende
     Semaphore::new(req_limit)
 }
 
-fn auto_tune_internal(  // TODO LND REFACTOR: Instead of testing the entire auto_tune_internal, extract the logic into testable smaller functions
+fn auto_tune_internal(
     path: &Path,
     cc_tx: UnboundedSender<CommandCenterEvent>,
 ) -> (usize, usize, usize, usize, usize) {

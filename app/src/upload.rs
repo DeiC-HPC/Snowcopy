@@ -1,14 +1,16 @@
-use crate::auto_tuning;
-use crate::traits::UploadTrait;
+use crate::traits::{UploadRuntime, UploadTrait};
+use crate::{auto_tuning, bucket, upload};
 use aws_layer::{CompletedPartAws, S3Client};
 use http_layer::upload_trailing::create_streaming_req_trailing_checksum;
-use http_layer::{BufferPool, create_in_memory_body_put_with_hashes};
+use http_layer::{BufferPool, build_https_client, create_in_memory_body_put_with_hashes};
 use std::io;
 use std::io::Error;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::command_center::{CC, CommandCenter};
+use crate::upload_multipart::MultipartUpload;
+use crate::upload_singlepart::SingleUpload;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 use tokio::sync::mpsc::{Receiver, UnboundedSender};
@@ -19,36 +21,39 @@ use util_layer::cc_util::{CommandCenterEvent, Status};
 use util_layer::constants;
 use util_layer::constants::CHUNK_SIZE;
 use util_layer::error_codes::FatalError;
-use util_layer::error_codes::FatalErrorCode::{DiskIoError, RequestFailure, Unknown};
+use util_layer::error_codes::FatalErrorCode::{DiskIoError, RequestFailure};
 use util_layer::retry::retry_on_failure_async;
-use util_layer::snow_errors::SnowCopyError;
-use util_layer::traits::{ActualFileHandler, FileHandler, FileTrait, HttpExecutor, HyperClient, HyperHttpExecutor};
+use util_layer::traits::{FileObject, HttpExecutor, HyperClient, HyperHttpExecutor, ImplFileHandler};
 use util_layer::url_encoder::url_encode_fast;
 use util_layer::{FileInfo, UploadConfig};
 use walkdir::WalkDir;
 
-pub async fn upload(ctx: Arc<UploadConfig>, s3client: Arc<S3Client>, cc_tx: UnboundedSender<CommandCenterEvent>, cc_handle: JoinHandle<Option<FatalError>>, cancellation_token: CancellationToken, hyper_client: Arc<HyperClient>) -> Option<FatalError> {
+pub(crate) async fn run_upload(config: &Arc<UploadConfig>) -> Option<FatalError> {
+    let cancellation_token = CancellationToken::new();
+    let cc = CommandCenter::new_upload(&config, cancellation_token.clone());
+    let (cc_tx, cc_handle) = cc.start();
+    let s3client = Arc::new(S3Client::new(&config.endpoint, cc_tx.clone(), config.verbose).await);
+    let hyper_client = Arc::new(build_https_client());
+
+    upload::upload(config.clone(), s3client, cc_tx, cc_handle, cancellation_token, hyper_client).await
+}
+
+pub(crate) async fn upload(ctx: Arc<UploadConfig>, s3client: Arc<S3Client>, cc_tx: UnboundedSender<CommandCenterEvent>, cc_handle: JoinHandle<Option<FatalError>>, cancellation_token: CancellationToken, hyper_client: Arc<HyperClient>) -> Option<FatalError> {
     if !ctx.local_path.to_path_buf().exists(){
         return Some(FatalError::new(DiskIoError, format!("Local path does not exist: {}", ctx.local_path.to_string_lossy())));
     }
 
     let mut files_to_upload_stream = walk_directory_async(ctx.local_path.to_path_buf(), cc_tx.clone(), cancellation_token.clone()).await;
 
-    let bucket_creation_handle = create_bucket_if_not_exist(&ctx, &s3client);
 
     let (active_file_io_sem, req_sem, open_files_sem, buffer_pool_size) = auto_tuning::auto_tune_upload(ctx.clone(), cc_tx.clone());
 
     let task_sem = Arc::new(Semaphore::new(open_files_sem.available_permits()));
     let buffer_pool = BufferPool::new(buffer_pool_size, CHUNK_SIZE as usize);
 
-    let bucket_created = match bucket_creation_handle.await {
-        Ok(Ok(created)) => created,
-        Ok(Err(e)) => {
-            return Some(FatalError::new(RequestFailure, format!("Bucket creation failed: {}", e)));
-        }
-        Err(join_error) => {
-            return Some(FatalError::new(Unknown, format!("Task join error during bucket creation: {:?}", join_error)));
-        }
+    let bucket_created = match bucket::check_for_bucket(&ctx, &s3client).await {
+        Ok(value) => value,
+        Err(value) => return value,
     };
 
     if !bucket_created {
@@ -70,82 +75,6 @@ pub async fn upload(ctx: Arc<UploadConfig>, s3client: Arc<S3Client>, cc_tx: Unbo
     cc_handle.await.unwrap()
 }
 
-pub struct MultipartUpload {
-    ctx: Arc<UploadConfig>,
-    runtime: Arc<UploadRuntime>,
-    file_info: Arc<FileInfo>,
-    aws_client: Arc<S3Client>,
-    http_executor: Arc<dyn HttpExecutor>,
-    file_handler: Arc<dyn FileHandler>,
-    cancellation_token: CancellationToken,
-}
-
-impl MultipartUpload {
-    fn new(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, runtime: Arc<UploadRuntime>, aws_client: Arc<S3Client>, http_executor: Arc<dyn HttpExecutor>, file_handler: Arc<dyn FileHandler>, cancellation_token: CancellationToken) -> Self {
-        Self {
-            ctx,
-            runtime,
-            file_info,
-            aws_client,
-            http_executor,
-            file_handler,
-            cancellation_token,
-        }
-    }
-}
-
-impl UploadTrait for MultipartUpload {
-    fn upload_file(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            let file_result = self.file_handler.open_file(&*self.file_info.file_path);
-
-            if let Err(e) = file_result { //Hopefully, we should be on top of ulimit through auto-tuning
-                self.runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError, format!("Error opening file {}: {}", self.file_info.file_path.to_str().unwrap(), e)))).expect("Failed to send message to command center. Should never happen.");
-                return;
-            }
-            let file_object = file_result.unwrap();
-            upload_with_multipart(self, file_object).await;
-        })
-    }
-}
-
-pub struct SingleUpload {
-    ctx: Arc<UploadConfig>,
-    runtime: Arc<UploadRuntime>,
-    file_info: Arc<FileInfo>,
-    http_executor: Arc<dyn HttpExecutor>,
-    file_handler: Arc<dyn FileHandler>,
-    cancellation_token: CancellationToken,
-}
-
-impl SingleUpload {
-    fn new(ctx: Arc<UploadConfig>, file_info: Arc<FileInfo>, runtime: Arc<UploadRuntime>, http_executor: Arc<dyn HttpExecutor>, file_handler: Arc<dyn FileHandler>, cancellation_token: CancellationToken) -> Self {
-        Self {
-            ctx,
-            runtime,
-            file_info,
-            http_executor,
-            file_handler,
-            cancellation_token,
-        }
-    }
-}
-
-impl UploadTrait for SingleUpload {
-    fn upload_file(&self) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> {
-        Box::pin(async move {
-            let file = self.file_handler.open_file(&*self.file_info.file_path);
-
-            if let Err(e) = file { //Hopefully, we should be on top of ulimit through auto-tuning
-                self.runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError,format!("Error opening file {}: {}", self.file_info.file_path.to_str().unwrap(), e)))).expect("Failed to send message to command center. Should never happen.");
-                return;
-            }
-            let file_ref = file.unwrap();
-            small_file_upload(self, file_ref).await;
-        })
-    }
-}
-
 async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream: &mut Receiver<Result<FileInfo, Error>>, task_sem: Arc<Semaphore>, runtime: Arc<UploadRuntime>, aws_client: Arc<S3Client>, hyper_client: Arc<HyperClient>) {
     let mut join_set = JoinSet::new();
     loop {
@@ -159,14 +88,14 @@ async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream
                         let aws_client = aws_client.clone();
                         let hyper_http_executor = HyperHttpExecutor::new(hyper_client.clone());
                         if file_info_arc.file_size > CHUNK_SIZE {
-                            let multipart_upload = Box::new(MultipartUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), aws_client.clone(), Arc::new(hyper_http_executor), Arc::new(ActualFileHandler{}), runtime.cancellation_token.clone()));
+                            let multipart_upload = Box::new(MultipartUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), aws_client.clone(), Arc::new(hyper_http_executor), Arc::new(ImplFileHandler{})));
                             let permit = task_sem.clone().acquire_owned().await.unwrap();
                             join_set.spawn(async move {
                                 multipart_upload.upload_file().await;
                                 drop(permit);
                             });
                         } else {
-                            let single_upload = Box::new(SingleUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), Arc::new(hyper_http_executor), Arc::new(ActualFileHandler{}), runtime.cancellation_token.clone()));
+                            let single_upload = Box::new(SingleUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), Arc::new(hyper_http_executor), Arc::new(ImplFileHandler{})));
                             let permit = task_sem.clone().acquire_owned().await.unwrap();
                             join_set.spawn(async move {
                                 single_upload.upload_file().await;
@@ -188,44 +117,7 @@ async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream
     while let Some(_) = join_set.join_next().await {};
 }
 
-fn create_bucket_if_not_exist(ctx: &Arc<UploadConfig>, client: &Arc<S3Client>) -> JoinHandle<Result<bool, SnowCopyError>> {
-    let bucket_creation_handle = {
-        let client = client.clone();
-        let bucket = ctx.bucket.clone();
-        tokio::spawn(async move {
-            match client.create_bucket(&bucket).await {
-                Ok(Some(_)) => Ok(true), // Bucket created
-                Ok(None) => Ok(false), // Bucket already exists
-                Err(e) => Err(e),
-            }
-        })
-    };
-    bucket_creation_handle
-}
-
-async fn upload_with_multipart(multipart: &MultipartUpload, file: Arc<dyn FileTrait>) {
-    let chunk_amount = (multipart.file_info.file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
-
-    let upload_id = multipart.aws_client.create_multipart_upload(&multipart.ctx.bucket, &*multipart.file_info.key, multipart.file_info.modified_time, CHUNK_SIZE).await.unwrap();
-
-    let completed_parts: Arc<Vec<OnceLock<CompletedPartAws>>> = Arc::new(
-        (0..chunk_amount)
-            .map(|_| OnceLock::new())
-            .collect()
-    );
-
-    upload_each_chunk_with_retry(&multipart.ctx, &multipart.runtime, &multipart.file_info, multipart.http_executor.clone(), file, &upload_id, chunk_amount, &completed_parts).await;
-
-    let completed_parts: Vec<CompletedPartAws> = Arc::try_unwrap(completed_parts).expect("Failed to unwrap Arc, there is a bug in our flow")
-        .into_iter()
-        .map(|slot| slot.into_inner().unwrap())
-        .collect();
-
-    multipart.aws_client.complete_multipart_upload(&multipart.ctx.bucket, &*multipart.file_info.key, &upload_id, completed_parts).await.unwrap();
-    let _ = multipart.runtime.cc_tx.send(CommandCenterEvent::FileTransferred(multipart.file_info.file_size));
-}
-
-async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<UploadRuntime>, file_info: &Arc<FileInfo>, http_executor: Arc<dyn HttpExecutor>, file: Arc<dyn FileTrait>, upload_id: &String, chunk_amount_u64: u64, completed_parts: &Arc<Vec<OnceLock<CompletedPartAws>>>) {
+pub(crate) async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<UploadRuntime>, file_info: &Arc<FileInfo>, http_executor: Arc<dyn HttpExecutor>, file: Arc<dyn FileObject>, upload_id: &String, chunk_amount_u64: u64, completed_parts: &Arc<Vec<OnceLock<CompletedPartAws>>>) {
     let mut join_set = JoinSet::new();
 
     let canonical_uri = Arc::new(format!("/{}/{}", ctx.bucket, file_info.aws_uri_encoded_key));
@@ -303,49 +195,6 @@ async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<Upl
     }
 
     while let Some(_) = join_set.join_next().await {}
-}
-
-async fn small_file_upload(upload: &SingleUpload, file: Arc<dyn FileTrait>) {
-    let canonical_uri = Arc::new(format!("/{}/{}", upload.ctx.bucket, upload.file_info.aws_uri_encoded_key));
-    let query_uri = "".to_string();
-
-    let result = tokio::select! {
-        res = retry_on_failure_async(|| {
-            let ctx = upload.ctx.clone();
-            let amount = upload.file_info.file_size;
-            let file_info = upload.file_info.clone();
-            let runtime = upload.runtime.clone();
-            let canonical_uri = canonical_uri.clone();
-            let query_uri = query_uri.clone();
-            let file = file.clone();
-
-            async move {
-                if ctx.trailing_small {
-                    let trailing_chunk_size = ctx.trailing_chunk_size;
-                    let req_result = create_streaming_req_trailing_checksum(ctx, &canonical_uri, &query_uri, file, 0, amount, file_info.modified_time, runtime.file_sem.clone(), trailing_chunk_size);
-                    http_layer::upload_trailing::put_file_streaming(req_result.unwrap(), amount, upload.http_executor.clone(), &runtime.req_sem).await
-                } else {
-                    let file_amount = file.length()?;
-                    let req = create_in_memory_body_put_with_hashes(file, 0, file_amount, ctx, file_info.clone(), &runtime.file_sem, runtime.buffer_pool.clone(), &*canonical_uri, &query_uri).await?;
-                    http_layer::put_file(req, file_info, upload.http_executor.clone(), &runtime.req_sem).await
-                }
-            }
-        }, upload.runtime.cc_tx.clone(),
-            format!("Uploading {}", upload.file_info.aws_uri_encoded_key)) => res,
-
-        _ = upload.runtime.cancellation_token.cancelled() => {
-            return;
-        }
-    };
-
-    match result {
-        Ok(metrics) => {
-            let file_size = upload.file_info.file_size;
-            upload.runtime.cc_tx.send(CommandCenterEvent::PartTransferred(metrics.1)).expect("Failed to send message to command center. Should never happen.");
-            upload.runtime.cc_tx.send(CommandCenterEvent::FileTransferred(file_size)).expect("Failed to send message to command center. Should never happen.");
-        },
-        Err(e) => panic!("Error uploading file {}: {}", upload.file_info.file_path.to_str().unwrap(), e),
-    }
 }
 
 fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSender<CommandCenterEvent>, client: &Arc<S3Client>, mut file_discovery_channel: Receiver<Result<FileInfo, io::Error>>, cancellation_token: CancellationToken) -> Receiver<Result<FileInfo, io::Error>> {
@@ -502,17 +351,12 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
     rx
 }
 
-pub struct UploadRuntime {
-    pub file_sem: Arc<Semaphore>,
-    pub req_sem: Semaphore,
-    pub buffer_pool: Arc<BufferPool>,
-    pub cc_tx: UnboundedSender<CommandCenterEvent>,
-    pub cancellation_token: CancellationToken
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::upload::{SingleUpload, UploadRuntime, UploadTrait};
+    use crate::traits::UploadRuntime;
+    use crate::upload::UploadTrait;
+    use crate::upload_multipart::MultipartUpload;
+    use crate::upload_singlepart::SingleUpload;
     use http_layer::BufferPool;
     use hyper::http::HeaderValue;
     use hyper::{HeaderMap, StatusCode};
@@ -523,9 +367,193 @@ mod tests {
     use tokio_util::sync::CancellationToken;
     use util_layer::cc_util::CommandCenterEvent;
     use util_layer::error_codes::FatalErrorCode::DiskIoError;
-    use util_layer::traits::{MockFileHandler, MockFileTrait, MockHttpExecutor};
+    use util_layer::traits::{MockFileHandler, MockFileObject, MockHttpExecutor};
     use util_layer::{EndpointConfig, FileInfo, HttpExecutorResponse, TransferMethod, UploadConfig};
 
+    // SinglePart
+    #[tokio::test]
+    async fn single_upload_sends_fatal_error_when_file_open_fails() {
+        let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let file_size = 1;
+
+        let config = Arc::new(test_upload_config(None));
+        let file_info = test_file_info(file_size);
+        let runtime = test_upload_runtime(cc_tx.clone());
+
+        let mut mock_file_handler = MockFileHandler::new();
+        mock_file_handler.expect_open_file().returning(|_| Err(std::io::Error::new(std::io::ErrorKind::Other, "mock open failure")));
+
+        let single_upload = SingleUpload::new(
+            config,
+            file_info,
+            runtime,
+            Arc::new(mock_http_executor(file_size as usize)),
+            Arc::new(mock_file_handler),
+        );
+
+        single_upload.upload_file().await;
+
+        let event = cc_rx.recv().await.expect("expected fatal error event");
+
+        match event {
+            CommandCenterEvent::FatalErrorEvent(error) => {
+                assert_eq!(error.code(), DiskIoError);
+                assert!(
+                    error.message().contains("mock open failure"),
+                    "fatal error should mention the underlying open failure"
+                );
+            }
+            _ => panic!("expected FatalErrorEvent"),
+        }
+    }
+
+    #[tokio::test]
+    async fn single_upload_passes() {
+        let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let expected_file_size = 1;
+
+        let config = Arc::new(test_upload_config(None));
+        let file_info = test_file_info(expected_file_size);
+        let runtime = test_upload_runtime(cc_tx.clone());
+
+        let mut mock_file_handler = MockFileHandler::new();
+
+        mock_file_handler.expect_open_file()
+            .times(1)
+            .returning(move |_| Ok(Arc::new(mock_file(expected_file_size.clone() as usize))));
+
+        let mock_http_executor = mock_http_executor(expected_file_size as usize);
+
+        let single_upload = SingleUpload::new(
+            config,
+            file_info,
+            runtime,
+            Arc::new(mock_http_executor),
+            Arc::new(mock_file_handler),
+        );
+
+        single_upload.upload_file().await;
+        let mut saw_part_transferred = false;
+        let mut saw_file_transferred = false;
+        let mut saw_fatal_error;
+
+        while let Ok(event) = cc_rx.try_recv() {
+            match event {
+                CommandCenterEvent::PartTransferred(_) => {
+                    saw_part_transferred = true;
+                }
+                CommandCenterEvent::FileTransferred(bytes) => {
+                    saw_file_transferred = true;
+                    assert_eq!(bytes, expected_file_size);
+                }
+                CommandCenterEvent::FatalErrorEvent(err) => {
+                    saw_fatal_error = true;
+                    assert!(!saw_fatal_error, "unexpected fatal error: {:?}", err);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_part_transferred);
+        assert!(saw_file_transferred);
+    }
+
+    // Multipart
+    #[tokio::test]
+    async fn multipart_upload_sends_fatal_error_when_file_open_fails() {
+        let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let file_size = util_layer::constants::CHUNK_SIZE + 1; // Must be > CHUNK_SIZE for multipart
+
+        let config = Arc::new(test_upload_config(None));
+        let file_info = test_file_info(file_size);
+        let runtime = test_upload_runtime(cc_tx.clone());
+        let mock_s3_client = Arc::new(aws_layer::S3Client::new(&config.endpoint, cc_tx.clone(), false).await);
+
+        let mut mock_file_handler = MockFileHandler::new();
+        mock_file_handler.expect_open_file().returning(|_| Err(std::io::Error::new(std::io::ErrorKind::Other, "mock open failure")));
+
+        let multipart_upload = MultipartUpload::new(
+            config,
+            file_info,
+            runtime,
+            mock_s3_client,
+            Arc::new(mock_http_executor(file_size as usize)),
+            Arc::new(mock_file_handler),
+        );
+
+        multipart_upload.upload_file().await;
+
+        let event = cc_rx.recv().await.expect("expected fatal error event");
+
+        match event {
+            CommandCenterEvent::FatalErrorEvent(error) => {
+                assert_eq!(error.code(), DiskIoError);
+                assert!(
+                    error.message().contains("mock open failure"),
+                    "fatal error should mention the underlying open failure"
+                );
+            }
+            _ => panic!("expected FatalErrorEvent"),
+        }
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn multipart_upload_passes() {
+        let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let expected_file_size = util_layer::constants::CHUNK_SIZE + 1; // Must be > CHUNK_SIZE for multipart
+
+        let config = Arc::new(test_upload_config(None));
+        let file_info = test_file_info(expected_file_size);
+        let runtime = test_upload_runtime(cc_tx.clone());
+        let mock_s3_client = Arc::new(aws_layer::S3Client::new(&config.endpoint, cc_tx.clone(), false).await);  // TODO LND: Mock S3Client proper
+
+        let mut mock_file_handler = MockFileHandler::new();
+
+        mock_file_handler.expect_open_file()
+            .times(1)
+            .returning(move |_| Ok(Arc::new(mock_file(expected_file_size.clone() as usize))));
+
+        let mock_http_executor = mock_http_executor(expected_file_size as usize);
+
+        let multipart_upload = MultipartUpload::new(
+            config,
+            file_info,
+            runtime,
+            mock_s3_client,
+            Arc::new(mock_http_executor),
+            Arc::new(mock_file_handler),
+        );
+
+        multipart_upload.upload_file().await;
+        let mut saw_part_transferred = false;
+        let mut saw_file_transferred = false;
+
+        while let Ok(event) = cc_rx.try_recv() {
+            match event {
+                CommandCenterEvent::PartTransferred(_) => {
+                    saw_part_transferred = true;
+                }
+                CommandCenterEvent::FileTransferred(bytes) => {
+                    saw_file_transferred = true;
+                    assert_eq!(bytes, expected_file_size);
+                }
+                CommandCenterEvent::FatalErrorEvent(err) => {
+                    panic!("unexpected fatal error: {:?}", err);
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_part_transferred);
+        assert!(saw_file_transferred);
+    }
+
+    // Test Helper functions
     fn test_upload_config(config: Option<UploadConfig>) -> UploadConfig {
         config.unwrap_or(
             UploadConfig {
@@ -573,97 +601,6 @@ mod tests {
         })
     }
 
-    #[tokio::test]
-    async fn single_upload_sends_fatal_error_when_file_open_fails() {
-        let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let file_size = 1;
-
-        let config = Arc::new(test_upload_config(None));
-        let file_info = test_file_info(file_size);
-        let runtime = test_upload_runtime(cc_tx.clone());
-
-        let mut mock_file_handler = MockFileHandler::new();
-        mock_file_handler.expect_open_file().returning(|_| Err(std::io::Error::new(std::io::ErrorKind::Other, "mock open failure")));
-
-        let single_upload = SingleUpload::new(
-            config,
-            file_info,
-            runtime,
-            Arc::new(mock_http_executor(file_size as usize)),
-            Arc::new(mock_file_handler),
-            CancellationToken::new(),
-        );
-
-        single_upload.upload_file().await;
-
-        let event = cc_rx.recv().await.expect("expected fatal error event");
-
-        match event {
-            CommandCenterEvent::FatalErrorEvent(error) => {
-                assert_eq!(error.code(), DiskIoError);
-                assert!(
-                    error.message().contains("mock open failure"),
-                    "fatal error should mention the underlying open failure"
-                );
-            }
-            _ => panic!("expected FatalErrorEvent"),
-        }
-    }
-
-    #[tokio::test]
-    async fn single_upload_passes() {
-        let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let expected_file_size = 1;
-
-        let config = Arc::new(test_upload_config(None));
-        let file_info = test_file_info(expected_file_size);
-        let runtime = test_upload_runtime(cc_tx.clone());
-
-        let mut mock_file_handler = MockFileHandler::new();
-
-        mock_file_handler.expect_open_file()
-            .times(1)
-            .returning(move |_| Ok(Arc::new(mock_file(expected_file_size.clone() as usize))));
-
-        let mock_http_executor = mock_http_executor(expected_file_size as usize);
-
-        let single_upload = SingleUpload::new(
-            config,
-            file_info,
-            runtime,
-            Arc::new(mock_http_executor),
-            Arc::new(mock_file_handler),
-            CancellationToken::new(),
-        );
-
-        single_upload.upload_file().await;
-        let mut saw_part_transferred = false;
-        let mut saw_file_transferred = false;
-        let mut saw_fatal_error = false;
-
-        while let Ok(event) = cc_rx.try_recv() {
-            match event {
-                CommandCenterEvent::PartTransferred(_) => {
-                    saw_part_transferred = true;
-                }
-                CommandCenterEvent::FileTransferred(bytes) => {
-                    saw_file_transferred = true;
-                    assert_eq!(bytes, expected_file_size);
-                }
-                CommandCenterEvent::FatalErrorEvent(err) => {
-                    saw_fatal_error = true;
-                    assert!(!saw_fatal_error, "unexpected fatal error: {:?}", err);
-                }
-                _ => {}
-            }
-        }
-
-        assert!(saw_part_transferred);
-        assert!(saw_file_transferred);
-    }
-
     fn mock_http_executor(file_size: usize) -> MockHttpExecutor {
         let mut mock_http_executor = MockHttpExecutor::new();
         mock_http_executor.expect_execute_await().returning(move |_|
@@ -682,8 +619,8 @@ mod tests {
         mock_http_executor
     }
 
-    fn mock_file(len: usize) -> MockFileTrait {
-        let mut mock_file = MockFileTrait::new();
+    fn mock_file(len: usize) -> MockFileObject {
+        let mut mock_file = MockFileObject::new();
         mock_file.expect_read_at_offset().returning(move |_, _| Ok(len));
         mock_file.expect_length().returning(move || Ok(len as u64));
         mock_file
