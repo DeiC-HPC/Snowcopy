@@ -3,23 +3,16 @@ use util_layer::error_codes::ErrorCode;
 mod common;
 
 use crate::common::test_constants::{DEFAULT_S3_PROFILE, S3_ACCESS_KEY, S3_SECRET_KEY};
-use crate::common::test_environment::get_default_test_env;
 use aws_sdk_s3::primitives::ByteStream;
 
+use crate::common::test_environment::get_default_test_env;
+
+#[cfg(windows)] //Linux is more liberal regarding filenames. There should be no legal s3 key that can mess up on linux
 #[tokio::test]
 async fn test_download_and_list_of_objects_with_illegal_chars() {
     let env = get_default_test_env().await;
 
     let legal_object = "legal object that should be downloaded even though another object with and illegal key is found";
-
-
-    #[cfg(unix)]
-    let invalid_keys: Vec<&str> = vec![
-        "\\",
-        "/"
-    ];
-
-    #[cfg(windows)]
     let invalid_keys : Vec<&str> = vec![
         "object with char not legal on local system <. It should still be listed",
         ">",
