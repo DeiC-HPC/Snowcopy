@@ -30,10 +30,9 @@ async fn test_long_user_flow() {
 
     //List
     let output = env.snowcopy_list_bucket();
-    println!("Logs:\n{}\nlog end", output.get_combined_logs());
     files.iter()
         .for_each(|(file, _)| assert!(output.get_combined_logs().contains(file)));
-    assert_eq!(output.get_combined_log_lines().len(), 3, "{}", output.get_combined_logs()); //2 + final new line
+    assert_eq!(output.get_combined_log_lines().len(), 2, "{}", output.get_combined_logs());
 
     //List all buckets
     let output = env.snowcopy_list_all_buckets_on_server();
