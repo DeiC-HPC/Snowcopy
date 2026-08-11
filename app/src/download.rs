@@ -2,7 +2,6 @@ use crate::auto_tuning::auto_tune_download;
 use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 use aws_layer::S3Client;
-use http_layer::filesystem_checker::is_valid_s3_key_for_local_filesystem;
 use http_layer::integrity::{reconstructable_multipart_etag, IntegrityAlgorithm};
 use http_layer::HyperClient;
 use std::collections::HashSet;
@@ -16,16 +15,18 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::{select, task};
 use tokio_util::sync::CancellationToken;
+use crate::filesystem_checker::is_valid_s3_key_for_local_filesystem;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::constants::METADATA_FETCH_AND_COMPARISON_CHANNEL_LIMIT_DOWNLOAD;
 use util_layer::download::{FileCompletionTracker, WriteMsg};
+use util_layer::error_codes::UserFacingError;
+use util_layer::error_codes::ErrorCode::{DiskIoError, RequestFailure, ServerStateChangeDuringExecution, SkippedInvalidKeysDownload};
 use util_layer::retry::retry_on_failure_async;
 use util_layer::snow_errors::SnowCopyError;
+use util_layer::snowcopy_result::SnowcopyResult;
 use util_layer::url_encoder::url_encode_fast;
 use util_layer::{DownloadConfig, FileInfo, S3Object};
 use SnowCopyError::IntegrityError;
-use util_layer::error_codes::FatalError;
-use util_layer::error_codes::FatalErrorCode::{DiskIoError, RequestFailure, ServerStateChangeDuringExecution};
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.
@@ -44,7 +45,7 @@ fn ensure_parent_dirs_exist(file_path: &Path, created_dirs: &mut HashSet<PathBuf
     Ok(())
 }
 
-pub async fn download(ctx: Arc<DownloadConfig>) -> Option<FatalError> {
+pub async fn download(ctx: Arc<DownloadConfig>) -> SnowcopyResult {
     let cancellation_token = CancellationToken::new();
     let cc = CommandCenter::new_download(&ctx, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
@@ -67,7 +68,7 @@ pub async fn download(ctx: Arc<DownloadConfig>) -> Option<FatalError> {
     while let Some(object) = object_channel.recv().await {
         //Ensure parent directories exist
         if let Err(e) = ensure_parent_dirs_exist(&object.local_path, &mut created_dirs) {
-            cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError, format!("Failed to create directories for {:?}: {}", object.local_path, e)))).expect("Failed to send message. This should never happen.");
+            cc_tx.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(DiskIoError, format!("Failed to create directories for {:?}: {}", object.local_path, e)))).expect("Failed to send message. This should never happen.");
             continue;
         }
 
@@ -101,7 +102,7 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
     let checker_client = client.clone();
     let checker_bucket = config.bucket.clone();
     let checker_task_sem = Arc::new(Semaphore::new(200)); //TODO JON: auto tuned?
-    let cc_tx_checker = cc_tx.clone();
+    let cc_sender = cc_tx.clone();
 
     tokio::spawn(async move {
         let warning_has_been_sent = Arc::new(AtomicBool::new(false));
@@ -111,12 +112,19 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
             if token.is_cancelled() {
                 break;
             }
+            let cc_sender_clone = cc_sender.clone();
+
+            if !is_valid_s3_key_for_local_filesystem(&object.key){
+                cc_sender.send(CommandCenterEvent::Log(format!("WARNING: Skipping invalid S3 key. It cannot be mapped to a local file: {}", &object.key))).expect("Failed to send message. This should never happen.");
+                cc_sender.send(CommandCenterEvent::ErrorEvent(UserFacingError::new(SkippedInvalidKeysDownload, format!("One or more S3 objects skipped, as they cannot be mapped to a local file: {}", &object.key)))).expect("Failed to send message. This should never happen.");
+                continue;
+            }
+            let _ = cc_sender.send(CommandCenterEvent::FileDiscovered(object.size as u64));
 
             let client = checker_client.clone();
             let bucket = checker_bucket.clone();
             let download_tx = download_tx.clone();
             let permit = checker_task_sem.clone().acquire_owned().await.unwrap();
-            let cc_tx = cc_tx_checker.clone();
             let warning_has_been_sent = warning_has_been_sent.clone();
 
             checker_set.spawn(async move {
@@ -126,7 +134,7 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
                     Ok((exists_at_target, _, mtime, chunk_size, etag, sha256)) => {
                         drop(permit);
                         if !exists_at_target {
-                            cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(ServerStateChangeDuringExecution,format!("S3 object went missing from s3 server during the execution of the program: {}", object.key)))).expect("Failed to send message. This should never happen.");
+                            cc_sender_clone.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(ServerStateChangeDuringExecution, format!("S3 object went missing from s3 server during the execution of the program: {}", object.key)))).expect("Failed to send message. This should never happen.");
                             return;
                         }
                         let mut object = object;
@@ -136,33 +144,27 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
                         object.sha256_checksum = sha256;
                         object.aws_uri_encoded_key = url_encode_fast(&object.key, true);
 
-                        if !is_valid_s3_key_for_local_filesystem(&object.key){
-                            cc_tx.send(CommandCenterEvent::Log(format!("Skipping invalid S3 key. It cannot be mapped to a local file: {}", object.key))).expect("Failed to send message. This should never happen.");
-                            //TODO JON: we need to ensure that we return a non-zero return value. We should notify the command center and give it the responsibility handle that?
-                            return;
-                        }
-
                         let should_download = should_download_object(&mut object);
 
                         if should_download {
                             if object.chunk_size.is_none() && object.sha256_checksum.is_none() {
                                 let already_sent = warning_has_been_sent.swap(true, Ordering::Relaxed);
                                 if !already_sent {
-                                    cc_tx.send(CommandCenterEvent::Log("Lack of Snowcopy file metadata detected for some files - file integrity checks are reduced".to_string())).expect("Failed to send message. This should never happen.");
+                                    cc_sender_clone.send(CommandCenterEvent::Log("Lack of Snowcopy file metadata detected for some files - file integrity checks are reduced".to_string())).expect("Failed to send message. This should never happen.");
                                 }
                             }
 
                             if let Err(e) = download_tx.send(object).await {
-                                cc_tx.send(CommandCenterEvent::Log(format!("Failed to forward object to download queue: {}", e))).expect("Failed to send message. This should never happen.");
+                                cc_sender_clone.send(CommandCenterEvent::Log(format!("Failed to forward object to download queue: {}", e))).expect("Failed to send message. This should never happen.");
                             }
                         } else {
                             // Already downloaded, just update progress for the UI
-                            cc_tx.send(CommandCenterEvent::FileAlreadyAtTarget(object.size as u64)).expect("Failed to send message. This should never happen.");
+                            cc_sender_clone.send(CommandCenterEvent::FileAlreadyAtTarget(object.size as u64)).expect("Failed to send message. This should never happen.");
                         }
 
                     }
                     Err(e) => {
-                        cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, format!("Failed to get metadata for object: {}. Error: {}", object.key, e)))).expect("Failed to send message. This should never happen.");
+                        cc_sender_clone.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Failed to get metadata for object: {}. Error: {}", object.key, e)))).expect("Failed to send message. This should never happen.");
                         return;
                     }
                 }
@@ -211,13 +213,13 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
         let file = match File::create(&file_path) {
             Ok(f) => f,
             Err(e) => {
-                cc_sender.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError,format!("Failed to create file {:?}: {}", file_path, e)))).expect("Failed to send message. This should never happen.");
+                cc_sender.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(DiskIoError, format!("Failed to create file {:?}: {}", file_path, e)))).expect("Failed to send message. This should never happen.");
                 return;
             }
         };
 
         if let Err(e) = file.set_len(total_size) {
-            cc_sender.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError, format!("Failed to truncate file {:?} to {}: {}", file_path, total_size, e)))).expect("Failed to send message. This should never happen.");
+            cc_sender.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(DiskIoError, format!("Failed to truncate file {:?} to {}: {}", file_path, total_size, e)))).expect("Failed to send message. This should never happen.");
             return;
         }
 

@@ -3,7 +3,7 @@ mod common;
 
 use crate::common::test_file_handler::TestFileHandler;
 use common::test_snowcopy_runner::SnowcopyOutput;
-use util_layer::error_codes::FatalErrorCode::HttpUnsafeError;
+use util_layer::error_codes::ErrorCode::HttpUnsafeError;
 
 #[test]
 fn test_http_safeguard() {

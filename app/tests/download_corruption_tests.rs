@@ -33,7 +33,7 @@ async fn test_download_corruption_retry_on_multipart_uploaded_file() {
         (test_file_name, (CHUNK_SIZE as usize / 1024) * 2 + 1000), //divide 1024 for kb
     ]));
     let output = env.snowcopy_upload_test_upload_folder();
-    assert!(output.get_combined_logs().contains(format!("{}?uploadId=", test_file_name).as_str()));
+    assert!(output.file_is_uploaded_with_multipart(test_file_name));
 
     env.proxy_handler.corrupt_the_body_of_request_x_times("GET", test_file_name,1).await.unwrap();
 

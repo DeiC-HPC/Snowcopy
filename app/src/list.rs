@@ -1,12 +1,13 @@
+use crate::command_center::{CommandCenter, CC};
+use aws_layer::S3Client;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use aws_layer::S3Client;
-use util_layer::error_codes::FatalError;
+use util_layer::error_codes::UserFacingError;
+use util_layer::snowcopy_result::SnowcopyResult;
 use util_layer::ListConfig;
-use crate::command_center::{CommandCenter, CC};
 
-pub(crate) async fn list(ctx: ListConfig) -> Option<FatalError> {
+pub(crate) async fn list(ctx: ListConfig) -> SnowcopyResult {
     let cancellation_token = CancellationToken::new();
     let cc = CommandCenter::new_list(&ctx, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
@@ -27,7 +28,7 @@ pub(crate) async fn list(ctx: ListConfig) -> Option<FatalError> {
                 }
             }
             Err(e) => {
-                let _ = cc_tx.send(util_layer::cc_util::CommandCenterEvent::FatalErrorEvent(FatalError::new(util_layer::error_codes::FatalErrorCode::RequestFailure, format!("Failed to list buckets: {}", e))));
+                let _ = cc_tx.send(util_layer::cc_util::CommandCenterEvent::FatalErrorEvent(UserFacingError::new(util_layer::error_codes::ErrorCode::RequestFailure, format!("Failed to list buckets: {}", e))));
             }
         }
     }

@@ -64,6 +64,22 @@ impl TestFileHandler {
         &self.download_folder
     }
 
+    pub fn download_folder_is_empty(&self) -> bool {
+        if !self.download_folder.exists() {
+            return true;
+        }
+
+        std::fs::read_dir(&self.download_folder).unwrap().next().is_none()
+    }
+
+    pub fn download_folder_contains_file(&self, file : &str) -> bool {
+        self.download_folder.join(file).exists()
+    }
+
+    pub fn download_folder_amount_of_files(&self) -> usize {
+        count_files(&self.download_folder)
+    }
+
     /// Verifies that upload and download folders contain exactly the same files,
     /// folder structure, file contents, and modification timestamps.
     pub fn assert_upload_and_download_folders_match(&self) -> bool {
@@ -149,4 +165,19 @@ impl Drop for TestFileHandler {
         println!("Cleaning up TestFileHandler");
         std::fs::remove_dir_all(self.base_path.clone()).ok();
     }
+}
+
+
+fn count_files(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                count_files(&path)
+            } else {
+                1
+            }
+        })
+        .sum()
 }

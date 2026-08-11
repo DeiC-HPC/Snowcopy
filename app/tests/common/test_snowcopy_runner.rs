@@ -1,5 +1,5 @@
 use std::process::Output;
-use util_layer::error_codes::FatalErrorCode;
+use util_layer::error_codes::ErrorCode;
 
 pub struct SnowcopyOutput {
     output: Output,
@@ -27,8 +27,8 @@ impl SnowcopyOutput {
         self.output.status.success()
     }
 
-    pub fn is_failure(&self, code: FatalErrorCode) -> bool {
-        !self.output.status.success() && code == FatalErrorCode::HttpUnsafeError
+    pub fn is_failure(&self, code: ErrorCode) -> bool {
+        !self.output.status.success() && code == ErrorCode::HttpUnsafeError
     }
 
     pub fn get_status(&self) -> &std::process::ExitStatus {
@@ -49,6 +49,10 @@ impl SnowcopyOutput {
 
     pub fn get_stdout(&self) -> &str {
         &self.stdout
+    }
+    
+    pub fn file_is_uploaded_with_multipart(&self, test_file_name: &str) -> bool {
+        self.get_combined_logs().contains(format!("{}?uploadId=", test_file_name).as_str())
     }
 
 }

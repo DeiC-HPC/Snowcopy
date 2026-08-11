@@ -9,6 +9,7 @@ pub mod download;
 pub mod url_encoder;
 pub mod error_codes;
 pub mod url_parser;
+pub mod snowcopy_result;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
