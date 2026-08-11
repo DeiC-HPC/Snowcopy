@@ -1,14 +1,15 @@
+use crate::auto_tuning::auto_tune_delete;
+use crate::command_center::{CommandCenter, CC};
+use aws_layer::S3Client;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use aws_layer::S3Client;
-use util_layer::error_codes::FatalError;
-use util_layer::error_codes::FatalErrorCode::RequestFailure;
+use util_layer::error_codes::UserFacingError;
+use util_layer::error_codes::ErrorCode::RequestFailure;
+use util_layer::snowcopy_result::SnowcopyResult;
 use util_layer::RemoveConfig;
-use crate::auto_tuning::auto_tune_delete;
-use crate::command_center::{CommandCenter, CC};
 
-pub async fn remove(ctx: RemoveConfig) -> Option<FatalError> {
+pub async fn remove(ctx: RemoveConfig) -> SnowcopyResult {
     let cancellation_token = CancellationToken::new();
     let cc = CommandCenter::new_remove(&ctx, cancellation_token.clone(), ctx.verbose);
     let (cc_tx, cc_handle) = cc.start();
@@ -30,7 +31,7 @@ pub async fn remove(ctx: RemoveConfig) -> Option<FatalError> {
         join_set.spawn(async move {
             let _permit = sem_clone.acquire().await.expect("Semaphore closed");
             if let Err(e) = s3client_clone.delete_object(&bucket, &object.key).await {
-                cc_tx_clone.send(util_layer::cc_util::CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure ,format!("Failed to delete object {}: {}", object.key, e)))).expect("Failed to send fatal error event");
+                cc_tx_clone.send(util_layer::cc_util::CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Failed to delete object {}: {}", object.key, e)))).expect("Failed to send fatal error event");
             }
         });
     }
@@ -38,7 +39,7 @@ pub async fn remove(ctx: RemoveConfig) -> Option<FatalError> {
     while let Some(_) = join_set.join_next().await {}
 
     if let Err(e) = s3client.delete_bucket(&ctx.bucket).await {
-        cc_tx.send(util_layer::cc_util::CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure ,format!("Failed to delete bucket {}: {}", ctx.bucket, e)))).expect("Failed to send fatal error event");
+        cc_tx.send(util_layer::cc_util::CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Failed to delete bucket {}: {}", ctx.bucket, e)))).expect("Failed to send fatal error event");
     }
 
     drop(s3client);

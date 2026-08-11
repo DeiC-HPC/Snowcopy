@@ -7,6 +7,9 @@ use std::fs;
 use util_layer::{ConfigModeConfig, Endpoint};
 #[cfg(test)]
 use util_layer::EndpointConfig;
+use util_layer::error_codes::ErrorCode::Unknown;
+use util_layer::error_codes::UserFacingError;
+use util_layer::snowcopy_result::SnowcopyResult;
 
 pub mod tui;
 
@@ -98,8 +101,11 @@ pub fn save_config_to_path(config: &AppConfig, path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-pub fn run_tui(config: ConfigModeConfig) -> Result<()> {
-    tui::run(config)
+pub fn run_tui(config: ConfigModeConfig) -> SnowcopyResult {
+    match tui::run(config){
+        Ok(_) => SnowcopyResult{fatal_error: None, error: None} ,
+        Err(err) => SnowcopyResult{fatal_error: Some(UserFacingError::new(Unknown, err.to_string())), error: None}
+    }
 }
 
 #[cfg(test)]

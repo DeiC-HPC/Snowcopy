@@ -3,7 +3,6 @@ mod signer;
 pub mod download;
 pub mod integrity;
 pub mod upload_trailing;
-pub mod filesystem_checker;
 
 use crate::signer::CredentialScope;
 use bytes::Bytes;

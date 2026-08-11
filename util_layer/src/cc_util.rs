@@ -1,7 +1,7 @@
 use std::fmt;
 use std::time::{SystemTime, Duration};
 use tokio::sync::oneshot;
-use crate::error_codes::{FatalError};
+use crate::error_codes::{UserFacingError};
 
 pub enum CommandCenterEvent {
     PartTransferred(u64),
@@ -12,7 +12,8 @@ pub enum CommandCenterEvent {
     Log(String),
     RetryRequested(oneshot::Sender<Duration>, u32, SystemTime, String),
     FileIntegrityChecked(bool), //JON: Should have key for some logging?
-    FatalErrorEvent(FatalError), //TODO JON: also add metadata for some logging?
+    FatalErrorEvent(UserFacingError), //TODO JON: also add metadata for some logging?
+    ErrorEvent(UserFacingError),
 }
 
 #[allow(dead_code)] //TODO Jon: not all status are used currently

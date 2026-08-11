@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 
 pub(crate) fn assert_files_match(upload_file: &Path, download_file: &Path) {
-    println!("DEBUG: Comparing files: {} and {}", upload_file.display(), download_file.display());
+    //println!("DEBUG: Comparing files: {} and {}", upload_file.display(), download_file.display());
 
     let upload_content = std::fs::read(upload_file).unwrap();
     let download_content = std::fs::read(download_file).unwrap();

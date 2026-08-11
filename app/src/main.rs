@@ -11,20 +11,21 @@ mod config_and_parameter_parsing;
 mod error_print;
 mod list;
 mod remove;
+mod filesystem_checker;
 
-use std::time::Instant;
 use std::sync::Arc;
+use std::time::Instant;
 
+use crate::config_and_parameter_parsing::{parse_arguments, read_parameters_and_config_to_create_snow_config};
+use crate::error_print::{print_error, print_fatal_error};
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
+use util_layer::snowcopy_result::SnowcopyResult;
 use util_layer::{SnowConfig, TransferMethod};
-use crate::config_and_parameter_parsing::{read_parameters_and_config_to_create_snow_config, parse_arguments};
-use crate::error_print::print_fatal_error;
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
 #[cfg(not(target_env = "msvc"))]
 use jemallocator::Jemalloc;
-use util_layer::error_codes::{FatalError, FatalErrorCode};
 
 #[cfg(not(target_env = "msvc"))]
 #[global_allocator]
@@ -39,7 +40,7 @@ async fn main() {
     let matches = parse_arguments();
     let snow_config = read_parameters_and_config_to_create_snow_config(&matches).await;
 
-    let fatal_error = match snow_config {
+    let result = match snow_config {
         SnowConfig::Download(config) => {
             let config = Arc::new(config);
             let silent = config.silent;
@@ -47,7 +48,7 @@ async fn main() {
                 TransferMethod::TokioSelfMade => download::download(config).await,
                 TransferMethod::TransferManager => {
                     transfer_manager::download(config).await;
-                    None
+                    SnowcopyResult{fatal_error: None, error: None}
                 }
             };
             if !silent {
@@ -62,7 +63,7 @@ async fn main() {
                 TransferMethod::TokioSelfMade => upload::upload(config).await,
                 TransferMethod::TransferManager => {
                     transfer_manager::upload(config).await;
-                    None
+                    SnowcopyResult{fatal_error: None, error: None}
                 }
             };
             if !silent {
@@ -83,20 +84,17 @@ async fn main() {
             res
         }
         SnowConfig::Config(config) => {
-            if let Err(e) = config::run_tui(config) {
-                Some(FatalError::new(
-                    FatalErrorCode::Unknown,
-                    format!("Error running config: {}", e),
-                ))
-            } else {
-                None
-            }
+            config::run_tui(config)
         }
     };
 
-    if fatal_error.is_some() {
-        let error = fatal_error.unwrap();
+    if result.fatal_error.is_some() {
+        let error = result.fatal_error.unwrap();
         print_fatal_error(&error);
+        std::process::exit(error.code().as_i32());
+    } else if result.error.is_some() {
+        let error = result.error.unwrap();
+        print_error(&error);
         std::process::exit(error.code().as_i32());
     }
 }
