@@ -2,6 +2,7 @@ mod common;
 
 use std::collections::HashMap;
 use common::test_environment::get_default_test_env;
+use util_layer::error_codes::ErrorCode;
 use crate::common::test_constants::{DEFAULT_S3_PROFILE, S3_ACCESS_KEY, S3_SECRET_KEY};
 
 #[tokio::test]
@@ -52,4 +53,13 @@ async fn test_list_all_buckets_command() {
     //list now contains one less
     let output = env.snowcopy_list_all_buckets_on_server();
     assert_eq!(output.get_combined_log_lines().len(), buckets.len() - 1, "{}", output.get_combined_logs());
+}
+
+
+#[tokio::test]
+async fn test_list_non_existing_bucket_should_result_in_fatal_error() {
+    let env = get_default_test_env().await;
+
+    let output = env.run_snowcopy_command(format!("ls {}:this-bucket-does-not-exist", DEFAULT_S3_PROFILE));
+    assert!(output.is_failure(ErrorCode::RequestFailure));
 }

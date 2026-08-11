@@ -28,7 +28,7 @@ impl SnowcopyOutput {
     }
 
     pub fn is_failure(&self, code: ErrorCode) -> bool {
-        !self.output.status.success() && code == ErrorCode::HttpUnsafeError
+        !self.output.status.success() && code.as_i32() == self.output.status.code().unwrap()
     }
 
     pub fn get_status(&self) -> &std::process::ExitStatus {
