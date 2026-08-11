@@ -46,7 +46,7 @@ impl TestEnv {
     pub fn snowcopy_download_bucket_to_download_folder(&self) -> SnowcopyOutput {
         let download = format!("{}:{} {}", DEFAULT_S3_PROFILE, self.unique_bucket, self.test_file_handler.download_folder().to_str().unwrap());
         let output = self.run_snowcopy_command(download);
-        assert!(output.is_success(), "Download failed: {}", output.get_combined_logs());
+        assert!(output.is_success(), "Download command failed: {}", output.get_combined_logs());
 
         output
     }

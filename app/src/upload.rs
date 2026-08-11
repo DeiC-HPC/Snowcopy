@@ -20,15 +20,16 @@ use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::{CommandCenterEvent, Status};
 use util_layer::constants;
 use util_layer::constants::CHUNK_SIZE;
-use util_layer::error_codes::FatalError;
-use util_layer::error_codes::FatalErrorCode::{DiskIoError, RequestFailure};
+use util_layer::error_codes::ErrorCode::{DiskIoError, RequestFailure, Unknown};
+use util_layer::error_codes::UserFacingError;
 use util_layer::retry::retry_on_failure_async;
+use util_layer::snowcopy_result::SnowcopyResult;
 use util_layer::traits::{FileObject, HttpExecutor, HyperClient, HyperHttpExecutor, ImplFileHandler};
 use util_layer::url_encoder::url_encode_fast;
 use util_layer::{FileInfo, UploadConfig};
 use walkdir::WalkDir;
 
-pub(crate) async fn run_upload(config: &Arc<UploadConfig>) -> Option<FatalError> {
+pub(crate) async fn run_upload(config: &Arc<UploadConfig>) -> SnowcopyResult {
     let cancellation_token = CancellationToken::new();
     let cc = CommandCenter::new_upload(&config, cancellation_token.clone());
     let (cc_tx, cc_handle) = cc.start();
@@ -38,22 +39,28 @@ pub(crate) async fn run_upload(config: &Arc<UploadConfig>) -> Option<FatalError>
     upload::upload(config.clone(), s3client, cc_tx, cc_handle, cancellation_token, hyper_client).await
 }
 
-pub(crate) async fn upload(ctx: Arc<UploadConfig>, s3client: Arc<S3Client>, cc_tx: UnboundedSender<CommandCenterEvent>, cc_handle: JoinHandle<Option<FatalError>>, cancellation_token: CancellationToken, hyper_client: Arc<HyperClient>) -> Option<FatalError> {
+pub(crate) async fn upload(ctx: Arc<UploadConfig>, s3client: Arc<S3Client>, cc_tx: UnboundedSender<CommandCenterEvent>, cc_handle: JoinHandle<SnowcopyResult>, cancellation_token: CancellationToken, hyper_client: Arc<HyperClient>) -> SnowcopyResult {
     if !ctx.local_path.to_path_buf().exists(){
-        return Some(FatalError::new(DiskIoError, format!("Local path does not exist: {}", ctx.local_path.to_string_lossy())));
+        return SnowcopyResult::with_fatal(UserFacingError::new(DiskIoError, format!("Local path does not exist: {}", ctx.local_path.to_string_lossy())));
     }
 
     let mut files_to_upload_stream = walk_directory_async(ctx.local_path.to_path_buf(), cc_tx.clone(), cancellation_token.clone()).await;
-
 
     let (active_file_io_sem, req_sem, open_files_sem, buffer_pool_size) = auto_tuning::auto_tune_upload(ctx.clone(), cc_tx.clone());
 
     let task_sem = Arc::new(Semaphore::new(open_files_sem.available_permits()));
     let buffer_pool = BufferPool::new(buffer_pool_size, CHUNK_SIZE as usize);
 
-    let bucket_created = match bucket::check_for_bucket(&ctx, &s3client).await {
-        Ok(value) => value,
-        Err(value) => return value,
+    let bucket_creation_handle = bucket::create_bucket_if_not_exist(&ctx, &s3client);
+
+    let bucket_created = match bucket_creation_handle.await {
+        Ok(Ok(created)) => created,
+        Ok(Err(e)) => {
+            return SnowcopyResult::with_fatal(UserFacingError::new(RequestFailure, format!("Bucket creation failed: {}", e)));
+        }
+        Err(join_error) => {
+            return SnowcopyResult::with_fatal(UserFacingError::new(Unknown, format!("Task join error during bucket creation: {:?}", join_error)));
+        }
     };
 
     if !bucket_created {
@@ -104,7 +111,7 @@ async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream
                         }
                     }
                     Some(Err(e)) => {
-                        runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError, format!("Error walking directory: {}", e)))).expect("Failed to send message to command center. Should never happen.");
+                        runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(DiskIoError, format!("Error walking directory: {}", e)))).expect("Failed to send message to command center. Should never happen.");
                     }
                     None => break,
                 }
@@ -181,14 +188,14 @@ pub(crate) async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtim
                     match completed_parts[part_number as usize - 1].set(completed_part) { //0 vs 1 indexed
                         Ok(_) => {}
                         Err(e) => {
-                            CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, format!("Error uploading part {} of file {}: {:?}", part_number, file_info_clone.file_path.to_str().unwrap(), e)));
+                            CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Error uploading part {} of file {}: {:?}", part_number, file_info_clone.file_path.to_str().unwrap(), e)));
                             return;
                         }
                     }
                     runtime_clone.cc_tx.send(CommandCenterEvent::PartTransferred(metrics)).expect("Failed to send message to command center. Should never happen.");
                 }
                 Err(e) => {
-                    CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, format!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e)));
+                    CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e)));
                 }
             }
         });
@@ -240,7 +247,7 @@ fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSende
                                        drop(permit);
                                     }
                                     Err(e) => {
-                                        cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, format!("Error getting metadata for file {}: {}", file_info.file_path.to_str().unwrap(), e)))).expect("Should never fail.");
+                                        cc_tx.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Error getting metadata for file {}: {}", file_info.file_path.to_str().unwrap(), e)))).expect("Should never fail.");
                                     }
                                 }
                             });
@@ -366,7 +373,7 @@ mod tests {
     use tokio::sync::mpsc::UnboundedSender;
     use tokio_util::sync::CancellationToken;
     use util_layer::cc_util::CommandCenterEvent;
-    use util_layer::error_codes::FatalErrorCode::DiskIoError;
+    use util_layer::error_codes::ErrorCode::DiskIoError;
     use util_layer::traits::{MockFileHandler, MockFileObject, MockHttpExecutor};
     use util_layer::{EndpointConfig, FileInfo, HttpExecutorResponse, TransferMethod, UploadConfig};
 

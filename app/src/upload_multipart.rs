@@ -5,8 +5,8 @@ use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::constants::CHUNK_SIZE;
-use util_layer::error_codes::FatalError;
-use util_layer::error_codes::FatalErrorCode::DiskIoError;
+use util_layer::error_codes::ErrorCode::DiskIoError;
+use util_layer::error_codes::UserFacingError;
 use util_layer::traits::{FileHandler, FileObject, HttpExecutor};
 use util_layer::{FileInfo, UploadConfig};
 
@@ -38,7 +38,7 @@ impl UploadTrait for MultipartUpload {
             let file_result = self.file_handler.open_file(&*self.file_info.file_path);
 
             if let Err(e) = file_result { //Hopefully, we should be on top of ulimit through auto-tuning
-                self.runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError, format!("Error opening file {}: {}", self.file_info.file_path.to_str().unwrap(), e)))).expect("Failed to send message to command center. Should never happen.");
+                self.runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(DiskIoError, format!("Error opening file {}: {}", self.file_info.file_path.to_str().unwrap(), e)))).expect("Failed to send message to command center. Should never happen.");
                 return;
             }
             let file_object = file_result.unwrap();

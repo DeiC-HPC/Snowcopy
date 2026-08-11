@@ -4,11 +4,11 @@ use http_layer::upload_trailing::create_streaming_req_trailing_checksum;
 use std::pin::Pin;
 use std::sync::Arc;
 use util_layer::cc_util::CommandCenterEvent;
-use util_layer::error_codes::FatalError;
-use util_layer::error_codes::FatalErrorCode::DiskIoError;
 use util_layer::retry::retry_on_failure_async;
 use util_layer::traits::{FileHandler, FileObject, HttpExecutor};
 use util_layer::{FileInfo, UploadConfig};
+use util_layer::error_codes::ErrorCode::DiskIoError;
+use util_layer::error_codes::UserFacingError;
 
 pub struct SingleUpload {
     ctx: Arc<UploadConfig>,
@@ -36,7 +36,7 @@ impl UploadTrait for SingleUpload {
             let file = self.file_handler.open_file(&*self.file_info.file_path);
 
             if let Err(e) = file { //Hopefully, we should be on top of ulimit through auto-tuning
-                self.runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(DiskIoError,format!("Error opening file {}: {}", self.file_info.file_path.to_str().unwrap(), e)))).expect("Failed to send message to command center. Should never happen.");
+                self.runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(DiskIoError,format!("Error opening file {}: {}", self.file_info.file_path.to_str().unwrap(), e)))).expect("Failed to send message to command center. Should never happen.");
                 return;
             }
             let file_ref = file.unwrap();

@@ -1,11 +1,12 @@
-use std::cmp::PartialEq;
 use crate::ui::{ProgressBarUi, Ui, UiEvent};
+use std::cmp::PartialEq;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use util_layer::cc_util::{CommandCenterEvent, Status};
 use util_layer::constants::MAX_RETRY;
-use util_layer::error_codes::{FatalError};
+use util_layer::error_codes::UserFacingError;
+use util_layer::snowcopy_result::SnowcopyResult;
 
 struct NoopUiSender;
 
@@ -38,7 +39,7 @@ impl UiSender {
 }
 
 pub trait CC {
-    fn start(&self) -> (UnboundedSender<CommandCenterEvent>, JoinHandle<Option<FatalError>>);
+    fn start(&self) -> (UnboundedSender<CommandCenterEvent>, JoinHandle<SnowcopyResult>);
 }
 
 pub struct CommandCenter {
@@ -88,7 +89,7 @@ impl CommandCenter {
 }
 
 impl CC for CommandCenter {
-    fn start(&self) -> (UnboundedSender<CommandCenterEvent>, JoinHandle<Option<FatalError>>) {
+    fn start(&self) -> (UnboundedSender<CommandCenterEvent>, JoinHandle<SnowcopyResult>) {
         let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel::<CommandCenterEvent>();
 
         let (ui, ui_tx, ui_handle) = if self.silent {
@@ -106,7 +107,8 @@ impl CC for CommandCenter {
             let mut file_transferred_count = 0u64;
             let mut total_integrity_checked_files = 0u64;
             let mut total_retries = 0u64;
-            let mut fatal_error : Option<FatalError> = None;
+            let mut fatal_error : Option<UserFacingError> = None;
+            let mut error : Option<UserFacingError> = None;
 
             let _ = ui_tx.send(UiEvent::Message(Status::Discovering.to_string()));
 
@@ -156,6 +158,11 @@ impl CC for CommandCenter {
                             total_integrity_checked_files += 1;
                         }
                     }
+                    CommandCenterEvent::ErrorEvent(err) => {
+                        if error.is_none() {
+                            error = Some(err);
+                        }
+                    }
                     CommandCenterEvent::FatalErrorEvent(err) => {
                         let _ = ui_tx.send(UiEvent::Println("FATAL ERROR: Shutting down.".to_string()));
                         cancellation_token_of_all_ongoing_tasks.cancel();
@@ -186,7 +193,7 @@ impl CC for CommandCenter {
                 println!("Total retries: {}", total_retries);
             }
 
-            fatal_error
+            SnowcopyResult {fatal_error, error}
         });
 
         (cc_tx, handle)

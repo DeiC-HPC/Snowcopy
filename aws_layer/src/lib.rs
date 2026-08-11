@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::cc_util::Status::Transferring;
 use util_layer::constants::{MULTIPART_UPLOAD_METADATA_UNIFORM_CHUNK_SIZE_KEY, PAYLOAD_SHA256_METADATA_KEY};
-use util_layer::error_codes::FatalError;
-use util_layer::error_codes::FatalErrorCode::RequestFailure;
+use util_layer::error_codes::ErrorCode::RequestFailure;
+use util_layer::error_codes::UserFacingError;
 use util_layer::snow_errors::{S3Error, SnowCopyError};
 use util_layer::time::float_string_to_time;
 use util_layer::url_encoder::url_encode_fast;
@@ -54,8 +54,6 @@ impl S3Client {
         .await
     }
 
-    /// Completes a multipart upload for an object in an S3 bucket.
-    /// Requires the parts list to be sorted.
     pub async fn complete_multipart_upload(
         &self,
         bucket: &str,
@@ -208,7 +206,7 @@ impl S3Client {
                         }
                     }
                     Err(e) => {
-                        cc_tx_fetch.send(CommandCenterEvent::FatalErrorEvent(FatalError::new(RequestFailure, e.to_string()))).expect("Failed to send fatal error event");
+                        cc_tx_fetch.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, e.to_string()))).expect("Failed to send fatal error event");
                         break;
                     }
                 }
@@ -239,7 +237,6 @@ impl S3Client {
                             sha256_checksum: None,
                         };
 
-                        let _ = cc_tx.send(CommandCenterEvent::FileDiscovered(size as u64));
                         tx.send(s3_object).await.expect("Failed to send S3 object to channel");
                     }
                 }
