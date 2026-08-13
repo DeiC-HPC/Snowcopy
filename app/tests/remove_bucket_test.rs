@@ -31,7 +31,7 @@ async fn test_remove_bucket_command() {
 async fn test_remove_empty_bucket_command() {
     let env = get_default_test_env().await;
 
-    let s3_client = common::s3_test_client::create_aws_sdk_client(S3_ACCESS_KEY, S3_SECRET_KEY, format!("http://127.0.0.1:{}", env.minio_host_port).as_str(), "us-east-1").await;
+    let s3_client = common::s3_test_client::create_aws_sdk_client(S3_ACCESS_KEY, S3_SECRET_KEY, env.get_minio_url().as_str(), "us-east-1").await;
     s3_client.create_bucket().bucket(&env.unique_bucket).send().await.unwrap();
 
     //Bucket exists

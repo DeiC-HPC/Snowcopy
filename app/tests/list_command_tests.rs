@@ -36,7 +36,7 @@ async fn test_list_all_buckets_command() {
         "test-bucket-3"
     ];
 
-    let s3_client = common::s3_test_client::create_aws_sdk_client(S3_ACCESS_KEY, S3_SECRET_KEY, format!("http://127.0.0.1:{}", env.minio_host_port).as_str(), "us-east-1").await;
+    let s3_client = common::s3_test_client::create_aws_sdk_client(S3_ACCESS_KEY, S3_SECRET_KEY, env.get_minio_url().as_str(), "us-east-1").await;
     for bucket in &buckets {
         s3_client.create_bucket().bucket(*bucket).send().await.unwrap();
     }

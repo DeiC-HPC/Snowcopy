@@ -73,6 +73,13 @@ impl TestEnv {
 
         output
     }
+    pub fn get_minio_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.minio_host_port)
+    }
+
+    pub fn get_mitmproxy_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.mitm_host_port)
+    }
 }
 
 pub(crate) async fn get_default_test_env() -> TestEnv {
