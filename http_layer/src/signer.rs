@@ -46,25 +46,7 @@ impl ChunkSigner {
         prev_signature: &str,
         chunk_hash: &str,
     ) -> String {
-        let capacity = AWS_CHUNK_PAYLOAD_ALGORITHM.len() + 1    // Matches size + 1 for the newline
-            + amz_date.len() + 1
-            + credential_scope.len() + 1
-            + prev_signature.len() + 1
-            + EMPTY_PAYLOAD_SHA256.len() + 1
-            + chunk_hash.len();
-
-        let mut string_to_sign = String::with_capacity(capacity);
-        string_to_sign.push_str(AWS_CHUNK_PAYLOAD_ALGORITHM);
-        string_to_sign.push('\n');
-        string_to_sign.push_str(amz_date);
-        string_to_sign.push('\n');
-        string_to_sign.push_str(credential_scope);
-        string_to_sign.push('\n');
-        string_to_sign.push_str(prev_signature);
-        string_to_sign.push('\n');
-        string_to_sign.push_str(EMPTY_PAYLOAD_SHA256);
-        string_to_sign.push('\n');
-        string_to_sign.push_str(chunk_hash);
+        let string_to_sign = push_elements_to_string(&[AWS_CHUNK_PAYLOAD_ALGORITHM, amz_date, credential_scope, prev_signature, EMPTY_PAYLOAD_SHA256, chunk_hash]);
 
         hex::encode(self.sign(string_to_sign.as_bytes()))
     }
@@ -82,14 +64,7 @@ impl ChunkSigner {
         let trailer_line = format!("{}:{}\n", trailer_name.to_lowercase(), trailer_value);
         let trailer_hash = sha256_hex(trailer_line.as_bytes());
 
-        let string_to_sign = format!(
-            "{}\n{}\n{}\n{}\n{}",
-            AWS_CHUNK_TRAILER_ALGORITHM,
-            amz_date,
-            credential_scope,
-            prev_signature,
-            trailer_hash
-        );
+        let string_to_sign = push_elements_to_string(&[AWS_CHUNK_TRAILER_ALGORITHM, amz_date, credential_scope, prev_signature, trailer_hash.as_str()]);
 
         hex::encode(self.sign(string_to_sign.as_bytes()))
     }
@@ -110,7 +85,7 @@ pub fn get_s3_auth_header_and_signature(
     signed_headers_sorted: &HashMap<String, String>,
     canonical_uri: &String,
     query_url: &String,
-) -> (String, String) {
+) -> (String, String, [u8; 32]) {
     let mut headers: Vec<(&str, &str)> = Vec::with_capacity(signed_headers_sorted.len());
     for (k, v) in signed_headers_sorted {
         headers.push((k, v));
@@ -157,13 +132,13 @@ pub fn get_s3_auth_header_and_signature(
     let hex_sha256 = sha256_hex(canonical_request.as_bytes());
 
     let timestamp_iso = credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string();
-    let string_to_sign = format!(
-        "{}\n{}\n{}\n{}",
-        algorithm,
-        timestamp_iso,
-        credential_scope_str,
-        hex_sha256
+    let string_to_sign = push_elements_to_string(
+        &[algorithm,
+        timestamp_iso.as_str(),
+        credential_scope_str.as_str(),
+        hex_sha256.as_str()]
     );
+
 
     let signing_key = s3_signing_key(&config.s3_secret_key, &date_y_m_d, credential_scope.region.as_str());
     let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
@@ -173,7 +148,7 @@ pub fn get_s3_auth_header_and_signature(
         algorithm, config.s3_access_key, credential_scope_str, signed_headers_str, signature
     );
 
-    (auth_header, signature)
+    (auth_header, signature, signing_key)
 }
 
 pub fn get_s3_auth_header(
@@ -185,7 +160,7 @@ pub fn get_s3_auth_header(
     canonical_uri: &String,
     query_uri: &String,
 ) -> String {
-    let (auth, _) =
+    let (auth, _, _) =
         get_s3_auth_header_and_signature(method, config, credential_scope, algorithm, signed_headers, canonical_uri, query_uri);
     auth
 }
@@ -261,7 +236,7 @@ pub fn aws_chunked_trailer_encoded_length(
     total += 1;                  // "0"
     total += sig_header_overhead; // ";chunk-signature=<sig>"
     total += 2;                  // "\r\n" after header line
-    total += 2;                  // "\r\n" empty line before trailers
+    //total += 2;                  // "\r\n" empty line before trailers
 
     // 3) Trailing headers (raw, NOT in a chunk wrapper):
     //    "<trailerName>:<value>\r\n"
@@ -276,4 +251,89 @@ pub fn aws_chunked_trailer_encoded_length(
     total += 2; // final "\r\n"
 
     total
+}
+
+/**
+ * Pushes a list of elements to a string, separated by newline characters.
+ */
+fn push_elements_to_string(elements: &[&str]) -> String {
+    let capacity = elements.iter().map(|element| element.len()).sum::<usize>()
+        + elements.len().saturating_sub(1);
+    let mut string_to_sign = String::with_capacity(capacity);
+
+    for (index, element) in elements.iter().enumerate() {
+        if index > 0 {
+            string_to_sign.push('\n');
+        }
+        string_to_sign.push_str(element);
+    }
+    string_to_sign
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::signer::*;
+
+    
+    #[test]
+    fn test_push_elements_to_string() {
+        let elements = ["element1", "element2", "element3"];
+        let result = push_elements_to_string(&elements);
+        assert_eq!(result, "element1\nelement2\nelement3");
+    }
+
+    #[test]
+    fn test_aws_streaming_trailers_example() {
+        // AWS Example from https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sigv4-streaming-trailers.html
+        let secret_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+        let amz_date = "20130524T000000Z";
+        let date_y_m_d = "20130524";
+        let region = "us-east-1";
+        let credential_scope = "20130524/us-east-1/s3/aws4_request";
+        let seed_signature = "106e2a8a18243abcf37539882f36619c00e2dfc72633413f02d3b74544bfeb8e";
+
+        let signing_key = s3_signing_key(secret_key, date_y_m_d, region);
+        let signer = ChunkSigner::new(&signing_key);
+
+        // Chunk 1 (65536 bytes of 'a')
+        // In the example, the hash of 65536 'a's is bf718b6f653bebc184e1479f1935b8da974d701b893afcf49e701f3e2f9f9c5a
+        let chunk1_hash = "bf718b6f653bebc184e1479f1935b8da974d701b893afcf49e701f3e2f9f9c5a";
+        let chunk1_sig = signer.sign_chunk(amz_date, credential_scope, seed_signature, chunk1_hash);
+        assert_eq!(chunk1_sig, "b474d8862b1487a5145d686f57f013e54db672cee1c953b3010fb58501ef5aa2");
+
+        // Chunk 2 (1024 bytes of 'a')
+        // Hash of 1024 'a's is 2edc986847e209b4016e141a6dc8716d3207350f416969382d431539bf292e4a
+        let chunk2_hash = "2edc986847e209b4016e141a6dc8716d3207350f416969382d431539bf292e4a";
+        let chunk2_sig = signer.sign_chunk(amz_date, credential_scope, &chunk1_sig, chunk2_hash);
+        assert_eq!(chunk2_sig, "1c1344b170168f8e65b41376b44b20fe354e373826ccbbe2c1d40a8cae51e5c7");
+
+        // Chunk 3 (0-byte data chunk)
+        // Hash of 0 bytes is EMPTY_PAYLOAD_SHA256: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+        let chunk3_hash = EMPTY_PAYLOAD_SHA256;
+        let chunk3_sig = signer.sign_chunk(amz_date, credential_scope, &chunk2_sig, chunk3_hash);
+        assert_eq!(chunk3_sig, "2ca2aba2005185cf7159c6277faf83795951dd77a3a99e6e65d5c9f85863f992");
+
+        // Chunk 4: Trailing headers
+        // Trailer name: x-amz-checksum-crc32c, value: sOO8/Q==
+        let trailer_name = "x-amz-checksum-crc32c";
+        let trailer_value = "sOO8/Q==";
+        let trailer_sig = signer.sign_trailer(amz_date, credential_scope, &chunk3_sig, trailer_name, trailer_value);
+        assert_eq!(trailer_sig, "d81f82fc3505edab99d459891051a732e8730629a2e4a59689829ca17fe2e435");
+    }
+
+    #[test]
+    fn test_aws_chunked_trailer_encoded_length_example() {
+        // Based on the example: AWS Example from https://docs.aws.amazon.com/AmazonS3/latest/developerguide/sigv4-streaming-trailers.html
+        // x-amz-decoded-content-length: 66560 (65536 + 1024)
+        // chunk-size: 65536 (10000 hex)
+        // trailer: x-amz-checksum-crc32c, value len: 8 ("sOO8/Q==")
+        let decoded_len = 66560;
+        let chunk_size = 65536;
+        let trailer_name = "x-amz-checksum-crc32c";
+        let trailer_value_len = 8;
+
+        let total_len = aws_chunked_trailer_encoded_length(decoded_len, chunk_size, trailer_name, trailer_value_len);
+
+        assert_eq!(total_len, 66946);
+    }
 }

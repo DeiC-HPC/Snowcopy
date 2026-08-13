@@ -1,8 +1,9 @@
-use http::{Method, Request};
-use http_layer::{HyperClient, StreamingBody};
-use serde::Serialize;
 use bytes::Bytes;
+use http::{Method, Request};
 use http_body_util::{BodyExt, Full};
+use serde::Serialize;
+use util_layer::StreamingBody;
+use util_layer::traits::HyperClient;
 
 pub struct ProxyHandler {
     proxy_url: String,

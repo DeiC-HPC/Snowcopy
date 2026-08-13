@@ -8,6 +8,7 @@ pub mod snow_errors;
 pub mod download;
 pub mod url_encoder;
 pub mod error_codes;
+pub mod traits;
 pub mod url_parser;
 pub mod snowcopy_result;
 
@@ -16,6 +17,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::string::ToString;
 use std::time::SystemTime;
+use bytes::Bytes;
+use http_body_util::combinators::BoxBody;
+use hyper::{HeaderMap, StatusCode};
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Mode {
@@ -49,6 +53,14 @@ impl Default for EndpointConfig {
         }
     }
 }
+
+pub type StreamingBody = BoxBody<Bytes, std::io::Error>;
+pub struct HttpExecutorResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: Vec<u8>,
+}
+
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Endpoint {

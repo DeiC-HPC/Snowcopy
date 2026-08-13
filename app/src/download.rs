@@ -3,7 +3,6 @@ use crate::command_center::{CommandCenter, CC};
 use crate::constants::DOWNLOAD_MULTIPART_THRESHOLD;
 use aws_layer::S3Client;
 use http_layer::integrity::{reconstructable_multipart_etag, IntegrityAlgorithm};
-use http_layer::HyperClient;
 use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
@@ -27,6 +26,7 @@ use util_layer::snowcopy_result::SnowcopyResult;
 use util_layer::url_encoder::url_encode_fast;
 use util_layer::{DownloadConfig, FileInfo, S3Object};
 use SnowCopyError::IntegrityError;
+use util_layer::traits::HyperClient;
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.

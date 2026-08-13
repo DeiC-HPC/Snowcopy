@@ -12,6 +12,10 @@ mod error_print;
 mod list;
 mod remove;
 mod filesystem_checker;
+pub mod traits;
+pub mod bucket;
+pub mod upload_singlepart;
+pub mod upload_multipart;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -19,7 +23,7 @@ use std::time::Instant;
 use crate::config_and_parameter_parsing::{parse_arguments, read_parameters_and_config_to_create_snow_config};
 use crate::error_print::{print_error, print_fatal_error};
 use tokio;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 use util_layer::snowcopy_result::SnowcopyResult;
 use util_layer::{SnowConfig, TransferMethod};
 
@@ -60,7 +64,7 @@ async fn main() {
             let config = Arc::new(config);
             let silent = config.silent;
             let res = match config.transfer_method {
-                TransferMethod::TokioSelfMade => upload::upload(config).await,
+                TransferMethod::TokioSelfMade => upload::run_upload(&config).await,
                 TransferMethod::TransferManager => {
                     transfer_manager::upload(config).await;
                     SnowcopyResult{fatal_error: None, error: None}
