@@ -12,7 +12,7 @@ impl SnowcopyOutput {
     pub fn new(output: Output) -> Self {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let combined_logs = format!("{}\n{}", stdout, stderr);
+        let combined_logs = format!("{}{}", stdout, stderr);
         let combined_log_lines: Vec<String> = combined_logs.lines().map(|line| line.to_string()).collect();
         Self {
             output,
@@ -28,7 +28,7 @@ impl SnowcopyOutput {
     }
 
     pub fn is_failure(&self, code: ErrorCode) -> bool {
-        !self.output.status.success() && code == ErrorCode::HttpUnsafeError
+        !self.output.status.success() && code.as_i32() == self.output.status.code().unwrap()
     }
 
     pub fn get_status(&self) -> &std::process::ExitStatus {

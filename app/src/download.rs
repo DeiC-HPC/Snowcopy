@@ -324,7 +324,7 @@ async fn download_full_file_and_check_integrity(pool_client: Arc<HyperClient>, c
                         cc_sender.send(CommandCenterEvent::FileIntegrityChecked(true)).expect("Failed to send message");
                     }
                 } else {
-                    cc_sender.send(CommandCenterEvent::Log("Skipping integrity check for file with no SHA256 checksum".to_string())).expect("Failed to send message"); //TODO JON: add a deeper log level
+                    cc_sender.send(CommandCenterEvent::Log(format!("Skipping integrity check for file with no SHA256 checksum: {}", object.key))).expect("Failed to send message"); //TODO JON: add a deeper log level
                     //silence, as we don't have info to do the check
                 }
             }
