@@ -50,7 +50,7 @@ pub fn auto_tune_upload(config: Arc<UploadConfig>, cc_tx: UnboundedSender<Comman
     }
 
     let _ = cc_tx.send(CommandCenterEvent::Log(format!(
-        "<Init. tuning: file_limit: {}, req_limit: {}, buffer_pool_size: {:.2} GiB>",
+        "<Auto-tuning: file_limit: {}, req_limit: {}, buffer_pool_size: {:.2} GiB>",
         file_limit,
         req_limit,
         buffer_pool_size as f64 / (1024.0 * 1024.0 * 1024.0)
@@ -74,7 +74,7 @@ pub fn auto_tune_download(config: Arc<DownloadConfig>, cc_tx: UnboundedSender<Co
     }
 
     let _ = cc_tx.send(CommandCenterEvent::Log(format!(
-        "<Init. tuning: file_limit: {}, req_limit: {}, download file concurrency: {}>",
+        "<Auto-tuning: file_limit: {}, req_limit: {}, download file concurrency: {}>",
         file_limit,
         req_limit,
         download_file_concurrency

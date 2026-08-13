@@ -17,7 +17,7 @@ async fn test_download_of_files_uploaded_by_other_tools() {
     env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&files_uploaded_by_snowcopy_with_metadata_for_integrity_checking);
     env.snowcopy_upload_test_upload_folder();
 
-    let s3_client = common::s3_test_client::create_aws_sdk_client(S3_ACCESS_KEY, S3_SECRET_KEY, format!("http://127.0.0.1:{}", env.minio_host_port).as_str(), "us-east-1").await;
+    let s3_client = common::s3_test_client::create_aws_sdk_client(S3_ACCESS_KEY, S3_SECRET_KEY, env.get_minio_url().as_str(), "us-east-1").await;
     s3_client.put_object().bucket(&env.unique_bucket).key("object with no metadata.txt").body(ByteStream::from("test".as_bytes().to_vec())).send().await.unwrap();
     s3_client.put_object().bucket(&env.unique_bucket).key("large multipart downloaded object with no metadata.txt").body(ByteStream::from(vec![0; (DOWNLOAD_MULTIPART_THRESHOLD as usize / 1024) * 2 + 1000])).send().await.unwrap();
 
