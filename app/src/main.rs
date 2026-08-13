@@ -12,10 +12,10 @@ mod error_print;
 mod list;
 mod remove;
 mod filesystem_checker;
-pub mod traits;
-pub mod bucket;
-pub mod upload_singlepart;
-pub mod upload_multipart;
+mod traits;
+mod bucket;
+mod upload_singlepart;
+mod upload_multipart;
 
 use std::sync::Arc;
 use std::time::Instant;
