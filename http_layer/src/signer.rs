@@ -261,7 +261,6 @@ pub fn aws_chunked_trailer_encoded_length(
     total += 1;                  // "0"
     total += sig_header_overhead; // ";chunk-signature=<sig>"
     total += 2;                  // "\r\n" after header line
-    total += 2;                  // "\r\n" empty line before trailers
 
     // 3) Trailing headers (raw, NOT in a chunk wrapper):
     //    "<trailerName>:<value>\r\n"

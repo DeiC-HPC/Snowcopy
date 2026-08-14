@@ -1,5 +1,5 @@
 use crate::signer::{sha256_hex, ChunkSigner, CredentialScope};
-use crate::{signer, HyperClient, ReadAt, StreamingBody};
+use crate::{send_request, signer, HyperClient, ReadAt, StreamingBody};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::{Body, Frame};
@@ -11,10 +11,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::SystemTime;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Semaphore;
 use util_layer::constants::{AMZ_CHECKSUM_SHA256, AMZ_CHUNK_SIGNATURE_HEADER, AMZ_STREAMING_TRAILER, AMZ_TRAILER_SIGNATURE, AWS_ALGORITHM, CHUNK_SIGNATURE_LENGTH, EMPTY_PAYLOAD_SHA256, TRAILER_HASH_LENGTH};
 use util_layer::snow_errors::SnowCopyError;
 use util_layer::{FileInfo, UploadConfig};
+use util_layer::cc_util::CommandCenterEvent;
 
 /// Upload a file using streaming for trailing headers.
 pub async fn put_file_streaming(
@@ -28,6 +30,7 @@ pub async fn put_file_streaming(
     req_sem: &Semaphore,
     canonical_uri: &String,
     query_uri: &String,
+    sender: UnboundedSender<CommandCenterEvent>,
 ) -> Result<(String, u64), SnowCopyError> {
     let req = create_streaming_req_trailing_checksum(
         ctx.clone(),
@@ -42,7 +45,7 @@ pub async fn put_file_streaming(
     )?;
 
     let permit = req_sem.acquire().await?;
-    let resp = client.request(req).await.map_err(SnowCopyError::from)?;
+    let resp = send_request(client,req, sender, ctx.verbose).await?;
 
     drop(permit);
 
@@ -264,7 +267,7 @@ impl StreamingFileChunkedBodyInner {
 
         write!(
             &mut self.chunk_buf,
-            "0;{}={}\r\n\r\n",
+            "0;{}={}\r\n",
             AMZ_CHUNK_SIGNATURE_HEADER,
             empty_sig
         ).unwrap();
