@@ -46,7 +46,14 @@ impl ChunkSigner {
         prev_signature: &str,
         chunk_hash: &str,
     ) -> String {
-        let string_to_sign = push_elements_to_string(&[AWS_CHUNK_PAYLOAD_ALGORITHM, amz_date, credential_scope, prev_signature, EMPTY_PAYLOAD_SHA256, chunk_hash]);
+        let string_to_sign = push_elements_to_string_newline_separated(
+            &[AWS_CHUNK_PAYLOAD_ALGORITHM,
+                amz_date,
+                credential_scope,
+                prev_signature,
+                EMPTY_PAYLOAD_SHA256,
+                chunk_hash]
+        );
 
         hex::encode(self.sign(string_to_sign.as_bytes()))
     }
@@ -64,7 +71,13 @@ impl ChunkSigner {
         let trailer_line = format!("{}:{}\n", trailer_name.to_lowercase(), trailer_value);
         let trailer_hash = sha256_hex(trailer_line.as_bytes());
 
-        let string_to_sign = push_elements_to_string(&[AWS_CHUNK_TRAILER_ALGORITHM, amz_date, credential_scope, prev_signature, trailer_hash.as_str()]);
+        let string_to_sign = push_elements_to_string_newline_separated(
+            &[AWS_CHUNK_TRAILER_ALGORITHM,
+                amz_date,
+                credential_scope,
+                prev_signature,
+                trailer_hash.as_str()]
+        );
 
         hex::encode(self.sign(string_to_sign.as_bytes()))
     }
@@ -132,7 +145,7 @@ pub fn get_s3_auth_header_and_signature(
     let hex_sha256 = sha256_hex(canonical_request.as_bytes());
 
     let timestamp_iso = credential_scope.timestamp.format("%Y%m%dT%H%M%SZ").to_string();
-    let string_to_sign = push_elements_to_string(
+    let string_to_sign = push_elements_to_string_newline_separated(
         &[algorithm,
         timestamp_iso.as_str(),
         credential_scope_str.as_str(),
@@ -254,9 +267,9 @@ pub fn aws_chunked_trailer_encoded_length(
 }
 
 /**
- * Pushes a list of elements to a string, separated by newline characters.
+ * Pushes a list of elements to a string, separated by newline characters. No newline is added to the end of the string.
  */
-fn push_elements_to_string(elements: &[&str]) -> String {
+fn push_elements_to_string_newline_separated(elements: &[&str]) -> String {
     let capacity = elements.iter().map(|element| element.len()).sum::<usize>()
         + elements.len().saturating_sub(1);
     let mut string_to_sign = String::with_capacity(capacity);
@@ -274,11 +287,10 @@ fn push_elements_to_string(elements: &[&str]) -> String {
 mod tests {
     use crate::signer::*;
 
-    
     #[test]
     fn test_push_elements_to_string() {
         let elements = ["element1", "element2", "element3"];
-        let result = push_elements_to_string(&elements);
+        let result = push_elements_to_string_newline_separated(&elements);
         assert_eq!(result, "element1\nelement2\nelement3");
     }
 

@@ -376,6 +376,8 @@ mod tests {
     use util_layer::traits::{MockFileHandler, MockFileObject, MockHttpExecutor};
     use util_layer::{EndpointConfig, FileInfo, HttpExecutorResponse, TransferMethod, UploadConfig};
 
+    const MOCK_OPEN_FILE_ERROR_MSG: &'static str = "mock open failure";
+
     // SinglePart
     #[tokio::test]
     async fn single_upload_sends_fatal_error_when_file_open_fails() {
@@ -388,7 +390,7 @@ mod tests {
         let runtime = test_upload_runtime(cc_tx.clone());
 
         let mut mock_file_handler = MockFileHandler::new();
-        mock_file_handler.expect_open_file().returning(|_| Err(std::io::Error::new(std::io::ErrorKind::Other, "mock open failure")));
+        mock_file_handler.expect_open_file().returning(|_| Err(std::io::Error::new(std::io::ErrorKind::Other, MOCK_OPEN_FILE_ERROR_MSG)));
 
         let single_upload = SingleUpload::new(
             config,
@@ -406,7 +408,7 @@ mod tests {
             CommandCenterEvent::FatalErrorEvent(error) => {
                 assert_eq!(error.code(), DiskIoError);
                 assert!(
-                    error.message().contains("mock open failure"),
+                    error.message().contains(MOCK_OPEN_FILE_ERROR_MSG),
                     "fatal error should mention the underlying open failure"
                 );
             }
@@ -479,7 +481,7 @@ mod tests {
         let mock_s3_client = Arc::new(aws_layer::S3Client::new(&config.endpoint, cc_tx.clone(), false).await);
 
         let mut mock_file_handler = MockFileHandler::new();
-        mock_file_handler.expect_open_file().returning(|_| Err(std::io::Error::new(std::io::ErrorKind::Other, "mock open failure")));
+        mock_file_handler.expect_open_file().returning(|_| Err(std::io::Error::new(std::io::ErrorKind::Other, MOCK_OPEN_FILE_ERROR_MSG)));
 
         let multipart_upload = MultipartUpload::new(
             config,
@@ -498,7 +500,7 @@ mod tests {
             CommandCenterEvent::FatalErrorEvent(error) => {
                 assert_eq!(error.code(), DiskIoError);
                 assert!(
-                    error.message().contains("mock open failure"),
+                    error.message().contains(MOCK_OPEN_FILE_ERROR_MSG),
                     "fatal error should mention the underlying open failure"
                 );
             }

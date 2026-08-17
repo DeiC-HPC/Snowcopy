@@ -47,7 +47,7 @@ impl UploadTrait for MultipartUpload {
     }
 }
 
-pub(crate) async fn upload_with_multipart(multipart: &MultipartUpload, file: Arc<dyn FileObject>) {
+async fn upload_with_multipart(multipart: &MultipartUpload, file: Arc<dyn FileObject>) {
     let chunk_amount = (multipart.file_info.file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
     let upload_id = multipart.aws_client.create_multipart_upload(&multipart.ctx.bucket, &*multipart.file_info.key, multipart.file_info.modified_time, CHUNK_SIZE).await.unwrap();

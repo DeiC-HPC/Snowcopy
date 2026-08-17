@@ -45,7 +45,7 @@ impl UploadTrait for SingleUpload {
     }
 }
 
-pub(crate) async fn small_file_upload(upload: &SingleUpload, file: Arc<dyn FileObject>) {
+async fn small_file_upload(upload: &SingleUpload, file: Arc<dyn FileObject>) {
     let canonical_uri = Arc::new(format!("/{}/{}", upload.ctx.bucket, upload.file_info.aws_uri_encoded_key));
     let query_uri = "".to_string();
 
