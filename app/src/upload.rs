@@ -161,8 +161,7 @@ pub(crate) async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtim
 
                     async move {
                         if ctx.trailing {
-                            let trailing_chunk_size = ctx.trailing_chunk_size;
-                            let req_result = create_streaming_req_trailing_checksum(ctx, &canonical_uri, &query_uri, file, start_pos, amount, file_info.modified_time, runtime.file_sem.clone(), trailing_chunk_size);
+                            let req_result = create_streaming_req_trailing_checksum(ctx, &canonical_uri, &query_uri, file, start_pos, amount, file_info.modified_time, runtime.file_sem.clone());
                             http_layer::upload_trailing::put_file_streaming(req_result.unwrap(), amount, http_executor, &runtime.req_sem).await
                         } else {
                             let req = create_in_memory_body_put_with_hashes(file, start_pos, amount, ctx, file_info, &runtime.file_sem, runtime.buffer_pool.clone(), &canonical_uri, &query_uri).await?;

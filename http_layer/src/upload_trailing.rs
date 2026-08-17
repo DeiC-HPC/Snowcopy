@@ -57,7 +57,6 @@ pub fn create_streaming_req_trailing_checksum(
     amount: u64,
     modified_time: Option<SystemTime>,
     file_sem: Arc<Semaphore>,
-    chunk_size: u64,
 ) -> Result<Request<StreamingBody>, SnowCopyError> {
     let credential_scope = CredentialScope {
         timestamp: chrono::Utc::now(),
@@ -94,7 +93,7 @@ pub fn create_streaming_req_trailing_checksum(
 
     let encoded_len = signer::aws_chunked_trailer_encoded_length(
         amount,
-        chunk_size,
+        ctx.trailing_chunk_size,
         AMZ_CHECKSUM_SHA256,    // TODO LND: We might want to support multiple checksums in the future (with their own trailer hash length)
         TRAILER_HASH_LENGTH,    // The length of the trailing checksum
     );
@@ -122,7 +121,7 @@ pub fn create_streaming_req_trailing_checksum(
         credential_scope_str,
         seed_signature,
         AMZ_CHECKSUM_SHA256.to_string(),
-        chunk_size
+        ctx.trailing_chunk_size
     );
 
     let body: StreamingBody = streaming_body.into_streaming_body();

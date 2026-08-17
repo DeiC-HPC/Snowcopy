@@ -61,8 +61,7 @@ pub(crate) async fn small_file_upload(upload: &SingleUpload, file: Arc<dyn FileO
 
             async move {
                 if ctx.trailing_small {
-                    let trailing_chunk_size = ctx.trailing_chunk_size;
-                    let req_result = create_streaming_req_trailing_checksum(ctx, &canonical_uri, &query_uri, file, 0, amount, file_info.modified_time, runtime.file_sem.clone(), trailing_chunk_size);
+                    let req_result = create_streaming_req_trailing_checksum(ctx, &canonical_uri, &query_uri, file, 0, amount, file_info.modified_time, runtime.file_sem.clone());
                     http_layer::upload_trailing::put_file_streaming(req_result.unwrap(), amount, upload.http_executor.clone(), &runtime.req_sem).await
                 } else {
                     let file_amount = file.length()?;
