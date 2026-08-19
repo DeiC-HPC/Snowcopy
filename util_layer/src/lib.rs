@@ -95,7 +95,7 @@ pub struct UploadConfig {
     pub transfer_method: TransferMethod,
     pub file_limit_overwrite: Option<usize>,
     pub req_limit_overwrite: Option<usize>,
-    pub silent: bool,
+    pub quiet: bool,
     pub verbose: bool,
     pub stats: bool,
     pub use_unsafe_http: bool,
@@ -115,7 +115,7 @@ pub struct DownloadConfig {
     pub file_limit_overwrite: Option<usize>,
     pub req_limit_overwrite: Option<usize>,
     pub download_concurrency_overwrite: Option<usize>,
-    pub silent: bool,
+    pub quiet: bool,
     pub verbose: bool,
     pub stats: bool,
     pub use_unsafe_http: bool,
@@ -138,7 +138,7 @@ pub struct ListConfig {
 pub struct RemoveConfig {
     pub endpoint: EndpointConfig,
     pub bucket: String,
-    pub silent: bool,
+    pub quiet: bool,
     pub verbose: bool,
     pub use_unsafe_http: bool,
     pub req_limit_overwrite: Option<usize>,
@@ -146,7 +146,7 @@ pub struct RemoveConfig {
 
 #[derive(Debug, Clone)]
 pub struct ConfigModeConfig {
-    pub silent: bool,
+    pub quiet: bool,
     pub config_path: Option<PathBuf>,
 }
 

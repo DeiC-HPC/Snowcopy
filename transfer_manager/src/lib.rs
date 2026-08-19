@@ -53,7 +53,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
             }
         };
 
-        if !ctx.silent {
+        if !ctx.quiet {
             println!("Uploading directory: {:?}", ctx.local_path);
         }
 
@@ -92,7 +92,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
             }
         };
 
-        if !ctx.silent {
+        if !ctx.quiet {
             println!("Uploading file: {:?}", ctx.local_path);
         }
 
@@ -102,7 +102,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
         }
     }
 
-    if !ctx.silent {
+    if !ctx.quiet {
         println!("Upload completed successfully.");
     }
 }
@@ -159,7 +159,7 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
             }
         };
 
-        if !ctx.silent {
+        if !ctx.quiet {
             println!("Downloading from bucket {} to {:?}", bucket, ctx.local_path);
         }
 
@@ -191,7 +191,7 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
             }
         };
 
-        if !ctx.silent {
+        if !ctx.quiet {
             println!("Downloading file {} to {:?}", key, ctx.local_path);
         }
 
@@ -220,7 +220,7 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
         }
     }
 
-    if !ctx.silent {
+    if !ctx.quiet {
         println!("Download completed successfully.");
     }
 }

@@ -1,8 +1,58 @@
 use crate::bucket_and_path_parser::ParsedInputPath;
 use clap::{Parser, Subcommand};
+use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 use util_layer::{ConfigModeConfig, DownloadConfig, EndpointConfig, ListConfig, RemoveConfig, SnowConfig, TransferMethod, UploadConfig};
 use util_layer::error_codes::ErrorCode::HttpUnsafeError;
+
+#[derive(Debug)]
+pub enum CliError {
+    UnsafeHttp(String),
+    ProfileNotFound(String),
+    ProfileNotUnique(String),
+    ProfileNoConfig(String),
+    ConfigError(String),
+    InvalidCommand(String),
+    RmNotSupportedForKey,
+}
+
+impl CliError {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            CliError::UnsafeHttp(_) => HttpUnsafeError.as_i32(),
+            _ => 1,
+        }
+    }
+}
+
+impl Display for CliError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CliError::UnsafeHttp(url) => write!(f, "Error: The endpoint {} uses the insecure HTTP protocol. \
+            Using HTTP can expose your data and credentials to potential security risks such as man-in-the-middle attacks. \
+            It is strongly recommended to use HTTPS instead. \
+            If you still wish to proceed, use the --use-unsafe-http flag.", url),
+            CliError::ProfileNotFound(profile) => write!(f, "Error loading configuration for profile '{}': Profile not found in configuration\nRun \"snowcopy config\" to configure profiles", profile),
+            CliError::ProfileNotUnique(profile) => write!(f, "Error loading configuration for profile '{}': Profile is not unique in configuration", profile),
+            CliError::ProfileNoConfig(profile) => write!(f, "Error loading configuration for profile '{}': Profile has no configuration", profile),
+            CliError::ConfigError(msg) => write!(f, "Error loading configuration: {}", msg),
+            CliError::InvalidCommand(msg) => write!(f, "Error: {}", msg),
+            CliError::RmNotSupportedForKey => write!(f, "Error: rm does not support deleting individual objects at this time"),
+        }
+    }
+}
+
+pub trait CredentialProvider {
+    fn gather(&self, profile_name: &str, config_path: Option<&PathBuf>) -> Result<EndpointConfig, CliError>;
+}
+
+pub struct FileCredentialProvider;
+
+impl CredentialProvider for FileCredentialProvider {
+    fn gather(&self, profile_name: &str, config_path: Option<&PathBuf>) -> Result<EndpointConfig, CliError> {
+        gather_credentials(profile_name, config_path)
+    }
+}
 
 #[derive(Parser)]
 #[command(
@@ -11,9 +61,9 @@ version = "0.1.0-alpha.1",
 about = "Fast S3 copy tool - ALPHA, use with caution.",
 after_help = "Examples:\n  upload:   snowcopy cp my-folder profile:bucket\n  upload:   snowcopy cp file.txt profile:bucket\n  download: snowcopy cp profile:bucket ."
 )]
-struct Cli {
+pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    command: Commands,
 
     #[arg(long, global = true, help = "Path to a config file to use instead of the default")]
     pub config: Option<PathBuf>,
@@ -24,7 +74,7 @@ struct Cli {
     #[arg(short = 'v', long, global = true, help = "Verbose mode (print http headers)")]
     pub verbose: bool,
 
-    #[arg(short = 'q', long, global = true, help = "Silent mode (no output)")]
+    #[arg(short = 'q', long, global = true, help = "Quiet/silent mode (no output)")]
     pub quiet: bool,
 
     #[arg(short = 'r', long, help = "Maximum number of concurrent requests")]
@@ -105,41 +155,50 @@ enum Commands {
 
 pub async fn read_and_validate_command_line_arguments() -> SnowConfig {
     let cli = Cli::parse();
+    let provider = FileCredentialProvider;
 
+    build_config(cli, &provider).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(e.exit_code());
+    })
+}
+
+pub fn build_config(cli: Cli, provider: &dyn CredentialProvider) -> Result<SnowConfig, CliError> {
     match cli.command {
         Commands::Config => {
-            SnowConfig::Config(ConfigModeConfig { silent : cli.quiet, config_path : cli.config })
+            Ok(SnowConfig::Config(ConfigModeConfig { quiet: cli.quiet, config_path : cli.config }))
         }
 
         Commands::Ls { input_path } => {
             match input_path {
                 ParsedInputPath::S3Server { profile } => {
-                    let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, cli.config.as_ref() , cli.use_unsafe_http);
+                    let endpoint = provider.gather(&profile, cli.config.as_ref())?;
+                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
 
-                    SnowConfig::List(ListConfig {
+                    Ok(SnowConfig::List(ListConfig {
                         endpoint,
                         bucket : None,
                         req_limit: cli.req_limit,
                         verbose : cli.verbose,
                         use_unsafe_http : cli.use_unsafe_http,
-                    })
+                    }))
                 }
 
                 ParsedInputPath::S3Bucket { profile, bucket, .. } => {
-                    let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, cli.config.as_ref(), cli.use_unsafe_http);
+                    let endpoint = provider.gather(&profile, cli.config.as_ref())?;
+                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
 
-                    SnowConfig::List(ListConfig {
+                    Ok(SnowConfig::List(ListConfig {
                         endpoint,
                         bucket : Some(bucket),
                         req_limit: cli.req_limit,
                         verbose : cli.verbose,
                         use_unsafe_http : cli.use_unsafe_http,
-                    })
+                    }))
                 }
 
                 _ => {
-                    eprintln!("Error: ls requires either profile: or profile:bucket (if bucket is empty, all buckets are listed)");
-                    std::process::exit(1);
+                    Err(CliError::InvalidCommand("ls requires either profile: or profile:bucket (if bucket is empty, all buckets are listed)".to_string()))
                 }
             }
         }
@@ -148,41 +207,41 @@ pub async fn read_and_validate_command_line_arguments() -> SnowConfig {
             match input_path {
                 ParsedInputPath::S3Bucket { profile, bucket, key } => {
                     if key.is_some() {
-                        eprintln!("Error: rm does not support deleting individual objects at this time");
-                        std::process::exit(1);
+                        return Err(CliError::RmNotSupportedForKey);
                     }
 
-                    let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, cli.config.as_ref(), cli.use_unsafe_http);
+                    let endpoint = provider.gather(&profile, cli.config.as_ref())?;
+                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
 
-                    SnowConfig::Remove(RemoveConfig {
+                    Ok(SnowConfig::Remove(RemoveConfig {
                         endpoint,
                         bucket,
-                        silent : cli.quiet,
+                        quiet: cli.quiet,
                         verbose : cli.verbose,
                         use_unsafe_http : cli.use_unsafe_http,
                         req_limit_overwrite : cli.req_limit,
-                    })
+                    }))
                 }
 
                 _ => {
-                    eprintln!("Error: ls requires either profile: or profile:bucket (if bucket is empty, all buckets are listed)");
-                    std::process::exit(1);
+                    Err(CliError::InvalidCommand("ls requires either profile: or profile:bucket (if bucket is empty, all buckets are listed)".to_string()))
                 }
             }
         }
 
         Commands::Cp { src, dest, transfer, upload, download } => {
             match (&src, &dest) {
-                (ParsedInputPath::Local( local_path), ParsedInputPath::S3Bucket { profile, bucket, key }) => {
-                    let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, cli.config.as_ref(), cli.use_unsafe_http);
+                (ParsedInputPath::Local( local_path), ParsedInputPath::S3Bucket { profile, bucket, .. }) => {
+                    let endpoint = provider.gather(&profile, cli.config.as_ref())?;
+                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
 
-                    SnowConfig::Upload(UploadConfig {
+                    Ok(SnowConfig::Upload(UploadConfig {
                         endpoint: endpoint.clone(),
                         md5_checksum_integrity_is_disabled: transfer.disable_md5_checksum,
                         transfer_method : transfer.transfer_method,
                         file_limit_overwrite : transfer.file_limit,
                         req_limit_overwrite : cli.req_limit,
-                        silent : cli.quiet,
+                        quiet: cli.quiet,
                         verbose : cli.verbose,
                         stats : transfer.stats,
                         use_unsafe_http : cli.use_unsafe_http,
@@ -192,20 +251,21 @@ pub async fn read_and_validate_command_line_arguments() -> SnowConfig {
                         open_file_limit_overwrite : transfer.open_file_limit,
                         bucket : bucket.clone(),
                         local_path : local_path.clone(),
-                    })
+                    }))
                 }
 
                 (ParsedInputPath::S3Bucket { profile, bucket, .. }, ParsedInputPath::Local(local_path)) => {
-                    let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, cli.config.as_ref(), cli.use_unsafe_http);
+                    let endpoint = provider.gather(&profile, cli.config.as_ref())?;
+                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
 
-                    SnowConfig::Download(DownloadConfig {
+                    Ok(SnowConfig::Download(DownloadConfig {
                         endpoint: endpoint.clone(),
                         md5_checksum_integrity_is_disabled: transfer.disable_md5_checksum,
                         transfer_method : transfer.transfer_method,
                         file_limit_overwrite : transfer.file_limit,
                         req_limit_overwrite  : cli.req_limit,
                         download_concurrency_overwrite : download.download_single_file_concurrency_limit,
-                        silent : cli.quiet,
+                        quiet: cli.quiet,
                         verbose : cli.verbose,
                         stats : transfer.stats,
                         use_unsafe_http : cli.use_unsafe_http,
@@ -213,43 +273,28 @@ pub async fn read_and_validate_command_line_arguments() -> SnowConfig {
                         bucket : bucket.clone(),
                         local_path: local_path.clone(),
                         prefix : String::new() //TODO Jon: add support for prefix
-                    })
+                    }))
                 }
 
                 _ => {
-                    eprintln!("Invalid source/destination combination. Use \"snowcopy cp <src> <dest>\", where <src> and <dest> are either a local folder or a profile:bucket.");
-                    std::process::exit(1);
+                    Err(CliError::InvalidCommand("Invalid source/destination combination. Use \"snowcopy cp <src> <dest>\", where <src> and <dest> are either a local folder or a profile:bucket.".to_string()))
                 }
             }
         }
     }
 }
-fn load_endpoint_and_stop_program_with_error_if_it_fails(profile: &String, config_path: Option<&std::path::PathBuf>, http_allowed: bool) -> EndpointConfig {
-    let endpoint = match gather_credentials(&profile, config_path) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("Error loading configuration for profile '{}': {}\nRun \"snowcopy config\" to configure profiles", profile, e);
-            std::process::exit(1);
-        }
-    };
-    check_http_safeguard(&endpoint, http_allowed);
-    endpoint
-}
 
-fn check_http_safeguard(endpoint: &EndpointConfig, use_unsafe_http: bool) {
+fn check_http_safeguard(endpoint: &EndpointConfig, use_unsafe_http: bool) -> Result<(), CliError> {
     if !use_unsafe_http {
         if let util_layer::url_parser::S3EndpointType::HTTP = util_layer::url_parser::validate_s3_endpoint(&endpoint.s3_url) {
-            eprintln!("Error: The endpoint {} uses the insecure HTTP protocol. \
-            Using HTTP can expose your data and credentials to potential security risks such as man-in-the-middle attacks. \
-            It is strongly recommended to use HTTPS instead. \
-            If you still wish to proceed, use the --use-unsafe-http flag.", endpoint.s3_url);
-            std::process::exit(HttpUnsafeError.as_i32());
+            return Err(CliError::UnsafeHttp(endpoint.s3_url.clone()));
         }
     }
+    Ok(())
 }
 
-pub fn gather_credentials(profile_name: &str, config_path: Option<&std::path::PathBuf>) -> anyhow::Result<EndpointConfig> {
-    let app_config = config::load_config(config_path.cloned())?;
+pub fn gather_credentials(profile_name: &str, config_path: Option<&std::path::PathBuf>) -> Result<EndpointConfig, CliError> {
+    let app_config = config::load_config(config_path.cloned()).map_err(|e| CliError::ConfigError(e.to_string()))?;
 
     let matches: Vec<_> = app_config
         .endpoints
@@ -258,16 +303,150 @@ pub fn gather_credentials(profile_name: &str, config_path: Option<&std::path::Pa
         .collect();
 
     if matches.is_empty() {
-        anyhow::bail!("Profile '{}' not found in configuration", profile_name);
+        return Err(CliError::ProfileNotFound(profile_name.to_string()));
     }
 
     if matches.len() > 1 {
-        anyhow::bail!("Profile '{}' is not unique in configuration", profile_name);
+        return Err(CliError::ProfileNotUnique(profile_name.to_string()));
     }
 
     if let Some(endpoint_config) = &matches[0].config {
         return Ok(endpoint_config.clone());
     }
 
-    anyhow::bail!("Profile '{}' has no configuration", profile_name)
+    Err(CliError::ProfileNoConfig(profile_name.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bucket_and_path_parser::ParsedInputPath;
+
+    const PROFILE: &str = "lumi";
+    const HTTP_PROFILE: &str = "http-profile";
+    const NOT_EXISTING_PROFILE: &str = "I-Dont-Exist";
+    struct MockProvider;
+    impl CredentialProvider for MockProvider {
+        fn gather(&self, profile_name: &str, _config_path: Option<&PathBuf>) -> Result<EndpointConfig, CliError> {
+            if profile_name == PROFILE {
+                Ok(EndpointConfig {
+                    s3_url: "https://lumidata.eu".to_string(),
+                    ..Default::default()
+                })
+            } else if profile_name == HTTP_PROFILE {
+                Ok(EndpointConfig {
+                    s3_url: "http://localhost:9000".to_string(),
+                    ..Default::default()
+                })
+            } else {
+                Err(CliError::ProfileNotFound(profile_name.to_string()))
+            }
+        }
+    }
+
+    #[test]
+    fn parses_ls_bucket() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "ls",
+            &format!("{PROFILE}:mybucket"),
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Ls { input_path } => {
+                match input_path {
+                    ParsedInputPath::S3Bucket { profile, bucket, .. } => {
+                        assert_eq!(profile, PROFILE);
+                        assert_eq!(bucket, "mybucket");
+                    }
+                    _ => panic!("Expected S3Bucket"),
+                }
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn ls_bucket_creates_list_config() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "--req-limit", "20",
+            "ls",
+            &format!("{PROFILE}:data"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider).unwrap();
+
+        match result {
+            SnowConfig::List(cfg) => {
+                assert_eq!(cfg.bucket, Some("data".to_string()));
+                assert_eq!(cfg.req_limit, Some(20));
+            }
+            _ => panic!("expected List config"),
+        }
+    }
+
+    #[test]
+    fn rejects_http_endpoint() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "ls",
+            &format!("{HTTP_PROFILE}:data"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider);
+
+        assert!(matches!(result, Err(CliError::UnsafeHttp(_))));
+    }
+
+    #[test]
+    fn accepts_http_endpoint_with_flag() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "--use-unsafe-http",
+            "ls",
+            &format!("{HTTP_PROFILE}:data"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider).unwrap();
+        assert!(matches!(result, SnowConfig::List(_)));
+    }
+
+    #[test]
+    fn rm_rejects_key() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "rm",
+            &format!("{PROFILE}:bucket/key")
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider);
+        assert!(matches!(result, Err(CliError::RmNotSupportedForKey)));
+    }
+
+    #[test]
+    fn cp_local_to_s3() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "cp",
+            "local_path",
+            &format!("{PROFILE}:bucket"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider).unwrap();
+
+        match result {
+            SnowConfig::Upload(cfg) => {
+                assert_eq!(cfg.bucket, "bucket");
+                assert_eq!(cfg.local_path, PathBuf::from("local_path"));
+            }
+            _ => panic!("expected Upload config"),
+        }
+    }
 }

@@ -42,7 +42,7 @@ async fn main() {
     let result = match snow_config {
         SnowConfig::Download(config) => {
             let config = Arc::new(config);
-            let silent = config.silent;
+            let silent = config.quiet;
             let res = match config.transfer_method {
                 TransferMethod::TokioSelfMade => download::download(config).await,
                 TransferMethod::TransferManager => {
@@ -57,7 +57,7 @@ async fn main() {
         }
         SnowConfig::Upload(config) => {
             let config = Arc::new(config);
-            let silent = config.silent;
+            let silent = config.quiet;
             let res = match config.transfer_method {
                 TransferMethod::TokioSelfMade => upload::upload(config).await,
                 TransferMethod::TransferManager => {
@@ -75,7 +75,7 @@ async fn main() {
         }
         
         SnowConfig::Remove(config) => {
-            let silent = config.silent;
+            let silent = config.quiet;
             let res = remove::remove(config).await;
             if !silent {
                 println!("Program execution time: {:.2?}", start_time.elapsed());
