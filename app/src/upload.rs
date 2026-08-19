@@ -15,15 +15,15 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::{CommandCenterEvent, Status};
 use util_layer::constants;
-use util_layer::constants::CHUNK_SIZE;
+use util_layer::constants::{ALPHA_FILE_SIZE_UPLOAD_LIMIT, CHUNK_SIZE};
+use util_layer::error_codes::ErrorCode::{AlphaFileSizeLimitExceeded, DiskIoError, RequestFailure, Unknown};
 use util_layer::error_codes::UserFacingError;
-use util_layer::error_codes::ErrorCode::{DiskIoError, RequestFailure, Unknown};
 use util_layer::retry::retry_on_failure_async;
 use util_layer::snow_errors::SnowCopyError;
+use util_layer::snowcopy_result::SnowcopyResult;
 use util_layer::url_encoder::url_encode_fast;
 use util_layer::{FileInfo, UploadConfig};
 use walkdir::WalkDir;
-use util_layer::snowcopy_result::SnowcopyResult;
 
 pub async fn upload(ctx: Arc<UploadConfig>) -> SnowcopyResult {
     if !ctx.local_path.to_path_buf().exists(){
@@ -370,6 +370,10 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
         let file_size = metadata.len();
         let modified_time = metadata.modified().ok();
 
+        if report_file_too_large(&base_path, &cc_tx, file_size, ALPHA_FILE_SIZE_UPLOAD_LIMIT) {
+            return rx;
+        }
+
         cc_tx.send(CommandCenterEvent::FileDiscovered(file_size)).expect("Failed to send message to command center. Should never happen.");
 
         let key = base_path.file_name().unwrap().to_string_lossy().into_owned();
@@ -403,6 +407,10 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
                         let modified_time = metadata.modified().ok();
                         let file_path = entry.path().to_path_buf();
 
+                        if report_file_too_large(&file_path, &cc_tx, file_size, ALPHA_FILE_SIZE_UPLOAD_LIMIT) {
+                            continue
+                        }
+
                         let relative_path = file_path.strip_prefix(&base_path_for_relative)
                             .expect("base_path_for_relative should be a prefix of file_path. This error should never occur.");
 
@@ -429,6 +437,16 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
     rx
 }
 
+fn report_file_too_large(base_path: &PathBuf, cc_tx: &UnboundedSender<CommandCenterEvent>, file_size: u64, file_size_limit: u64) -> bool {
+    if file_size > file_size_limit {
+        cc_tx.send(CommandCenterEvent::Log(format!("SKIPPING file {} because it is too large ({} bytes). This is only an alpha limitation.", base_path.display(), file_size))).expect("Failed to send message to command center. Should never happen.");
+        cc_tx.send(CommandCenterEvent::ErrorEvent(UserFacingError::new(AlphaFileSizeLimitExceeded, format!("One more files skipped due to size limit of {} bytes (~50GB) in alpha", file_size_limit)))).expect("Failed to send message. This should never happen.");
+
+        return true;
+    }
+    false
+}
+
 pub struct UploadRuntime {
     pub file_sem: Arc<Semaphore>,
     pub req_sem: Semaphore,
@@ -436,4 +454,39 @@ pub struct UploadRuntime {
     pub buffer_pool: Arc<BufferPool>,
     pub cc_tx: UnboundedSender<CommandCenterEvent>,
     pub cancellation_token: CancellationToken
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sends_limit_error_event() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        report_file_too_large(
+            &PathBuf::from("large_file.zip"),
+            &tx,
+            100,
+            50, //limit lower than file
+        );
+
+        //log event
+        let event = rx.try_recv().unwrap();
+        match event {
+            CommandCenterEvent::Log(msg) => {
+                assert!(msg.contains("large_file.zip"));
+            }
+            _ => panic!("Expected Log event"),
+        }
+
+        //error event
+        let event = rx.try_recv().unwrap();
+        match event {
+            CommandCenterEvent::ErrorEvent(error) => {
+                assert_eq!(error.code(), AlphaFileSizeLimitExceeded);
+            }
+            _ => panic!("Expected Error event"),
+        }
+    }
 }

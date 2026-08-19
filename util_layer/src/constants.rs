@@ -31,3 +31,5 @@ pub const AMZ_TRAILER_SIGNATURE: &str = "x-amz-trailer-signature";
 pub const STREAMING_READ_BUFFER_SIZE_IN_KB: u64 = 128; // In KiloByte
 pub const CHUNK_SIGNATURE_LENGTH: usize = 83; // The fixed length of chars for a chunk signature for trailing headers (Sha256)
 pub const TRAILER_HASH_LENGTH: usize = 44;  // The fixed length of a trailer hash (Sha256)
+
+pub const ALPHA_FILE_SIZE_UPLOAD_LIMIT: u64 = 5 * 1024 * 1024 * 10000; //10,000 multipart uploads of 5MB each

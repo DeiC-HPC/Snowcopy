@@ -7,6 +7,7 @@ pub enum ErrorCode {
     DiskIoError = 4,
     HttpUnsafeError = 5,
     SkippedInvalidKeysDownload = 6,
+    AlphaFileSizeLimitExceeded = 7,
 }
 
 impl ErrorCode {
