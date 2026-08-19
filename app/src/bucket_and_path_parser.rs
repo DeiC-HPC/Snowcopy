@@ -1,21 +1,46 @@
 use std::path::PathBuf;
 
-#[derive(Debug, PartialEq)]
-pub enum PathPattern {
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParsedInputPath {
     Local(PathBuf),
-    S3 {
+    S3Bucket {
         profile: String,
         bucket: String,
         key: Option<String>,
     },
+    S3Server {
+        profile: String,
+    }
+
 }
 
-impl PathPattern {
-    pub fn parse(input: &str) -> Self {
+impl ParsedInputPath {
+    pub fn parse_and_validate(input: &str) -> Self {
+        let pattern = Self::parse(input);
+        match &pattern {
+            ParsedInputPath::Local(_) => {
+                pattern
+            },
+
+            ParsedInputPath::S3Bucket { bucket, .. } => {
+                if let Err(e) = ParsedInputPath::validate_bucket_name(&bucket) {
+                    eprintln!("Error: Invalid bucket name '{}': {}", bucket, e);
+                    std::process::exit(1);
+                }
+
+                pattern
+            }
+            ParsedInputPath::S3Server { .. } => {
+                pattern
+            }
+        }
+    }
+
+    fn parse(input: &str) -> Self {
         if let Some(colon_idx) = input.find(':') {
             // Check if it looks like a Windows drive letter (e.g., C:\)
             if colon_idx == 1 && input.len() > 2 && (input.as_bytes()[2] == b'\\' || input.as_bytes()[2] == b'/') {
-                return PathPattern::Local(PathBuf::from(input));
+                return ParsedInputPath::Local(PathBuf::from(input));
             }
 
             let profile = input[..colon_idx].to_string();
@@ -25,21 +50,24 @@ impl PathPattern {
                 let bucket = remainder[..slash_idx].to_string();
                 let key = &remainder[slash_idx + 1..];
                 let key = if key.is_empty() { None } else { Some(key.to_string()) };
-                PathPattern::S3 { profile, bucket, key }
+                ParsedInputPath::S3Bucket { profile, bucket, key }
             } else {
-                PathPattern::S3 {
-                    profile,
-                    bucket: remainder.to_string(),
-                    key: None,
+                if remainder.is_empty() {
+                    ParsedInputPath::S3Server {
+                        profile,
+                    }
+                } else {
+                    ParsedInputPath::S3Bucket {
+                        profile,
+                        bucket: remainder.to_string(),
+                        key: None,
+                    }
                 }
+
             }
         } else {
-            PathPattern::Local(PathBuf::from(input))
+            ParsedInputPath::Local(PathBuf::from(input))
         }
-    }
-
-    pub fn is_bucket_empty(bucket: &str) -> bool {
-        bucket.is_empty()
     }
 
     /// Validates an S3 bucket name according to AWS rules.
@@ -55,7 +83,7 @@ impl PathPattern {
     /// - Not end with '-s3alias', '--ol-s3', '.mrap', '--x-s3', or '--table-s3'.
     pub fn validate_bucket_name(bucket: &str) -> Result<(), String> {
         //TODO JON: Should we even care about aws special names? https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html
-        //TODO JON: I'm unsure if a user would need to upload/download to the special buckets directly, which would mean they are valid
+        //TODO JON: I'm unsure if a user would need to download from the special buckets directly, which would mean they are valid. We could just let the S3 servers throw errors if they are invalid for them.
         if bucket.len() < 3 || bucket.len() > 63 {
             return Err("Bucket name must be between 3 and 63 characters long".to_string());
         }
@@ -124,69 +152,67 @@ mod tests {
 
     #[test]
     fn test_parse_local() {
-        assert_eq!(PathPattern::parse("../some-folder/file"), PathPattern::Local(PathBuf::from("../some-folder/file")));
-        assert_eq!(PathPattern::parse("C:\\Users\\test"), PathPattern::Local(PathBuf::from("C:\\Users\\test")));
+        assert_eq!(ParsedInputPath::parse("../some-folder/file"), ParsedInputPath::Local(PathBuf::from("../some-folder/file")));
+        assert_eq!(ParsedInputPath::parse("C:\\Users\\test"), ParsedInputPath::Local(PathBuf::from("C:\\Users\\test")));
     }
 
     #[test]
     fn test_parse_s3() {
         assert_eq!(
-            PathPattern::parse("lumi:"),
-            PathPattern::S3 {
+            ParsedInputPath::parse("lumi:"),
+            ParsedInputPath::S3Server {
                 profile: "lumi".to_string(),
-                bucket: "".to_string(),
-                key: None
             }
         );
         assert_eq!(
-            PathPattern::parse("lumi:my-bucket"),
-            PathPattern::S3 {
+            ParsedInputPath::parse("lumi:my-bucket"),
+            ParsedInputPath::S3Bucket {
                 profile: "lumi".to_string(),
                 bucket: "my-bucket".to_string(),
-                key: None
+                key: None,
             }
         );
         assert_eq!(
-            PathPattern::parse("lumi:my-bucket/some/path"),
-            PathPattern::S3 {
+            ParsedInputPath::parse("lumi:my-bucket/some/path"),
+            ParsedInputPath::S3Bucket {
                 profile: "lumi".to_string(),
                 bucket: "my-bucket".to_string(),
-                key: Some("some/path".to_string())
+                key: Some("some/path".to_string()),
             }
         );
         assert_eq!(
-            PathPattern::parse("lumi:my-bucket/"),
-            PathPattern::S3 {
+            ParsedInputPath::parse("lumi:my-bucket/"),
+            ParsedInputPath::S3Bucket {
                 profile: "lumi".to_string(),
                 bucket: "my-bucket".to_string(),
-                key: None
+                key: None,
             }
         );
     }
 
     #[test]
     fn test_validate_bucket_name() {
-        assert!(PathPattern::validate_bucket_name("my-bucket").is_ok());
-        assert!(PathPattern::validate_bucket_name("my.bucket").is_ok());
-        assert!(PathPattern::validate_bucket_name("123-bucket").is_ok());
-        assert!(PathPattern::validate_bucket_name("bucket-123").is_ok());
+        assert!(ParsedInputPath::validate_bucket_name("my-bucket").is_ok());
+        assert!(ParsedInputPath::validate_bucket_name("my.bucket").is_ok());
+        assert!(ParsedInputPath::validate_bucket_name("123-bucket").is_ok());
+        assert!(ParsedInputPath::validate_bucket_name("bucket-123").is_ok());
 
-        assert!(PathPattern::validate_bucket_name("ab").is_err()); // Too short
-        assert!(PathPattern::validate_bucket_name(&"a".repeat(64)).is_err()); // Too long
-        assert!(PathPattern::validate_bucket_name("MyBucket").is_err()); // Uppercase
-        assert!(PathPattern::validate_bucket_name("-bucket").is_err()); // Starts with hyphen
-        assert!(PathPattern::validate_bucket_name("bucket-").is_err()); // Ends with hyphen
-        assert!(PathPattern::validate_bucket_name(".bucket").is_err()); // Starts with dot
-        assert!(PathPattern::validate_bucket_name("bucket.").is_err()); // Ends with dot
-        assert!(PathPattern::validate_bucket_name("bucket..name").is_err()); // Adjacent dots
-        assert!(PathPattern::validate_bucket_name("192.168.1.1").is_err()); // IP address
-        assert!(PathPattern::validate_bucket_name("xn--bucket").is_err()); // Reserved prefix
-        assert!(PathPattern::validate_bucket_name("sthree-bucket").is_err()); // Reserved prefix
-        assert!(PathPattern::validate_bucket_name("amzn-s3-demo-bucket").is_err()); // Reserved prefix
-        assert!(PathPattern::validate_bucket_name("bucket-s3alias").is_err()); // Reserved suffix
-        assert!(PathPattern::validate_bucket_name("bucket--ol-s3").is_err()); // Reserved suffix
-        assert!(PathPattern::validate_bucket_name("bucket.mrap").is_err()); // Reserved suffix
-        assert!(PathPattern::validate_bucket_name("bucket--x-s3").is_err()); // Reserved suffix
-        assert!(PathPattern::validate_bucket_name("bucket--table-s3").is_err()); // Reserved suffix
+        assert!(ParsedInputPath::validate_bucket_name("ab").is_err()); // Too short
+        assert!(ParsedInputPath::validate_bucket_name(&"a".repeat(64)).is_err()); // Too long
+        assert!(ParsedInputPath::validate_bucket_name("MyBucket").is_err()); // Uppercase
+        assert!(ParsedInputPath::validate_bucket_name("-bucket").is_err()); // Starts with hyphen
+        assert!(ParsedInputPath::validate_bucket_name("bucket-").is_err()); // Ends with hyphen
+        assert!(ParsedInputPath::validate_bucket_name(".bucket").is_err()); // Starts with dot
+        assert!(ParsedInputPath::validate_bucket_name("bucket.").is_err()); // Ends with dot
+        assert!(ParsedInputPath::validate_bucket_name("bucket..name").is_err()); // Adjacent dots
+        assert!(ParsedInputPath::validate_bucket_name("192.168.1.1").is_err()); // IP address
+        assert!(ParsedInputPath::validate_bucket_name("xn--bucket").is_err()); // Reserved prefix
+        assert!(ParsedInputPath::validate_bucket_name("sthree-bucket").is_err()); // Reserved prefix
+        assert!(ParsedInputPath::validate_bucket_name("amzn-s3-demo-bucket").is_err()); // Reserved prefix
+        assert!(ParsedInputPath::validate_bucket_name("bucket-s3alias").is_err()); // Reserved suffix
+        assert!(ParsedInputPath::validate_bucket_name("bucket--ol-s3").is_err()); // Reserved suffix
+        assert!(ParsedInputPath::validate_bucket_name("bucket.mrap").is_err()); // Reserved suffix
+        assert!(ParsedInputPath::validate_bucket_name("bucket--x-s3").is_err()); // Reserved suffix
+        assert!(ParsedInputPath::validate_bucket_name("bucket--table-s3").is_err()); // Reserved suffix
     }
 }

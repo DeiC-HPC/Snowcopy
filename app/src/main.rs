@@ -12,11 +12,12 @@ mod error_print;
 mod list;
 mod remove;
 mod filesystem_checker;
+mod bucket_and_path_parser;
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::config_and_parameter_parsing::{parse_arguments, read_parameters_and_config_to_create_snow_config};
+use crate::config_and_parameter_parsing::read_and_validate_command_line_arguments;
 use crate::error_print::{print_error, print_fatal_error};
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -36,9 +37,7 @@ async fn main() {
     let start_time = Instant::now();
     init_logging();
 
-    // Read Commandline Arguments
-    let matches = parse_arguments();
-    let snow_config = read_parameters_and_config_to_create_snow_config(&matches).await;
+    let snow_config = read_and_validate_command_line_arguments().await;
 
     let result = match snow_config {
         SnowConfig::Download(config) => {
