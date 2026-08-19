@@ -167,7 +167,7 @@ async fn create_in_memory_body_put_with_hashes(file: Arc<File>, start: u64, amou
 
     let future = tokio::task::spawn_blocking(
         move || -> Result<(String, Option<String>, Vec<u8>), SnowCopyError> {
-            let mut md5_hasher: Option<Hasher> = if cloned_ctx.md5_checksum_upload {
+            let mut md5_hasher: Option<Hasher> = if !cloned_ctx.md5_checksum_integrity_is_disabled {
                 Some(Hasher::new(MessageDigest::md5())?)
             } else {
                 None

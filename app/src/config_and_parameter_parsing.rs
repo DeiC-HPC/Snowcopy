@@ -174,15 +174,14 @@ pub async fn read_and_validate_command_line_arguments() -> SnowConfig {
         Commands::Cp { src_str, dest_str, transfer, upload, download } => {
             let src = ParsedInputPath::parse_and_validate(src_str.as_str());
             let dest = ParsedInputPath::parse_and_validate(dest_str.as_str());
-
-
+            
             match (&src, &dest) {
                 (ParsedInputPath::Local( local_path), ParsedInputPath::S3Bucket { profile, bucket, key }) => {
                     let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, cli.config.as_ref(), cli.use_unsafe_http);
 
                     SnowConfig::Upload(UploadConfig {
                         endpoint: endpoint.clone(),
-                        md5_checksum_upload: transfer.disable_md5_checksum,
+                        md5_checksum_integrity_is_disabled: transfer.disable_md5_checksum,
                         transfer_method : transfer.transfer_method,
                         file_limit_overwrite : transfer.file_limit,
                         req_limit_overwrite : cli.req_limit,
@@ -204,7 +203,7 @@ pub async fn read_and_validate_command_line_arguments() -> SnowConfig {
 
                     SnowConfig::Download(DownloadConfig {
                         endpoint: endpoint.clone(),
-                        md5_checksum_integrity : transfer.disable_md5_checksum,
+                        md5_checksum_integrity_is_disabled: transfer.disable_md5_checksum,
                         transfer_method : transfer.transfer_method,
                         file_limit_overwrite : transfer.file_limit,
                         req_limit_overwrite  : cli.req_limit,

@@ -203,7 +203,7 @@ fn should_download_object(object: &mut S3Object) -> bool {
 }
 
 async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConfig>, object: S3Object, req_sem: Arc<Semaphore>, cc_sender: UnboundedSender<CommandCenterEvent>, download_file_concurrency: usize, disk_write_tx: Sender<WriteMsg>, cancellation_token: CancellationToken) {
-    let multipart_integrity_verification = config.md5_checksum_integrity && reconstructable_multipart_etag(&object);
+    let multipart_integrity_verification = !config.md5_checksum_integrity_is_disabled && reconstructable_multipart_etag(&object);
 
     if (object.size > DOWNLOAD_MULTIPART_THRESHOLD as i64 && !object.sha256_checksum.is_none()) || multipart_integrity_verification { //if sha256_checksum is present without multipart-etag download the simple way
         let file_path = object.local_path.clone();

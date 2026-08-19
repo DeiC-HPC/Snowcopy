@@ -91,7 +91,7 @@ impl std::str::FromStr for TransferMethod {
 #[derive(Debug, Clone)]
 pub struct UploadConfig {
     pub endpoint: EndpointConfig,
-    pub md5_checksum_upload: bool,
+    pub md5_checksum_integrity_is_disabled: bool,
     pub transfer_method: TransferMethod,
     pub file_limit_overwrite: Option<usize>,
     pub req_limit_overwrite: Option<usize>,
@@ -110,7 +110,7 @@ pub struct UploadConfig {
 #[derive(Debug, Clone)]
 pub struct DownloadConfig {
     pub endpoint: EndpointConfig,
-    pub md5_checksum_integrity: bool,
+    pub md5_checksum_integrity_is_disabled: bool,
     pub transfer_method: TransferMethod,
     pub file_limit_overwrite: Option<usize>,
     pub req_limit_overwrite: Option<usize>,
