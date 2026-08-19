@@ -76,21 +76,21 @@ enum Commands {
     #[command(about = "List buckets and bucket contents")]
     Ls {
         #[arg(help = "Either profile: or profile:bucket (if bucket is empty, all buckets are listed)")]
-        input_path: String,
+        input_path: ParsedInputPath,
     },
 
     #[command(about = "Remove/delete a bucket along with ALL its contents")]
     Rm {
         #[arg(help = "profile:bucket")]
-        input_path: String,
+        input_path: ParsedInputPath,
     },
 
     #[command(about = "Upload or download files")]
     Cp {
         #[arg(value_name = "Source", help = "Either a local folder/file or profile:bucket")]
-        src_str: String,
+        src: ParsedInputPath,
         #[arg(value_name = "Destination", help = "Either a local folder or profile:bucket")]
-        dest_str: String,
+        dest: ParsedInputPath,
 
         #[command(flatten)]
         transfer: TransferOptions,
@@ -112,7 +112,7 @@ pub async fn read_and_validate_command_line_arguments() -> SnowConfig {
         }
 
         Commands::Ls { input_path } => {
-            match ParsedInputPath::parse_and_validate(&input_path) {
+            match input_path {
                 ParsedInputPath::S3Server { profile } => {
                     let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, cli.config.as_ref() , cli.use_unsafe_http);
 
@@ -145,7 +145,7 @@ pub async fn read_and_validate_command_line_arguments() -> SnowConfig {
         }
 
         Commands::Rm { input_path } => {
-            match ParsedInputPath::parse_and_validate(&input_path) {
+            match input_path {
                 ParsedInputPath::S3Bucket { profile, bucket, key } => {
                     if key.is_some() {
                         eprintln!("Error: rm does not support deleting individual objects at this time");
@@ -171,10 +171,7 @@ pub async fn read_and_validate_command_line_arguments() -> SnowConfig {
             }
         }
 
-        Commands::Cp { src_str, dest_str, transfer, upload, download } => {
-            let src = ParsedInputPath::parse_and_validate(src_str.as_str());
-            let dest = ParsedInputPath::parse_and_validate(dest_str.as_str());
-            
+        Commands::Cp { src, dest, transfer, upload, download } => {
             match (&src, &dest) {
                 (ParsedInputPath::Local( local_path), ParsedInputPath::S3Bucket { profile, bucket, key }) => {
                     let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, cli.config.as_ref(), cli.use_unsafe_http);

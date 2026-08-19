@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParsedInputPath {
@@ -145,6 +146,15 @@ impl ParsedInputPath {
         Ok(())
     }
 }
+
+impl FromStr for ParsedInputPath {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(ParsedInputPath::parse_and_validate(s))
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
