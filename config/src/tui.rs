@@ -772,7 +772,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 endpoint.name.as_str()
             };
             let example_text = format!(
-                "Examples\nup:   snowcopy my-local-folder {}:my-s3-bucket\ndown: snowcopy {}:my-s3-bucket my-local-folder",
+                "Examples\nupload:   snowcopy cp my-local-folder {}:my-s3-bucket\ndownload: snowcopy cp {}:my-s3-bucket my-local-folder",
                 name, name
             );
             let example = Paragraph::new(example_text)

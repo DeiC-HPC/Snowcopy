@@ -43,7 +43,7 @@ pub trait CC {
 }
 
 pub struct CommandCenter {
-    silent : bool,
+    quiet: bool,
     stats: bool,
     mode: Mode,
     cancellation_token_of_all_ongoing_tasks: tokio_util::sync::CancellationToken,
@@ -53,7 +53,7 @@ pub struct CommandCenter {
 impl CommandCenter {
     pub fn new_upload(config: &util_layer::UploadConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken) -> Self {
         CommandCenter {
-            silent: config.silent,
+            quiet: config.quiet,
             stats: config.stats,
             mode: Mode::Upload,
             cancellation_token_of_all_ongoing_tasks
@@ -62,7 +62,7 @@ impl CommandCenter {
 
     pub fn new_download(config: &util_layer::DownloadConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken) -> Self {
         CommandCenter {
-            silent: config.silent,
+            quiet: config.quiet,
             stats: config.stats,
             mode: Mode::Download,
             cancellation_token_of_all_ongoing_tasks
@@ -71,7 +71,7 @@ impl CommandCenter {
     
     pub fn new_list(_config: &util_layer::ListConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken) -> Self {
         CommandCenter {
-            silent: true, //This will make command_center not print any information. The list function will print the list of objects.
+            quiet: true, //This will make command_center not print any information. The list function will print the list of objects.
             stats: false,
             mode: Mode::List,
             cancellation_token_of_all_ongoing_tasks
@@ -80,7 +80,7 @@ impl CommandCenter {
 
     pub fn new_remove(_config: &util_layer::RemoveConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken, verbose_mode: bool) -> Self {
         CommandCenter {
-            silent: !verbose_mode, //This will make command_center not print any information. TODO JON: Make progress bar for deletion
+            quiet: !verbose_mode, //This will make command_center not print any information. TODO JON: Make progress bar for deletion
             stats: false,
             mode: Mode::Remove,
             cancellation_token_of_all_ongoing_tasks
@@ -92,7 +92,7 @@ impl CC for CommandCenter {
     fn start(&self) -> (UnboundedSender<CommandCenterEvent>, JoinHandle<SnowcopyResult>) {
         let (cc_tx, mut cc_rx) = tokio::sync::mpsc::unbounded_channel::<CommandCenterEvent>();
 
-        let (ui, ui_tx, ui_handle) = if self.silent {
+        let (ui, ui_tx, ui_handle) = if self.quiet {
             (None, UiSender::Noop(NoopUiSender), None)
         } else {
             let ui = ProgressBarUi::new();

@@ -24,11 +24,11 @@ When transferring files, Snowcopy use the [src:dst] pattern:
 
 ```
 Upload:
-	snowcopy my-folder profile:bucket
-	snowcopy file.txt profile:bucket
+	snowcopy cp my-folder profile:bucket
+	snowcopy cp file.txt profile:bucket
 
 Download:
-	snowcopy profile:bucket my-folder
+	snowcopy cp profile:bucket my-folder
 
 List buckets on server:
 	snowcopy ls profile:

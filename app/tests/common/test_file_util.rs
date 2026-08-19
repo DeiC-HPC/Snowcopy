@@ -9,11 +9,10 @@ pub(crate) fn assert_files_match(upload_file: &Path, download_file: &Path) {
     let upload_content = std::fs::read(upload_file).unwrap();
     let download_content = std::fs::read(download_file).unwrap();
 
-    assert_eq!(
-        upload_content,
-        download_content,
-        "File content differs: {:?}",
-        upload_file
+    //Do not use assert_eq! as large files will be attempted to print out in a failure case
+    assert!(upload_content == download_content,
+        "File content differs: {:?} and {:?}",
+        upload_file, download_file
     );
 
     let upload_modified = normalized_modified_time(upload_file);

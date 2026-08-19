@@ -3,7 +3,6 @@ pub mod constants;
 pub mod cc_util;
 pub mod time;
 pub mod retry;
-pub mod bucket_and_path_parser;
 pub mod snow_errors;
 pub mod download;
 pub mod url_encoder;
@@ -30,7 +29,7 @@ pub fn default_region() -> String {
     "us-east-1".to_string()
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq,)]
 pub struct EndpointConfig {
     pub s3_access_key: String,
     pub s3_secret_key: String,
@@ -77,13 +76,14 @@ pub enum TransferMethod {
     TokioSelfMade,
     TransferManager,
 }
+impl std::str::FromStr for TransferMethod {
+    type Err = String;
 
-impl TransferMethod {
-    pub fn from_str(method: &str) -> Option<Self> {
-        match method {
-            "o1" => Some(TransferMethod::TokioSelfMade),
-            "o2" => Some(TransferMethod::TransferManager),
-            _ => None,
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "o1" => Ok(Self::TokioSelfMade),
+            "o2" => Ok(Self::TransferManager),
+            _ => Err(format!("Unknown transfer method: {}", s)),
         }
     }
 }
@@ -91,11 +91,11 @@ impl TransferMethod {
 #[derive(Debug, Clone)]
 pub struct UploadConfig {
     pub endpoint: EndpointConfig,
-    pub md5_checksum_upload: bool,
+    pub md5_checksum_integrity_is_disabled: bool,
     pub transfer_method: TransferMethod,
     pub file_limit_overwrite: Option<usize>,
     pub req_limit_overwrite: Option<usize>,
-    pub silent: bool,
+    pub quiet: bool,
     pub verbose: bool,
     pub stats: bool,
     pub use_unsafe_http: bool,
@@ -110,12 +110,12 @@ pub struct UploadConfig {
 #[derive(Debug, Clone)]
 pub struct DownloadConfig {
     pub endpoint: EndpointConfig,
-    pub md5_checksum_integrity: bool,
+    pub md5_checksum_integrity_is_disabled: bool,
     pub transfer_method: TransferMethod,
     pub file_limit_overwrite: Option<usize>,
     pub req_limit_overwrite: Option<usize>,
     pub download_concurrency_overwrite: Option<usize>,
-    pub silent: bool,
+    pub quiet: bool,
     pub verbose: bool,
     pub stats: bool,
     pub use_unsafe_http: bool,
@@ -138,7 +138,7 @@ pub struct ListConfig {
 pub struct RemoveConfig {
     pub endpoint: EndpointConfig,
     pub bucket: String,
-    pub silent: bool,
+    pub quiet: bool,
     pub verbose: bool,
     pub use_unsafe_http: bool,
     pub req_limit_overwrite: Option<usize>,
@@ -146,7 +146,7 @@ pub struct RemoveConfig {
 
 #[derive(Debug, Clone)]
 pub struct ConfigModeConfig {
-    pub silent: bool,
+    pub quiet: bool,
     pub config_path: Option<PathBuf>,
 }
 

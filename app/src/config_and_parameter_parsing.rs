@@ -1,206 +1,300 @@
-use clap::{Arg, ArgMatches, Command};
-use util_layer::bucket_and_path_parser::PathPattern;
-use util_layer::{ConfigModeConfig, DownloadConfig, EndpointConfig, ListConfig, Mode, RemoveConfig, SnowConfig, TransferMethod, UploadConfig};
+use crate::bucket_and_path_parser::ParsedInputPath;
+use clap::{Parser, Subcommand};
+use std::fmt::{Display, Formatter};
+use std::path::PathBuf;
+use util_layer::{ConfigModeConfig, DownloadConfig, EndpointConfig, ListConfig, RemoveConfig, SnowConfig, TransferMethod, UploadConfig};
 use util_layer::error_codes::ErrorCode::HttpUnsafeError;
 
-pub async fn read_parameters_and_config_to_create_snow_config(matches: &ArgMatches) -> SnowConfig {
-    let config_path = matches.get_one::<String>("config").map(std::path::PathBuf::from);
+#[derive(Debug)]
+pub enum CliError {
+    UnsafeHttp(String),
+    ProfileNotFound(String),
+    ProfileNotUnique(String),
+    ProfileNoConfig(String),
+    ConfigError(String),
+    InvalidCommand(String),
+    RmNotSupportedForKey,
+}
 
-    let (mode, sub_matches) = match matches.subcommand() {
-        Some(("config", m)) => (Mode::Config, Some(m)),
-        Some(("rm", m)) => (Mode::Remove, Some(m)),
-        Some(("ls", m)) => (Mode::List, Some(m)),
-
-        _ => { //we are transferring files. Figure out if it's upload or download based on path patterns
-            if matches.get_one::<String>("src").is_some() && matches.get_one::<String>("dest").is_some() {
-                // Determine if it's upload or download based on path patterns
-                let src_str = matches.get_one::<String>("src").unwrap();
-                let dest_str = matches.get_one::<String>("dest").unwrap();
-                let src = PathPattern::parse(src_str);
-                let dest = PathPattern::parse(dest_str);
-
-                match (&src, &dest) {
-                    (PathPattern::S3 { .. }, PathPattern::Local(_)) => (Mode::Download, None),
-                    (PathPattern::Local(_), PathPattern::S3 { .. }) => (Mode::Upload, None),
-                    _ => {
-                        eprintln!("Error: Invalid source/destination combination for upload/download.");
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                eprintln!("Error: No valid command or src/dest provided.");
-                std::process::exit(1);
-            }
-        }
-    };
-
-    let silent = matches.get_flag("silent");
-    let verbose = matches.get_flag("verbose");
-    let use_unsafe_http = matches.get_flag("use-unsafe-http");
-    let req_limit_overwrite = matches.get_one::<usize>("req_limit").copied();
-
-    match mode {
-        Mode::Config => {
-            SnowConfig::Config(ConfigModeConfig { silent, config_path })
-        }
-        Mode::List | Mode::Remove => {
-            let sub_m = sub_matches.expect("subcommand matches required for ls/rm");
-            let path_str = sub_m.get_one::<String>("path").expect("path is required for ls/rm");
-            let pattern = PathPattern::parse(path_str);
-            let (profile, bucket_opt) = match pattern {
-                PathPattern::S3 { profile, bucket, .. } => {
-                    if !bucket.is_empty() {
-                        if let Err(e) = PathPattern::validate_bucket_name(&bucket) {
-                            eprintln!("Error: Invalid bucket name '{}': {}", bucket, e);
-                            std::process::exit(1);
-                        }
-                        (profile, Some(bucket))
-                    } else {
-                        (profile, None)
-                    }
-                }
-                PathPattern::Local(_) => {
-                    eprintln!("Error: ls and rm require an S3 path (profile:bucket/)");
-                    std::process::exit(1);
-                }
-            };
-
-            let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, config_path.as_ref()).await;
-            check_http_safeguard(&endpoint, use_unsafe_http);
-
-            if mode == Mode::List {
-                SnowConfig::List(ListConfig {
-                    endpoint,
-                    bucket: bucket_opt,
-                    req_limit: req_limit_overwrite,
-                    verbose,
-                    use_unsafe_http,
-                })
-            } else {
-                let bucket = if let Some(b) = bucket_opt {
-                    b
-                } else {
-                    eprintln!("Error: rm requires a bucket name (profile:bucket)");
-                    std::process::exit(1);
-                };
-                SnowConfig::Remove(RemoveConfig {
-                    endpoint,
-                    bucket,
-                    silent,
-                    verbose,
-                    use_unsafe_http,
-                    req_limit_overwrite,
-                })
-            }
-        }
-        Mode::Upload | Mode::Download => {
-            let transfer_method_str = matches.get_one::<String>("o").map(|s| s.as_str()).unwrap_or("o1");
-            let file_limit_overwrite = matches.get_one::<usize>("file_limit").copied();
-            let download_concurrency_overwrite = matches.get_one::<usize>("download_concurrency").copied();
-            let stats = matches.get_flag("stats");
-            let md5_checksum_integrity = matches.get_one::<bool>("md5_checksum_integrity").copied().unwrap_or(true);
-            let trailing = matches.get_flag("trailing");
-            let trailing_small = matches.get_flag("trailing-small");
-            let trailing_chunk_size_val = matches.get_one::<usize>("trailing-chunk-size").copied().unwrap_or(1 * 1024 * 1024); //TODO JON: We should not have this value here.
-            let open_file_limit_overwrite = matches.get_one::<usize>("open-file-limit").copied();
-            let transfer_method = TransferMethod::from_str(transfer_method_str).expect(format!("Transfer method {} unknown", transfer_method_str).as_str());
-            let prefix = "".to_string(); //TODO JON: We will add prefixing after release
-
-            let src_str = matches.get_one::<String>("src").unwrap();
-            let dest_str = matches.get_one::<String>("dest").unwrap();
-            let src = PathPattern::parse(src_str);
-            let dest = PathPattern::parse(dest_str);
-
-            let (profile, bucket, local_path) = match mode {
-                Mode::Download => {
-                    if let (PathPattern::S3 { profile, bucket, .. }, PathPattern::Local(path)) = (src, dest) {
-                        if let Err(e) = PathPattern::validate_bucket_name(&bucket) {
-                            eprintln!("Error: Invalid bucket name '{}': {}", bucket, e);
-                            std::process::exit(1);
-                        }
-                        (profile, bucket, path.to_path_buf())
-                    } else { unreachable!() }
-                }
-                Mode::Upload => {
-                    if let (PathPattern::Local(path), PathPattern::S3 { profile, bucket, .. }) = (src, dest) {
-                        if let Err(e) = PathPattern::validate_bucket_name(&bucket) {
-                            eprintln!("Error: Invalid bucket name '{}': {}", bucket, e);
-                            std::process::exit(1);
-                        }
-                        (profile, bucket, path.to_path_buf())
-                    } else { unreachable!() }
-                }
-                _ => unreachable!(),
-            };
-
-            let endpoint = load_endpoint_and_stop_program_with_error_if_it_fails(&profile, config_path.as_ref()).await;
-            check_http_safeguard(&endpoint, use_unsafe_http);
-
-            if mode == Mode::Upload {
-                SnowConfig::Upload(UploadConfig {
-                    endpoint,
-                    md5_checksum_upload: md5_checksum_integrity,
-                    transfer_method,
-                    file_limit_overwrite,
-                    req_limit_overwrite,
-                    silent,
-                    verbose,
-                    stats,
-                    use_unsafe_http,
-                    trailing_chunk_size: trailing_chunk_size_val as u64,
-                    trailing,
-                    trailing_small,
-                    open_file_limit_overwrite,
-                    bucket,
-                    local_path,
-                })
-            } else {
-                SnowConfig::Download(DownloadConfig {
-                    endpoint,
-                    md5_checksum_integrity,
-                    transfer_method,
-                    file_limit_overwrite,
-                    req_limit_overwrite,
-                    download_concurrency_overwrite,
-                    silent,
-                    verbose,
-                    stats,
-                    use_unsafe_http,
-                    open_file_limit_overwrite,
-                    bucket,
-                    local_path,
-                    prefix
-                })
-            }
+impl CliError {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            CliError::UnsafeHttp(_) => HttpUnsafeError.as_i32(),
+            _ => 1,
         }
     }
 }
 
-async fn load_endpoint_and_stop_program_with_error_if_it_fails(profile: &String, config_path: Option<&std::path::PathBuf>) -> EndpointConfig {
-    let endpoint = match gather_credentials(&profile, config_path).await {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("Error loading configuration for profile '{}': {}\nRun \"snowcopy config\" to configure profiles", profile, e);
-            std::process::exit(1);
-        }
-    };
-    endpoint
-}
-
-fn check_http_safeguard(endpoint: &EndpointConfig, use_unsafe_http: bool) {
-    if !use_unsafe_http {
-        if let util_layer::url_parser::S3EndpointType::HTTP = util_layer::url_parser::validate_s3_endpoint(&endpoint.s3_url) {
-            eprintln!("Error: The endpoint {} uses the insecure HTTP protocol. \
+impl Display for CliError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CliError::UnsafeHttp(url) => write!(f, "Error: The endpoint {} uses the insecure HTTP protocol. \
             Using HTTP can expose your data and credentials to potential security risks such as man-in-the-middle attacks. \
             It is strongly recommended to use HTTPS instead. \
-            If you still wish to proceed, use the --use-unsafe-http flag.", endpoint.s3_url);
-            std::process::exit(HttpUnsafeError.as_i32());
+            If you still wish to proceed, use the --use-unsafe-http flag.", url),
+            CliError::ProfileNotFound(profile) => write!(f, "Error loading configuration for profile '{}': Profile not found in configuration\nRun \"snowcopy config\" to configure profiles", profile),
+            CliError::ProfileNotUnique(profile) => write!(f, "Error loading configuration for profile '{}': Profile is not unique in configuration", profile),
+            CliError::ProfileNoConfig(profile) => write!(f, "Error loading configuration for profile '{}': Profile has no configuration", profile),
+            CliError::ConfigError(msg) => write!(f, "Error loading configuration: {}", msg),
+            CliError::InvalidCommand(msg) => write!(f, "Error: {}", msg),
+            CliError::RmNotSupportedForKey => write!(f, "Error: rm does not support deleting individual objects at this time"),
         }
     }
 }
 
-pub async fn gather_credentials(profile_name: &str, config_path: Option<&std::path::PathBuf>) -> anyhow::Result<EndpointConfig> {
-    let app_config = config::load_config(config_path.cloned())?;
+pub trait CredentialProvider {
+    fn gather(&self, profile_name: &str, config_path: Option<&PathBuf>) -> Result<EndpointConfig, CliError>;
+}
+
+pub struct FileCredentialProvider;
+
+impl CredentialProvider for FileCredentialProvider {
+    fn gather(&self, profile_name: &str, config_path: Option<&PathBuf>) -> Result<EndpointConfig, CliError> {
+        gather_credentials(profile_name, config_path)
+    }
+}
+
+#[derive(Parser)]
+#[command(
+name = "snowcopy",
+version = "0.1.0-alpha.1",
+about = "Fast S3 copy tool - ALPHA, use with caution.",
+after_help = "Examples:\n  upload:   snowcopy cp my-folder profile:bucket\n  upload:   snowcopy cp file.txt profile:bucket\n  download: snowcopy cp profile:bucket ."
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+
+    #[arg(long, global = true, help = "Path to a config file to use instead of the default")]
+    pub config: Option<PathBuf>,
+
+    #[arg(long, global = true, help = "Allow using insecure HTTP endpoints")]
+    pub use_unsafe_http: bool,
+
+    #[arg(short = 'v', long, global = true, help = "Verbose mode (print http headers)")]
+    pub verbose: bool,
+
+    #[arg(short = 'q', long, global = true, help = "Quiet/silent mode (no output)")]
+    pub quiet: bool,
+
+    #[arg(short = 'r', long, help = "Maximum number of concurrent requests")]
+    pub req_limit: Option<usize>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct UploadOptions {
+    #[arg(long, help = "Enable trailing header mode on large files")]
+    pub trailing: bool,
+
+    #[arg(long, help = "Enable trailing header mode on small files")]
+    pub trailing_small: bool,
+
+    #[arg(long, help = "Size of chunks used for trailing header operations in kB", default_value = "1024")]
+    pub trailing_chunk_size: u64,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct DownloadOptions {
+    #[arg(short = 'c', long, help = "Maximum number of concurrent downloads per file")]
+    pub download_single_file_concurrency_limit: Option<usize>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct TransferOptions {
+    #[arg(short = 'f', long, help = "Maximum number of files to do read/write operations on at once")]
+    pub file_limit: Option<usize>,
+
+    #[arg(long, help = "Maximum number of file descriptors used simultaneously")]
+    pub open_file_limit: Option<usize>,
+
+    #[arg(long, help = "Prints statistics about the transfer")]
+    pub stats: bool,
+
+    #[arg(long, help = "Disable MD5 checksum validation")]
+    pub disable_md5_checksum: bool,
+
+    #[arg(long, help = "Transfer method", default_value = "o1")]
+    pub transfer_method: TransferMethod,
+}
+
+
+#[derive(Subcommand)]
+enum Commands {
+    #[command(about = "Open the TUI for profile configuration management")]
+    Config,
+
+    #[command(about = "List buckets and bucket contents")]
+    Ls {
+        #[arg(help = "Either profile: or profile:bucket (if bucket is empty, all buckets are listed)")]
+        input_path: ParsedInputPath,
+    },
+
+    #[command(about = "Remove/delete a bucket along with ALL its contents")]
+    Rm {
+        #[arg(help = "profile:bucket")]
+        input_path: ParsedInputPath,
+    },
+
+    #[command(about = "Upload or download files")]
+    Cp {
+        #[arg(value_name = "Source", help = "Either a local folder/file or profile:bucket")]
+        src: ParsedInputPath,
+        #[arg(value_name = "Destination", help = "Either a local folder or profile:bucket")]
+        dest: ParsedInputPath,
+
+        #[command(flatten)]
+        transfer: TransferOptions,
+
+        #[command(flatten)]
+        upload: UploadOptions,
+
+        #[command(flatten)]
+        download: DownloadOptions,
+    },
+}
+
+pub async fn read_and_validate_command_line_arguments() -> SnowConfig {
+    let cli = Cli::parse();
+    let provider = FileCredentialProvider;
+
+    build_config(cli, &provider).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(e.exit_code());
+    })
+}
+
+pub fn build_config(cli: Cli, provider: &dyn CredentialProvider) -> Result<SnowConfig, CliError> {
+    match cli.command {
+        Commands::Config => {
+            Ok(SnowConfig::Config(ConfigModeConfig { quiet: cli.quiet, config_path : cli.config }))
+        }
+
+        Commands::Ls { input_path } => {
+            match input_path {
+                ParsedInputPath::S3Server { profile } => {
+                    let endpoint = provider.gather(&profile, cli.config.as_ref())?;
+                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
+
+                    Ok(SnowConfig::List(ListConfig {
+                        endpoint,
+                        bucket : None,
+                        req_limit: cli.req_limit,
+                        verbose : cli.verbose,
+                        use_unsafe_http : cli.use_unsafe_http,
+                    }))
+                }
+
+                ParsedInputPath::S3Bucket { profile, bucket, .. } => {
+                    let endpoint = provider.gather(&profile, cli.config.as_ref())?;
+                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
+
+                    Ok(SnowConfig::List(ListConfig {
+                        endpoint,
+                        bucket : Some(bucket),
+                        req_limit: cli.req_limit,
+                        verbose : cli.verbose,
+                        use_unsafe_http : cli.use_unsafe_http,
+                    }))
+                }
+
+                _ => {
+                    Err(CliError::InvalidCommand("ls requires either profile: or profile:bucket (if bucket is empty, all buckets are listed)".to_string()))
+                }
+            }
+        }
+
+        Commands::Rm { input_path } => {
+            match input_path {
+                ParsedInputPath::S3Bucket { profile, bucket, key } => {
+                    if key.is_some() {
+                        return Err(CliError::RmNotSupportedForKey);
+                    }
+
+                    let endpoint = provider.gather(&profile, cli.config.as_ref())?;
+                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
+
+                    Ok(SnowConfig::Remove(RemoveConfig {
+                        endpoint,
+                        bucket,
+                        quiet: cli.quiet,
+                        verbose : cli.verbose,
+                        use_unsafe_http : cli.use_unsafe_http,
+                        req_limit_overwrite : cli.req_limit,
+                    }))
+                }
+
+                _ => {
+                    Err(CliError::InvalidCommand("ls requires either profile: or profile:bucket (if bucket is empty, all buckets are listed)".to_string()))
+                }
+            }
+        }
+
+        Commands::Cp { src, dest, transfer, upload, download } => {
+            match (&src, &dest) {
+                (ParsedInputPath::Local( local_path), ParsedInputPath::S3Bucket { profile, bucket, .. }) => {
+                    let endpoint = provider.gather(&profile, cli.config.as_ref())?;
+                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
+
+                    Ok(SnowConfig::Upload(UploadConfig {
+                        endpoint: endpoint.clone(),
+                        md5_checksum_integrity_is_disabled: transfer.disable_md5_checksum,
+                        transfer_method : transfer.transfer_method,
+                        file_limit_overwrite : transfer.file_limit,
+                        req_limit_overwrite : cli.req_limit,
+                        quiet: cli.quiet,
+                        verbose : cli.verbose,
+                        stats : transfer.stats,
+                        use_unsafe_http : cli.use_unsafe_http,
+                        trailing_chunk_size: upload.trailing_chunk_size ,
+                        trailing : upload.trailing,
+                        trailing_small : upload.trailing_small,
+                        open_file_limit_overwrite : transfer.open_file_limit,
+                        bucket : bucket.clone(),
+                        local_path : local_path.clone(),
+                    }))
+                }
+
+                (ParsedInputPath::S3Bucket { profile, bucket, .. }, ParsedInputPath::Local(local_path)) => {
+                    let endpoint = provider.gather(&profile, cli.config.as_ref())?;
+                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
+
+                    Ok(SnowConfig::Download(DownloadConfig {
+                        endpoint: endpoint.clone(),
+                        md5_checksum_integrity_is_disabled: transfer.disable_md5_checksum,
+                        transfer_method : transfer.transfer_method,
+                        file_limit_overwrite : transfer.file_limit,
+                        req_limit_overwrite  : cli.req_limit,
+                        download_concurrency_overwrite : download.download_single_file_concurrency_limit,
+                        quiet: cli.quiet,
+                        verbose : cli.verbose,
+                        stats : transfer.stats,
+                        use_unsafe_http : cli.use_unsafe_http,
+                        open_file_limit_overwrite : transfer.open_file_limit,
+                        bucket : bucket.clone(),
+                        local_path: local_path.clone(),
+                        prefix : String::new() //TODO Jon: add support for prefix
+                    }))
+                }
+
+                _ => {
+                    Err(CliError::InvalidCommand("Invalid source/destination combination. Use \"snowcopy cp <src> <dest>\", where <src> and <dest> are either a local folder or a profile:bucket.".to_string()))
+                }
+            }
+        }
+    }
+}
+
+fn check_http_safeguard(endpoint: &EndpointConfig, use_unsafe_http: bool) -> Result<(), CliError> {
+    if !use_unsafe_http {
+        if let util_layer::url_parser::S3EndpointType::HTTP = util_layer::url_parser::validate_s3_endpoint(&endpoint.s3_url) {
+            return Err(CliError::UnsafeHttp(endpoint.s3_url.clone()));
+        }
+    }
+    Ok(())
+}
+
+pub fn gather_credentials(profile_name: &str, config_path: Option<&std::path::PathBuf>) -> Result<EndpointConfig, CliError> {
+    let app_config = config::load_config(config_path.cloned()).map_err(|e| CliError::ConfigError(e.to_string()))?;
 
     let matches: Vec<_> = app_config
         .endpoints
@@ -209,174 +303,307 @@ pub async fn gather_credentials(profile_name: &str, config_path: Option<&std::pa
         .collect();
 
     if matches.is_empty() {
-        anyhow::bail!("Profile '{}' not found in configuration", profile_name);
+        return Err(CliError::ProfileNotFound(profile_name.to_string()));
     }
 
     if matches.len() > 1 {
-        anyhow::bail!("Profile '{}' is not unique in configuration", profile_name);
+        return Err(CliError::ProfileNotUnique(profile_name.to_string()));
     }
 
     if let Some(endpoint_config) = &matches[0].config {
         return Ok(endpoint_config.clone());
     }
 
-    anyhow::bail!("Profile '{}' has no configuration", profile_name)
+    Err(CliError::ProfileNoConfig(profile_name.to_string()))
 }
 
-pub fn parse_arguments() -> ArgMatches {
-    let matches = Command::new("snowcopy")
-        .version("0.1.0-alpha.1")
-        .about("Fast S3 copy tool - ALPHA, use with caution.")
-        .subcommand_required(false)
-        .arg_required_else_help(true)
-        .subcommand(
-            Command::new("config")
-                .about("Open the TUI for configuration management")
-        )
-        .subcommand(
-            Command::new("rm")
-                .about("Remove a bucket")
-                .arg(Arg::new("path").required(true).index(1))
-        )
-        .subcommand(
-            Command::new("ls")
-                .about("List buckets and bucket contents")
-                .arg(Arg::new("path").required(true).index(1))
-        )
-        .subcommand(
-            Command::new("engine")
-                .about("Engine command")
-        )
-        .arg(
-            Arg::new("config")
-                .long("config")
-                .value_name("FILE")
-                .help("Path to a config file to use instead of the default")
-                .required(false)
-                .num_args(1)
-                .global(true),
-        )
-        .arg(
-            Arg::new("src")
-                .help("Source path (local or profile:bucket/key)")
-                .required(false)
-                .index(1),
-        )
-        .arg(
-            Arg::new("dest")
-                .help("Destination path (local or profile:bucket/key)")
-                .required(false)
-                .index(2),
-        )
-        .arg(
-            Arg::new("o")
-                .help("Transfer method")
-                .short('o')
-                .required(false)
-                .default_value("o1")
-        )
-        .arg(
-            Arg::new("file_limit")
-                .short('f')
-                .long("file-limit")
-                .value_name("NUMBER")
-                .help("Maximum number of files to process")
-                .required(false)
-                .value_parser(clap::value_parser!(usize))
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("req_limit")
-                .short('r')
-                .long("req-limit")
-                .value_name("NUMBER")
-                .help("Maximum number of concurrent requests")
-                .required(false)
-                .value_parser(clap::value_parser!(usize))
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("silent")
-                .short('s')
-                .long("silent")
-                .help("Silent mode (no output)")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("download_concurrency")
-                .short('c')
-                .long("download-concurrency")
-                .value_name("NUMBER")
-                .help("Maximum number of concurrent downloads per file")
-                .required(false)
-                .value_parser(clap::value_parser!(usize))
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("stats")
-                .long("stats")
-                .help("Enable statistics output")
-                .required(false)
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("md5_checksum_integrity")
-                .long("disable-md5-checksum-integrity")
-                .help("Disable MD5 checksum validation")
-                .required(false)
-                .default_value("true")
-                .action(clap::ArgAction::SetFalse),
-        )
-        .arg(
-            Arg::new("trailing")
-                .long("trailing")
-                .help("Trailing header mode (uses trailing headers for S3 operations)")
-                .required(false)
-                .action(clap::ArgAction::SetTrue)
-        )
-        .arg(
-            Arg::new("trailing-small")
-                .long("trailing-small")
-                .help("Trailing header mode for small files (uses trailing headers for S3 operations)")
-                .required(false)
-                .action(clap::ArgAction::SetTrue)
-        )
-        .arg(
-            Arg::new("trailing-chunk-size")
-                .long("trailing-chunk-size")
-                .value_name("NUMBER")
-                .help("Size of chunks used for trailing header operations in kB")
-                .required(false)
-                .value_parser(clap::value_parser!(usize))
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("open-file-limit")
-                .long("open-file-limit")
-                .value_name("NUMBER")
-                .help("Limit of simultaneously open file descriptors")
-                .required(false)
-                .value_parser(clap::value_parser!(usize))
-                .num_args(1),
-        )
-        .arg(
-            Arg::new("verbose")
-                .short('v')
-                .long("verbose")
-                .help("Verbose mode (print http headers)")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("use-unsafe-http")
-                .long("use-unsafe-http")
-                .help("Allow using insecure HTTP endpoints")
-                .action(clap::ArgAction::SetTrue)
-                .global(true),
-        )
-        .after_help("Examples:\n  up:   snowcopy my-folder profile:bucket\n  up:   snowcopy file.txt profile:bucket\n  down: snowcopy profile:bucket .")
-        .get_matches();
-    matches
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bucket_and_path_parser::ParsedInputPath;
+
+    const PROFILE: &str = "lumi";
+    const HTTP_PROFILE: &str = "http-profile";
+    const NOT_EXISTING_PROFILE: &str = "I-Dont-Exist";
+    struct MockProvider;
+    impl CredentialProvider for MockProvider {
+        fn gather(&self, profile_name: &str, _config_path: Option<&PathBuf>) -> Result<EndpointConfig, CliError> {
+            if profile_name == PROFILE {
+                Ok(EndpointConfig {
+                    s3_url: "https://lumidata.eu".to_string(),
+                    ..Default::default()
+                })
+            } else if profile_name == HTTP_PROFILE {
+                Ok(EndpointConfig {
+                    s3_url: "http://localhost:9000".to_string(),
+                    ..Default::default()
+                })
+            } else {
+                Err(CliError::ProfileNotFound(profile_name.to_string()))
+            }
+        }
+    }
+
+    #[test]
+    fn profile_exists_returns_endpoint() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "ls",
+            &format!("{PROFILE}:"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider).unwrap();
+
+        match result {
+            SnowConfig::List(cfg) => {
+                assert_eq!(cfg.endpoint.s3_url, "https://lumidata.eu");
+            }
+            _ => panic!("expected List config"),
+        }
+    }
+
+    #[test]
+    fn profile_missing_returns_error() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "ls",
+            &format!("{NOT_EXISTING_PROFILE}:"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider);
+
+        assert!(matches!(result, Err(CliError::ProfileNotFound(p)) if p == NOT_EXISTING_PROFILE));
+    }
+
+    #[test]
+    fn http_safeguard_ls() {
+        let provider = MockProvider;
+
+        // HTTP endpoint + --use-unsafe-http absent => error
+        let cli = Cli::try_parse_from(["snowcopy", "ls", &format!("{HTTP_PROFILE}:")]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
+
+        // HTTP endpoint + --use-unsafe-http present => success
+        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "ls", &format!("{HTTP_PROFILE}:")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+
+        // HTTPS endpoint => success
+        let cli = Cli::try_parse_from(["snowcopy", "ls", &format!("{PROFILE}:")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+    }
+
+    #[test]
+    fn http_safeguard_rm() {
+        let provider = MockProvider;
+
+        // HTTP endpoint + --use-unsafe-http absent => error
+        let cli = Cli::try_parse_from(["snowcopy", "rm", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
+
+        // HTTP endpoint + --use-unsafe-http present => success
+        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "rm", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+
+        // HTTPS endpoint => success
+        let cli = Cli::try_parse_from(["snowcopy", "rm", &format!("{PROFILE}:bucket")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+    }
+
+    #[test]
+    fn http_safeguard_cp_upload() {
+        let provider = MockProvider;
+
+        // HTTP endpoint + --use-unsafe-http absent => error
+        let cli = Cli::try_parse_from(["snowcopy", "cp", "local", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
+
+        // HTTP endpoint + --use-unsafe-http present => success
+        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "cp", "local", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+
+        // HTTPS endpoint => success
+        let cli = Cli::try_parse_from(["snowcopy", "cp", "local", &format!("{PROFILE}:bucket")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+    }
+
+    #[test]
+    fn http_safeguard_cp_download() {
+        let provider = MockProvider;
+
+        // HTTP endpoint + --use-unsafe-http absent => error
+        let cli = Cli::try_parse_from(["snowcopy", "cp", &format!("{HTTP_PROFILE}:bucket"), "local"]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
+
+        // HTTP endpoint + --use-unsafe-http present => success
+        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "cp", &format!("{HTTP_PROFILE}:bucket"), "local"]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+
+        // HTTPS endpoint => success
+        let cli = Cli::try_parse_from(["snowcopy", "cp", &format!("{PROFILE}:bucket"), "local"]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+    }
+
+    #[test]
+    fn validate_failures() {
+        let provider = MockProvider;
+
+        // rm profile:bucket/key
+        let cli = Cli::try_parse_from(["snowcopy", "rm", &format!("{PROFILE}:bucket/key")]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::RmNotSupportedForKey)));
+
+        // ls local_folder
+        let cli = Cli::try_parse_from(["snowcopy", "ls", "local_folder"]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::InvalidCommand(_))));
+
+        // cp local -> local
+        let cli = Cli::try_parse_from(["snowcopy", "cp", "local1", "local2"]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::InvalidCommand(_))));
+
+        // cp bucket -> bucket
+        let cli = Cli::try_parse_from(["snowcopy", "cp", &format!("{PROFILE}:bucket1"), &format!("{PROFILE}:bucket2")]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::InvalidCommand(_))));
+    }
+
+    #[test]
+    fn validate_success() {
+        let provider = MockProvider;
+
+        // snowcopy cp local bucket
+        let cli = Cli::try_parse_from(["snowcopy", "cp", "local", &format!("{PROFILE}:bucket")]).unwrap();
+        assert!(matches!(build_config(cli, &provider).unwrap(), SnowConfig::Upload(_)));
+
+        // snowcopy cp bucket local
+        let cli = Cli::try_parse_from(["snowcopy", "cp", &format!("{PROFILE}:bucket"), "local"]).unwrap();
+        assert!(matches!(build_config(cli, &provider).unwrap(), SnowConfig::Download(_)));
+
+        // snowcopy ls profile:
+        let cli = Cli::try_parse_from(["snowcopy", "ls", &format!("{PROFILE}:")]).unwrap();
+        let res = build_config(cli, &provider).unwrap();
+        if let SnowConfig::List(cfg) = res {
+            assert!(cfg.bucket.is_none());
+        } else {
+            panic!("Expected List config");
+        }
+
+        // snowcopy ls profile:bucket
+        let cli = Cli::try_parse_from(["snowcopy", "ls", &format!("{PROFILE}:bucket")]).unwrap();
+        let res = build_config(cli, &provider).unwrap();
+        if let SnowConfig::List(cfg) = res {
+            assert_eq!(cfg.bucket, Some("bucket".to_string()));
+        } else {
+            panic!("Expected List config");
+        }
+
+        // snowcopy rm profile:bucket
+        let cli = Cli::try_parse_from(["snowcopy", "rm", &format!("{PROFILE}:bucket")]).unwrap();
+        assert!(matches!(build_config(cli, &provider).unwrap(), SnowConfig::Remove(_)));
+    }
+
+    #[test]
+    fn parses_ls_bucket() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "ls",
+            &format!("{PROFILE}:mybucket"),
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Ls { input_path } => {
+                match input_path {
+                    ParsedInputPath::S3Bucket { profile, bucket, .. } => {
+                        assert_eq!(profile, PROFILE);
+                        assert_eq!(bucket, "mybucket");
+                    }
+                    _ => panic!("Expected S3Bucket"),
+                }
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn ls_bucket_creates_list_config() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "--req-limit", "20",
+            "ls",
+            &format!("{PROFILE}:data"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider).unwrap();
+
+        match result {
+            SnowConfig::List(cfg) => {
+                assert_eq!(cfg.bucket, Some("data".to_string()));
+                assert_eq!(cfg.req_limit, Some(20));
+            }
+            _ => panic!("expected List config"),
+        }
+    }
+
+    #[test]
+    fn rejects_http_endpoint() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "ls",
+            &format!("{HTTP_PROFILE}:data"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider);
+
+        assert!(matches!(result, Err(CliError::UnsafeHttp(_))));
+    }
+
+    #[test]
+    fn accepts_http_endpoint_with_flag() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "--use-unsafe-http",
+            "ls",
+            &format!("{HTTP_PROFILE}:data"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider).unwrap();
+        assert!(matches!(result, SnowConfig::List(_)));
+    }
+
+    #[test]
+    fn rm_rejects_key() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "rm",
+            &format!("{PROFILE}:bucket/key")
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider);
+        assert!(matches!(result, Err(CliError::RmNotSupportedForKey)));
+    }
+
+    #[test]
+    fn cp_local_to_s3() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "cp",
+            "local_path",
+            &format!("{PROFILE}:bucket"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider).unwrap();
+
+        match result {
+            SnowConfig::Upload(cfg) => {
+                assert_eq!(cfg.bucket, "bucket");
+                assert_eq!(cfg.local_path, PathBuf::from("local_path"));
+            }
+            _ => panic!("expected Upload config"),
+        }
+    }
 }
-
-
-
