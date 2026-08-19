@@ -120,7 +120,7 @@ pub struct TransferOptions {
 
 #[derive(Subcommand)]
 enum Commands {
-    #[command(about = "Open the TUI for configuration management")]
+    #[command(about = "Open the TUI for profile configuration management")]
     Config,
 
     #[command(about = "List buckets and bucket contents")]
