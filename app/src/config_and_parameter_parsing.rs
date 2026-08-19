@@ -345,6 +345,163 @@ mod tests {
     }
 
     #[test]
+    fn profile_exists_returns_endpoint() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "ls",
+            &format!("{PROFILE}:"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider).unwrap();
+
+        match result {
+            SnowConfig::List(cfg) => {
+                assert_eq!(cfg.endpoint.s3_url, "https://lumidata.eu");
+            }
+            _ => panic!("expected List config"),
+        }
+    }
+
+    #[test]
+    fn profile_missing_returns_error() {
+        let cli = Cli::try_parse_from([
+            "snowcopy",
+            "ls",
+            &format!("{NOT_EXISTING_PROFILE}:"),
+        ]).unwrap();
+
+        let provider = MockProvider;
+        let result = build_config(cli, &provider);
+
+        assert!(matches!(result, Err(CliError::ProfileNotFound(p)) if p == NOT_EXISTING_PROFILE));
+    }
+
+    #[test]
+    fn http_safeguard_ls() {
+        let provider = MockProvider;
+
+        // HTTP endpoint + --use-unsafe-http absent => error
+        let cli = Cli::try_parse_from(["snowcopy", "ls", &format!("{HTTP_PROFILE}:")]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
+
+        // HTTP endpoint + --use-unsafe-http present => success
+        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "ls", &format!("{HTTP_PROFILE}:")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+
+        // HTTPS endpoint => success
+        let cli = Cli::try_parse_from(["snowcopy", "ls", &format!("{PROFILE}:")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+    }
+
+    #[test]
+    fn http_safeguard_rm() {
+        let provider = MockProvider;
+
+        // HTTP endpoint + --use-unsafe-http absent => error
+        let cli = Cli::try_parse_from(["snowcopy", "rm", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
+
+        // HTTP endpoint + --use-unsafe-http present => success
+        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "rm", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+
+        // HTTPS endpoint => success
+        let cli = Cli::try_parse_from(["snowcopy", "rm", &format!("{PROFILE}:bucket")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+    }
+
+    #[test]
+    fn http_safeguard_cp_upload() {
+        let provider = MockProvider;
+
+        // HTTP endpoint + --use-unsafe-http absent => error
+        let cli = Cli::try_parse_from(["snowcopy", "cp", "local", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
+
+        // HTTP endpoint + --use-unsafe-http present => success
+        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "cp", "local", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+
+        // HTTPS endpoint => success
+        let cli = Cli::try_parse_from(["snowcopy", "cp", "local", &format!("{PROFILE}:bucket")]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+    }
+
+    #[test]
+    fn http_safeguard_cp_download() {
+        let provider = MockProvider;
+
+        // HTTP endpoint + --use-unsafe-http absent => error
+        let cli = Cli::try_parse_from(["snowcopy", "cp", &format!("{HTTP_PROFILE}:bucket"), "local"]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
+
+        // HTTP endpoint + --use-unsafe-http present => success
+        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "cp", &format!("{HTTP_PROFILE}:bucket"), "local"]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+
+        // HTTPS endpoint => success
+        let cli = Cli::try_parse_from(["snowcopy", "cp", &format!("{PROFILE}:bucket"), "local"]).unwrap();
+        assert!(build_config(cli, &provider).is_ok());
+    }
+
+    #[test]
+    fn validate_failures() {
+        let provider = MockProvider;
+
+        // rm profile:bucket/key
+        let cli = Cli::try_parse_from(["snowcopy", "rm", &format!("{PROFILE}:bucket/key")]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::RmNotSupportedForKey)));
+
+        // ls local_folder
+        let cli = Cli::try_parse_from(["snowcopy", "ls", "local_folder"]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::InvalidCommand(_))));
+
+        // cp local -> local
+        let cli = Cli::try_parse_from(["snowcopy", "cp", "local1", "local2"]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::InvalidCommand(_))));
+
+        // cp bucket -> bucket
+        let cli = Cli::try_parse_from(["snowcopy", "cp", &format!("{PROFILE}:bucket1"), &format!("{PROFILE}:bucket2")]).unwrap();
+        assert!(matches!(build_config(cli, &provider), Err(CliError::InvalidCommand(_))));
+    }
+
+    #[test]
+    fn validate_success() {
+        let provider = MockProvider;
+
+        // snowcopy cp local bucket
+        let cli = Cli::try_parse_from(["snowcopy", "cp", "local", &format!("{PROFILE}:bucket")]).unwrap();
+        assert!(matches!(build_config(cli, &provider).unwrap(), SnowConfig::Upload(_)));
+
+        // snowcopy cp bucket local
+        let cli = Cli::try_parse_from(["snowcopy", "cp", &format!("{PROFILE}:bucket"), "local"]).unwrap();
+        assert!(matches!(build_config(cli, &provider).unwrap(), SnowConfig::Download(_)));
+
+        // snowcopy ls profile:
+        let cli = Cli::try_parse_from(["snowcopy", "ls", &format!("{PROFILE}:")]).unwrap();
+        let res = build_config(cli, &provider).unwrap();
+        if let SnowConfig::List(cfg) = res {
+            assert!(cfg.bucket.is_none());
+        } else {
+            panic!("Expected List config");
+        }
+
+        // snowcopy ls profile:bucket
+        let cli = Cli::try_parse_from(["snowcopy", "ls", &format!("{PROFILE}:bucket")]).unwrap();
+        let res = build_config(cli, &provider).unwrap();
+        if let SnowConfig::List(cfg) = res {
+            assert_eq!(cfg.bucket, Some("bucket".to_string()));
+        } else {
+            panic!("Expected List config");
+        }
+
+        // snowcopy rm profile:bucket
+        let cli = Cli::try_parse_from(["snowcopy", "rm", &format!("{PROFILE}:bucket")]).unwrap();
+        assert!(matches!(build_config(cli, &provider).unwrap(), SnowConfig::Remove(_)));
+    }
+
+    #[test]
     fn parses_ls_bucket() {
         let cli = Cli::try_parse_from([
             "snowcopy",
