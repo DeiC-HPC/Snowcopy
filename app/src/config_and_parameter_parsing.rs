@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
 use util_layer::{ConfigModeConfig, DownloadConfig, EndpointConfig, ListConfig, RemoveConfig, SnowConfig, TransferMethod, UploadConfig};
-use util_layer::error_codes::ErrorCode::HttpUnsafeError;
+use util_layer::error_codes::ErrorCode::{HttpUnsafeError, Unknown};
 
 #[derive(Debug)]
 pub enum CliError {
@@ -20,7 +20,7 @@ impl CliError {
     pub fn exit_code(&self) -> i32 {
         match self {
             CliError::UnsafeHttp(_) => HttpUnsafeError.as_i32(),
-            _ => 1,
+            _ => Unknown.as_i32(),
         }
     }
 }
@@ -224,7 +224,7 @@ pub fn build_config(cli: Cli, provider: &dyn CredentialProvider) -> Result<SnowC
                 }
 
                 _ => {
-                    Err(CliError::InvalidCommand("ls requires either profile: or profile:bucket (if bucket is empty, all buckets are listed)".to_string()))
+                    Err(CliError::InvalidCommand("rm requires profile:bucket".to_string()))
                 }
             }
         }
