@@ -363,9 +363,12 @@ mod tests {
     use crate::upload::UploadTrait;
     use crate::upload_multipart::MultipartUpload;
     use crate::upload_singlepart::SingleUpload;
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
     use http_layer::BufferPool;
     use hyper::http::HeaderValue;
     use hyper::{HeaderMap, StatusCode};
+    use std::convert::Infallible;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::sync::Semaphore;
@@ -374,8 +377,7 @@ mod tests {
     use util_layer::cc_util::CommandCenterEvent;
     use util_layer::error_codes::ErrorCode::DiskIoError;
     use util_layer::traits::{MockFileHandler, MockFileObject, MockHttpExecutor};
-    use util_layer::{EndpointConfig, FileInfo, HttpExecutorResponse, TransferMethod, UploadConfig};
-
+    use util_layer::{EndpointConfig, FileInfo, HttpExecutorResponse, HttpExecutorStreamingResponse, TransferMethod, UploadConfig};
     const MOCK_OPEN_FILE_ERROR_MSG: &'static str = "mock open failure";
 
     // SinglePart
@@ -620,6 +622,24 @@ mod tests {
                         status: StatusCode::OK,
                         headers,
                         body: vec![0; file_size],
+                    }
+                )
+            })
+        );
+        mock_http_executor.expect_execute_stream().returning(move |_|
+            Box::pin(async move {
+                let mut headers = HeaderMap::new();
+                headers.insert("etag", HeaderValue::from_str("etagValue").unwrap());
+
+                let body = Full::new(Bytes::from(vec![0u8; file_size]))
+                    .map_err(|never: Infallible| match never {})
+                    .boxed();
+
+                Ok(
+                    HttpExecutorStreamingResponse {
+                        status: StatusCode::OK,
+                        headers,
+                        body,
                     }
                 )
             })

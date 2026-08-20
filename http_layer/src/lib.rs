@@ -9,7 +9,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Method, Request};
 use hyper_util::{
-    client::legacy::{connect::HttpConnector, Client},
+    client::legacy::{Client, connect::HttpConnector},
     rt::TokioExecutor,
 };
 use openssl::base64;
@@ -17,14 +17,14 @@ use openssl::hash::{Hasher, MessageDigest};
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Semaphore};
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::{Mutex, Semaphore};
 use url::Url;
+use util_layer::cc_util::CommandCenterEvent;
 use util_layer::constants::AWS_ALGORITHM;
 use util_layer::snow_errors::{S3Error, SnowCopyError};
-use util_layer::{FileInfo, HttpExecutorResponse, S3ConfigTrait, StreamingBody, UploadConfig};
 use util_layer::traits::{FileObject, HttpExecutor, HyperClient};
-use util_layer::cc_util::CommandCenterEvent;
+use util_layer::{FileInfo, HttpExecutorStreamingResponse, S3ConfigTrait, StreamingBody, UploadConfig};
 
 const READ_BUFFER_SIZE: usize = 256 * 1024;
 pub struct BufferPool {
@@ -88,11 +88,11 @@ pub fn build_https_client() -> HyperClient {
 pub async fn put_file(req: Request<StreamingBody>, file_info: Arc<FileInfo>, client: Arc<dyn HttpExecutor>, req_sem: &Semaphore) -> Result<(String, u64), SnowCopyError> {
 
     let permit = req_sem.acquire().await?;
-    let resp = client.execute_await(req).await?;
+    let resp = client.execute_stream(req).await?;
 
     let status = resp.status;
     if !status.is_success() {
-        let s3_err = map_s3_error_from_http_executor_response(resp).await;
+        let s3_err = map_s3_error_from_http_response(resp).await;
         drop(permit);
         return Err(s3_err.into());
     }
@@ -112,7 +112,7 @@ pub async fn put_file(req: Request<StreamingBody>, file_info: Arc<FileInfo>, cli
 pub async fn put_file_range(amount: u64, client: Arc<dyn HttpExecutor>, req_sem: &Semaphore, req: Request<StreamingBody>) -> Result<(String, u64), SnowCopyError> {
     let permit = req_sem.acquire().await.expect("Should never fail");
 
-    let resp = client.execute_await(req).await?; //send_with_logging(client, req).await?;
+    let resp = client.execute_stream(req).await?;
     drop(permit);
 
     let status = resp.status;
@@ -123,7 +123,7 @@ pub async fn put_file_range(amount: u64, client: Arc<dyn HttpExecutor>, req_sem:
         .map(|s| s.to_string());
 
     if !status.is_success() {
-        let s3_err = map_s3_error_from_http_executor_response(resp).await;
+        let s3_err = map_s3_error_from_http_response(resp).await;
         return Err(s3_err.into());
     }
 
@@ -367,10 +367,14 @@ pub async fn map_s3_error(resp: hyper::Response<hyper::body::Incoming>) -> SnowC
     }
 }
 
-pub async fn map_s3_error_from_http_executor_response(resp: HttpExecutorResponse) -> SnowCopyError {
+pub async fn map_s3_error_from_http_response(resp: HttpExecutorStreamingResponse) -> SnowCopyError {
     let status = resp.status;
+    let body_bytes = match resp.body.collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => return SnowCopyError::Hyper(e),
+    };
 
-    let body_str = match String::from_utf8(resp.body) {
+    let body_str = match String::from_utf8(body_bytes.to_vec()) {
         Ok(s) => s,
         Err(e) => return SnowCopyError::Parse(format!("Body was not valid UTF-8: {}", e)),
     };

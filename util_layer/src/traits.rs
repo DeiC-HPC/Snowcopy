@@ -1,14 +1,14 @@
-use std::fs::File;
-use std::io;
-use std::path::Path;
-use std::pin::Pin;
-use std::sync::Arc;
+use crate::{HttpExecutorResponse, HttpExecutorStreamingResponse, ResponseStreamingBody, StreamingBody};
 use http_body_util::BodyExt;
 use hyper::{Error, Request};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use mockall::automock;
-use crate::{HttpExecutorResponse, StreamingBody};
+use std::fs::File;
+use std::io;
+use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
 
 #[automock]
 pub trait FileObject: Send + Sync {
@@ -68,6 +68,8 @@ impl FileHandler for ImplFileHandler {
 #[automock]
 pub trait HttpExecutor: Send + Sync {
     fn execute_await(&self, req: Request<StreamingBody>) -> Pin<Box<dyn Future<Output = Result<HttpExecutorResponse, Error>> + Send + 'static>>;
+
+    fn execute_stream(&self, req: Request<StreamingBody>) -> Pin<Box<dyn Future<Output = Result<HttpExecutorStreamingResponse, hyper_util::client::legacy::Error>> + Send + 'static>>;
 }
 
 // Public type aliases so app can use the exact type
@@ -98,6 +100,20 @@ impl HttpExecutor for HyperHttpExecutor {
                 headers,
                 body,
             })
+        })
+    }
+    fn execute_stream(&self, req: Request<StreamingBody>) -> Pin<Box<dyn Future<Output = Result<HttpExecutorStreamingResponse, hyper_util::client::legacy::Error>> + Send + 'static>> {
+        let response = self.client.request(req);
+        Box::pin(async move {
+            let response = response.await?;
+
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body: ResponseStreamingBody = response
+                .into_body()
+                .boxed();
+
+            Ok(HttpExecutorStreamingResponse { status, headers, body })
         })
     }
 }

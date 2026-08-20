@@ -25,7 +25,7 @@ pub async fn put_file_streaming(
 ) -> Result<(String, u64), SnowCopyError> {
 
     let permit = req_sem.acquire().await?;
-    let resp = client.execute_await(req).await.map_err(|e| SnowCopyError::Hyper(e))?;
+    let resp = client.execute_stream(req).await?;
 
     drop(permit);
 
@@ -37,7 +37,7 @@ pub async fn put_file_streaming(
         .map(|s| s.to_string());
 
     if !status.is_success() {
-        let s3_err = crate::map_s3_error_from_http_executor_response(resp).await;
+        let s3_err = crate::map_s3_error_from_http_response(resp).await;
         return Err(s3_err.into());
     }
 

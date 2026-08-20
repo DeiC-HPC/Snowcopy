@@ -19,7 +19,8 @@ use std::string::ToString;
 use std::time::SystemTime;
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
-use hyper::{HeaderMap, StatusCode};
+use hyper::{Error, HeaderMap, StatusCode};
+use crate::snow_errors::SnowCopyError;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Mode {
@@ -55,12 +56,18 @@ impl Default for EndpointConfig {
 }
 
 pub type StreamingBody = BoxBody<Bytes, std::io::Error>;
+pub type ResponseStreamingBody = BoxBody<Bytes, Error>;
 pub struct HttpExecutorResponse {
     pub status: StatusCode,
     pub headers: HeaderMap,
     pub body: Vec<u8>,
 }
 
+pub struct HttpExecutorStreamingResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: ResponseStreamingBody,
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Endpoint {
