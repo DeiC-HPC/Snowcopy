@@ -67,3 +67,19 @@ async fn test_upload_with_subfolders() {
         assert!(full_path.exists(), "File {:?} should exist in download folder", file_path);
     }
 }
+
+#[tokio::test]
+async fn test_upload_and_download_with_empty_file() {
+    let env = get_default_test_env().await;
+    let files_map = HashMap::from([
+        ("small-file.txt", 0),
+    ]);
+
+    env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&files_map);
+    let output = env.snowcopy_upload_test_upload_folder();
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files"));
+
+    let output = env.snowcopy_download_bucket_to_download_folder();
+    assert!(env.test_file_handler.assert_upload_and_download_folders_match());
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files"));
+}
