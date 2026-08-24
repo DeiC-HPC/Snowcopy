@@ -148,14 +148,22 @@ impl RetryableError for SnowCopyError {
             SnowCopyError::S3(e) => e.is_retryable(),
             SnowCopyError::Aws(_) => true, // Conservatively retry AWS SDK errors
             SnowCopyError::Http(s) => {
-                // Retryable HTTP status codes:
-                // 408: Request Timeout
-                // 429: Too Many Requests / Slow Down
-                // 500: Internal Server Error
-                // 502: Bad Gateway
-                // 503: Service Unavailable
-                // 504: Gateway Timeout
-                matches!(*s, 408 | 429 | 500 | 502 | 503 | 504)
+                // We want to retry on most HTTP status codes.
+                // If there is a bit corrupted in a status 200 code response, we still want to retry.
+                // If everything goes well, then we should receive a nice S3 response we can act on.
+                // But http errors are general failure in this context, so we retry them all.
+                // Thus, we retry on everything else than 4xx where we are sure that resending
+                // does not change anything.
+
+                // 400 (Bad Request): The client sent an invalid request. Fix the issue in the request before trying again.
+                // 401 (Unauthorized): Authentication is required or failed. Fix the authentication issue before trying again (e.g. get a fresh token).
+                // 403 (Forbidden): The client lacks permission to access the resource. Retrying will not change the server’s response. Fix the authorization issue such as getting a new a token with additional scopes before trying again.
+                // 404 (Not Found): The requested resource does not exist. Retrying will not succeed unless the resource becomes available later due to some background processing.
+                // 405 (Method Not Allowed): The HTTP method used is not supported. Retrying with the same method will not resolve the issue.
+                // 409 (Conflict): Indicates a conflict in the request such as unique constraints for referential integrity. Retrying without addressing the conflict will continue to fail.
+                // 422 (Unprocessable Entity): The server understands the request but cannot process it due to semantic errors. Fix the issue in the request before trying again.
+
+                !matches!(*s, 400 | 401 | 403 | 404 | 405 | 409 | 422 )
             }
             SnowCopyError::Transport(_) => {
                 // Transport errors like "connection closed before full body" are often retryable

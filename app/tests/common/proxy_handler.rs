@@ -47,6 +47,7 @@ pub struct RequestCounts {
     pub PUT: usize,
     pub POST: usize,
     pub HEAD: usize,
+    pub DELETE: usize,
 }
 
 impl ProxyHandler {
@@ -90,7 +91,7 @@ impl ProxyHandler {
         Ok(())
     }
 
-    pub async fn corrupt_the_body_of_request_x_times(
+    pub async fn corrupt_the_body_of_response_x_times(
         &self,
         request_type: &str,
         target_key: &str,

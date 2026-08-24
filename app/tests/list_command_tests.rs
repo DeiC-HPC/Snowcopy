@@ -63,3 +63,30 @@ async fn test_list_non_existing_bucket_should_result_in_fatal_error() {
     let output = env.run_snowcopy_command(format!("ls {}:this-bucket-does-not-exist", DEFAULT_S3_PROFILE));
     assert!(output.is_failure(ErrorCode::RequestFailure));
 }
+
+#[tokio::test]
+async fn test_list_bucket_command_retires() {
+    let env = get_default_test_env().await;
+
+    let file_on_s3 = "test-file-to-list.txt";
+    let files = HashMap::from([
+        (file_on_s3, 1),
+    ]);
+
+    env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&files);
+    env.snowcopy_upload_test_upload_folder();
+
+    env.proxy_handler.corrupt_the_body_of_response_x_times("GET", env.unique_bucket.as_str(), 1).await.unwrap();
+    env.proxy_handler.truncate_response_x_times("GET", env.unique_bucket.as_str(), 1, 100).await.unwrap();
+    env.proxy_handler.cut_connection_x_times("GET", env.unique_bucket.as_str(), 1).await.unwrap();
+
+    let output = env.snowcopy_list_bucket();
+    println!("{}", output.get_combined_logs());
+    files.iter()
+        .for_each(|(file, _)| assert!(output.get_combined_logs().contains(file)));
+    assert_eq!(output.get_combined_log_lines().len(), files.len(), "{}", output.get_combined_logs());
+
+    let counts = env.proxy_handler.get_counts().await.unwrap();
+    assert_eq!(counts.GET, 4); //1 success + 3 retries
+
+}

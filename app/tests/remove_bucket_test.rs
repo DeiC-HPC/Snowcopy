@@ -44,3 +44,45 @@ async fn test_remove_empty_bucket_command() {
     let output = env.snowcopy_list_all_buckets_on_server();
     assert!(! output.get_combined_logs().contains(&env.unique_bucket.as_str()));
 }
+
+#[tokio::test]
+async fn test_remove_bucket_command_retries_fail_on_file() {
+    let env = get_default_test_env().await;
+
+    let file_to_delete = "test-fil-to-list.txt";
+    env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&HashMap::from([
+        (file_to_delete, 1),
+    ]));
+    env.snowcopy_upload_test_upload_folder();
+
+    env.proxy_handler.cut_connection_x_times("DELETE", file_to_delete, 1).await.unwrap();
+
+    let output = env.snowcopy_delete_bucket();
+    println!("{}", output.get_combined_logs());
+    let counts = env.proxy_handler.get_counts().await.unwrap();
+    assert_eq!(counts.DELETE, 3); //2 successes + 1 failures
+
+    let output = env.snowcopy_list_all_buckets_on_server();
+    assert!(! output.get_combined_logs().contains(env.unique_bucket.as_str()));
+}
+
+#[tokio::test]
+async fn test_remove_bucket_command_retries_fail_on_bucket() {
+    let env = get_default_test_env().await;
+
+    let file_to_delete = "test-fil-to-list.txt";
+    env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&HashMap::from([
+        (file_to_delete, 1),
+    ]));
+    env.snowcopy_upload_test_upload_folder();
+
+    env.proxy_handler.cut_connection_x_times("DELETE", env.unique_bucket.as_str(), 1).await.unwrap();
+
+    let output = env.snowcopy_delete_bucket();
+    println!("{}", output.get_combined_logs());
+    let counts = env.proxy_handler.get_counts().await.unwrap();
+    assert_eq!(counts.DELETE, 3); //2 successes + 1 failures
+
+    let output = env.snowcopy_list_all_buckets_on_server();
+    assert!(! output.get_combined_logs().contains(env.unique_bucket.as_str()));
+}

@@ -85,9 +85,10 @@ fn count_request_methods(output: &SnowcopyOutput) -> RequestCounts {
         POST: 0,
         PUT: 0,
         HEAD: 0,
+        DELETE: 0,
     };
 
-    let re = Regex::new(r"method(?:=|:\s+)(HEAD|GET|POST|PUT)").unwrap();
+    let re = Regex::new(r"method(?:=|:\s+)(HEAD|GET|POST|PUT|DELETE)").unwrap();
     for line in output.get_combined_log_lines() {
         if let Some(caps) = re.captures(line) {
             match &caps[1] {
@@ -95,6 +96,7 @@ fn count_request_methods(output: &SnowcopyOutput) -> RequestCounts {
                 "GET"  => count.GET += 1,
                 "POST" => count.POST += 1,
                 "PUT"  => count.PUT += 1,
+                "DELETE"  => count.DELETE += 1,
                 _ => {}
             }
         }
