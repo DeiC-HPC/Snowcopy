@@ -21,14 +21,27 @@ pub struct TestEnv {
 }
 
 impl TestEnv {
-    pub fn run_snowcopy_command(&self, command: String) -> SnowcopyOutput {
+    pub fn run_snowcopy_command<I, S>(&self, args: I) -> SnowcopyOutput
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        self.run_snowcopy_args_in_dir(args, ".")
+    }
+
+    pub fn run_snowcopy_args_in_dir<I, S>(&self, args: I, current_dir: impl AsRef<std::path::Path>) -> SnowcopyOutput
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
         let output = assert_cmd::Command::cargo_bin("snowcopy")
             .unwrap()
+            .current_dir(current_dir)
             .arg("--config")
             .arg(self.test_file_handler.config_path())
             .arg("--use-unsafe-http")
             .arg("-v")
-            .args(command.split_whitespace())
+            .args(args)
             .output()
             .expect("failed to execute snowcopy");
 
@@ -37,7 +50,7 @@ impl TestEnv {
 
     pub fn snowcopy_upload_test_upload_folder(&self) -> SnowcopyOutput {
         let upload = format!("cp {} {}:{}", self.test_file_handler.upload_folder().to_str().unwrap(), DEFAULT_S3_PROFILE, self.unique_bucket);
-        let output = self.run_snowcopy_command(upload);
+        let output = self.run_snowcopy_command([upload]);
         assert!(output.is_success(), "Upload failed: {}", output.get_combined_logs());
 
         output
@@ -45,7 +58,7 @@ impl TestEnv {
 
     pub fn snowcopy_upload_test_upload_folder_trailing(&self) -> SnowcopyOutput {
         let upload = format!("cp {} {}:{} --trailing --trailing-small", self.test_file_handler.upload_folder().to_str().unwrap(), DEFAULT_S3_PROFILE, self.unique_bucket);
-        let output = self.run_snowcopy_command(upload);
+        let output = self.run_snowcopy_command([upload]);
         assert!(output.is_success(), "Upload failed: {}", output.get_combined_logs());
 
         output
@@ -53,7 +66,7 @@ impl TestEnv {
 
     pub fn snowcopy_download_bucket_to_download_folder(&self) -> SnowcopyOutput {
         let download = format!("cp {}:{} {}", DEFAULT_S3_PROFILE, self.unique_bucket, self.test_file_handler.download_folder().to_str().unwrap());
-        let output = self.run_snowcopy_command(download);
+        let output = self.run_snowcopy_command([download]);
         assert!(output.is_success(), "Download command failed: {}", output.get_combined_logs());
 
         output
@@ -61,7 +74,7 @@ impl TestEnv {
 
     pub fn snowcopy_list_bucket(&self) -> SnowcopyOutput {
         let list = format!("ls {}:{}", DEFAULT_S3_PROFILE, self.unique_bucket);
-        let output = self.run_snowcopy_command(list);
+        let output = self.run_snowcopy_command([list]);
         assert!(output.is_success(), "List failed: {}", output.get_combined_logs());
 
         output
@@ -69,14 +82,14 @@ impl TestEnv {
 
     pub fn snowcopy_list_all_buckets_on_server(&self) -> SnowcopyOutput {
         let list = format!("ls {}:", DEFAULT_S3_PROFILE);
-        let output = self.run_snowcopy_command(list);
+        let output = self.run_snowcopy_command([list]);
         assert!(output.is_success(), "List failed: {}", output.get_combined_logs());
 
         output
     }
     pub fn snowcopy_delete_bucket(&self) -> SnowcopyOutput {
         let delete = format!("rm {}:{}", DEFAULT_S3_PROFILE, self.unique_bucket);
-        let output = self.run_snowcopy_command(delete);
+        let output = self.run_snowcopy_command([delete]);
         assert!(output.is_success(), "Delete failed: {}", output.get_combined_logs());
 
         output
