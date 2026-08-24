@@ -36,9 +36,14 @@ pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfi
 
     let mut body = resp.into_body();
 
-    let (bytes_read, hash) = download_body_to_buffer_and_offload_to_disk_writers(start, fd, disk_write_tx, &mut body, tracker, (end - start + 1) as usize, hash_algo).await?;
+    let (bytes_read, hash) = download_body_to_buffer_and_offload_to_disk_writers(start, fd, disk_write_tx, &mut body, tracker.clone(), (end - start + 1) as usize, hash_algo).await?;
 
     if bytes_read != end - start + 1 {
+        //There is an error with the request, so we cannot trust the data we have written to disk.
+        //We roll back the written bytes tracker by the amount we have written.
+        //A retry of this method would track the whole range again.
+        //Notice that we use a shared tracker for the whole file, so other tasks reference the same tracker
+        tracker.roll_back_written_bytes_tracker_by_amount(bytes_read);
         return Err(SnowCopyError::RetryableError(format!("Partial download failed. Expected {} bytes, got {}", end - start + 1, bytes_read)));
     }
 
@@ -153,7 +158,11 @@ pub async fn get_file(config: Arc<DownloadConfig>, file_info: Arc<FileInfo>, cli
         total_size: file_info.file_size,
     });
 
-    let (_bytes_read, hash_value) = download_body_to_buffer_and_offload_to_disk_writers(0, file_arc.clone(), disk_write_tx, &mut body, tracker, file_info.file_size as usize, IntegrityAlgorithm::SHA256).await?;
+    let (bytes_read, hash_value) = download_body_to_buffer_and_offload_to_disk_writers(0, file_arc.clone(), disk_write_tx, &mut body, tracker, file_info.file_size as usize, IntegrityAlgorithm::SHA256).await?;
+
+    if bytes_read != file_info.file_size {
+        return Err(SnowCopyError::RetryableError(format!("Partial download failed. Expected {} bytes, got {}", file_info.file_size, bytes_read)));
+    }
 
     drop(req_permit);
 

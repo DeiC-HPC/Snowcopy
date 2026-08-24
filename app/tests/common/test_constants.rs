@@ -1,5 +1,5 @@
 pub const SNOWCOPY_TEST_DATA_BASE_DIR_PREFIX: &str = "snowcopy-test-data";
-pub const RETRY_ATTEMPT_MESSAGE : &str = "Attempting again as it might have been corrupted during transfer";
+pub const INTEGRITY_RETRY_ATTEMPT_MESSAGE: &str = "Attempting again as it might have been corrupted during transfer";
 
 pub const S3_ACCESS_KEY: &str = "minioadmin";
 pub const S3_SECRET_KEY: &str = "minioadmin";

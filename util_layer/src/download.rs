@@ -26,6 +26,10 @@ impl FileCompletionTracker {
             cc_sender.send(CommandCenterEvent::FileTransferred(self.total_size)).expect("Should never fail");
         }
     }
+
+    pub fn roll_back_written_bytes_tracker_by_amount(&self, amount: u64) {
+        self.pending_bytes_to_be_written.fetch_add(amount, Ordering::SeqCst);
+    }
 }
 
 pub type WriteMsg = (Arc<File>, u64, Bytes, Arc<FileCompletionTracker>);

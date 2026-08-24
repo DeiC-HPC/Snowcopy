@@ -83,3 +83,113 @@ async fn test_upload_and_download_with_empty_file() {
     assert!(env.test_file_handler.assert_upload_and_download_folders_match());
     assert!(output.get_combined_logs().contains("Transferred: 1/1 files"));
 }
+
+#[tokio::test]
+async fn test_upload_and_download_retries_on_failures_multipart() {
+    let env = get_default_test_env().await;
+
+    let file_name = "corruption_test.txt";
+    env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&HashMap::from([
+        (file_name, (CHUNK_SIZE as usize / 1024) * 2 + 1000), //divide 1024 for kb
+    ]));
+
+    //corrupt upload requests
+    env.proxy_handler.corrupt_the_body_of_response_x_times("POST", file_name, 1).await.unwrap();
+    env.proxy_handler.truncate_response_x_times("POST", file_name, 1, 50).await.unwrap();
+    env.proxy_handler.cut_connection_x_times("PUT", file_name, 1).await.unwrap();
+
+    let output = env.snowcopy_upload_test_upload_folder();
+    assert!(output.file_is_uploaded_with_multipart(file_name));
+    assert!(output.get_combined_logs().contains("Total retries: 3"));
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files"));
+
+    //corrupt download requests
+    env.proxy_handler.truncate_response_x_times("GET", file_name, 1, 50).await.unwrap();
+    env.proxy_handler.cut_connection_x_times("GET", file_name, 1).await.unwrap();
+
+    let output = env.snowcopy_download_bucket_to_download_folder();
+    assert!(env.test_file_handler.assert_upload_and_download_folders_match());
+    assert!(output.get_combined_logs().contains("Total retries: 2"));
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files")); //TODO JON: enable and fix LF-154
+}
+
+#[tokio::test]
+async fn test_upload_and_download_retries_on_failures_small_file() {
+    let env = get_default_test_env().await;
+
+    let file_name = "corruption_test.txt";
+    env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&HashMap::from([
+        (file_name, 1)
+    ]));
+
+    //corrupt upload requests
+    env.proxy_handler.cut_connection_x_times("PUT", file_name, 2).await.unwrap();
+
+    let output = env.snowcopy_upload_test_upload_folder();
+    assert!(output.get_combined_logs().contains("Total retries: 2")); //two connection cuts
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files"));
+
+    //corrupt download requests
+    env.proxy_handler.truncate_response_x_times("GET", file_name, 1, 50).await.unwrap();
+    env.proxy_handler.cut_connection_x_times("GET", file_name, 1).await.unwrap();
+
+    let output = env.snowcopy_download_bucket_to_download_folder();
+    assert!(env.test_file_handler.assert_upload_and_download_folders_match());
+    assert!(output.get_combined_logs().contains("Total retries: 2"));
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files")); //TODO JON: enable and fix LF-154
+}
+
+#[tokio::test]
+async fn test_upload_and_download_retries_on_failures_multipart_trailing() {
+    let env = get_default_test_env().await;
+
+    let file_name = "corruption_test.txt";
+    env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&HashMap::from([
+        (file_name, (CHUNK_SIZE as usize / 1024) * 2 + 1000), //divide 1024 for kb
+    ]));
+
+    //corrupt upload requests
+    env.proxy_handler.corrupt_the_body_of_response_x_times("POST", file_name, 1).await.unwrap();
+    env.proxy_handler.truncate_response_x_times("POST", file_name, 1, 50).await.unwrap();
+    env.proxy_handler.cut_connection_x_times("PUT", file_name, 1).await.unwrap();
+
+    let output = env.snowcopy_upload_test_upload_folder_trailing();
+    assert!(output.file_is_uploaded_with_multipart(file_name));
+    assert!(output.get_combined_logs().contains("Total retries: 3"));
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files"));
+
+    //corrupt download requests
+    env.proxy_handler.truncate_response_x_times("GET", file_name, 1, 50).await.unwrap();
+    env.proxy_handler.cut_connection_x_times("GET", file_name, 1).await.unwrap();
+
+    let output = env.snowcopy_download_bucket_to_download_folder();
+    assert!(env.test_file_handler.assert_upload_and_download_folders_match());
+    assert!(output.get_combined_logs().contains("Total retries: 2"));
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files")); //TODO JON: enable and fix LF-154
+}
+
+#[tokio::test]
+async fn test_upload_and_download_retries_on_failures_small_file_trailing() {
+    let env = get_default_test_env().await;
+
+    let file_name = "corruption_test.txt";
+    env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&HashMap::from([
+        (file_name, 1)
+    ]));
+
+    //corrupt upload requests
+    env.proxy_handler.cut_connection_x_times("PUT", file_name, 2).await.unwrap();
+
+    let output = env.snowcopy_upload_test_upload_folder_trailing();
+    assert!(output.get_combined_logs().contains("Total retries: 2")); //two connection cuts
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files"));
+
+    //corrupt download requests
+    env.proxy_handler.truncate_response_x_times("GET", file_name, 1, 50).await.unwrap();
+    env.proxy_handler.cut_connection_x_times("GET", file_name, 1).await.unwrap();
+
+    let output = env.snowcopy_download_bucket_to_download_folder();
+    assert!(env.test_file_handler.assert_upload_and_download_folders_match());
+    assert!(output.get_combined_logs().contains("Total retries: 2"));
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files")); //TODO JON: enable and fix LF-154
+}

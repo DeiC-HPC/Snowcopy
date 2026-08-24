@@ -12,6 +12,7 @@ STATE = {
         "PUT": 0,
         "POST": 0,
         "HEAD": 0,
+        "DELETE": 0,
     },
 
     # Response corruption
@@ -36,6 +37,14 @@ STATE = {
         "target_key": None,
         "method": "GET",
         "remaining": 0,
+    },
+
+    # Truncate response
+    "truncate_response": {
+        "target_key": None,
+        "method": "GET",
+        "remaining": 0,
+        "bytes": 1,
     },
 }
 
@@ -88,6 +97,10 @@ class ControlHandler(BaseHTTPRequestHandler):
 
             if self.path == "/reset-counts":
                 self.reset_counts()
+                return
+
+            if self.path == "/configure-truncate-response":
+                self.configure_truncate_response(payload)
                 return
 
             self.send_response(404)
@@ -150,6 +163,22 @@ class ControlHandler(BaseHTTPRequestHandler):
 
         json_response(self, 200, {"status": "ok"})
 
+    def configure_truncate_response(self, payload):
+        with STATE_LOCK:
+            STATE["truncate_response"] = {
+                "target_key": payload["target_key"],
+                "method": payload.get("method", "GET").upper(),
+                "remaining": int(payload.get("count", 1)),
+                "bytes": int(payload.get("bytes", 1)),
+            }
+
+        ctx.log.info(
+            f"Configured response truncation: "
+            f"{STATE['truncate_response']}"
+        )
+
+        json_response(self, 200, {"status": "ok"})
+
     def reset_counts(self):
 
         with STATE_LOCK:
@@ -194,6 +223,8 @@ class Corruptor:
 
         self.handle_corruption(flow)
 
+        self.handle_truncate_response(flow)
+
     def matches(self, flow, config):
 
         if config["remaining"] <= 0:
@@ -210,6 +241,9 @@ class Corruptor:
         return target in flow.request.pretty_url
 
     def handle_corruption(self, flow):
+
+        if self.manipulated(flow):
+            return
 
         with STATE_LOCK:
 
@@ -240,7 +274,12 @@ class Corruptor:
             f"remaining={remaining}"
         )
 
+        self.mark_manipulated(flow, "handle_corruption")
+
     def handle_fake_response(self, flow):
+
+        if self.manipulated(flow):
+            return
 
         with STATE_LOCK:
 
@@ -265,7 +304,12 @@ class Corruptor:
             f"status={cfg['status_code']}"
         )
 
+        self.mark_manipulated(flow, "fake_response")
+
     def handle_cut_connection(self, flow):
+
+        if self.manipulated(flow):
+            return
 
         with STATE_LOCK:
 
@@ -276,14 +320,80 @@ class Corruptor:
 
             STATE["cut_connection"]["remaining"] -= 1
 
-        flow.error = http.Error(
-            "Simulated connection termination"
-        )
+        flow.kill()
 
         ctx.log.info(
             f"Cut connection for "
             f"{flow.request.pretty_url}"
         )
+
+        self.mark_manipulated(flow, "cut_connection")
+
+    def handle_truncate_response(self, flow):
+
+        if self.manipulated(flow):
+            return
+
+        ctx.log.info(
+            f"truncate check: {flow.request.method} "
+            f"{flow.request.pretty_url}"
+        )
+
+        with STATE_LOCK:
+
+            cfg = STATE["truncate_response"].copy()
+
+            if not self.matches(flow, cfg):
+                return
+
+            body = flow.response.content
+
+            if not body:
+                return
+
+            truncate_bytes = cfg["bytes"]
+
+            if truncate_bytes >= len(body):
+                flow.response.content = b""
+            else:
+                ctx.log.info(
+                    f"before={len(flow.response.content)}"
+                )
+
+                flow.response.content = body[:50]
+
+                ctx.log.info(
+                    f"after={len(flow.response.content)}"
+                )
+
+            STATE["truncate_response"]["remaining"] -= 1
+
+            remaining = STATE["truncate_response"]["remaining"]
+
+        if "Content-Length" in flow.response.headers:
+            flow.response.headers["Content-Length"] = str(
+                len(flow.response.content)
+            )
+
+        ctx.log.info(
+            f"header after={flow.response.headers.get('Content-Length')}"
+        )
+
+        ctx.log.info(
+            f"Truncated response for "
+            f"{flow.request.pretty_url} "
+            f"bytes={truncate_bytes} "
+            f"remaining={remaining}"
+        )
+
+        self.mark_manipulated(flow, "handle_truncate_response")
+
+    def manipulated(self, flow):
+        return flow.metadata.get("manipulated", False)
+
+    def mark_manipulated(self, flow, action):
+        flow.metadata["manipulated"] = True
+        flow.metadata["manipulation"] = action
 
 
 addons = [Corruptor()]

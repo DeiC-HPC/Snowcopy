@@ -102,6 +102,7 @@ impl CC for CommandCenter {
 
         let mode = self.mode.clone();
         let stats = self.stats;
+        let quiet = self.quiet;
         let cancellation_token_of_all_ongoing_tasks = self.cancellation_token_of_all_ongoing_tasks.clone();
         let handle = tokio::task::spawn(async move {
             let mut file_transferred_count = 0u64;
@@ -189,7 +190,7 @@ impl CC for CommandCenter {
             if mode == Mode::Download && file_transferred_count > 0 && file_transferred_count != total_integrity_checked_files {
                 println!("Total files integrity checked: {}/{}", total_integrity_checked_files, file_transferred_count);
             }
-            if total_retries > 0 { //TODO Jon: Should this just be part of UI bar? Yeeesss
+            if total_retries > 0 && !quiet { //TODO Jon: Perhaps hide this behind stats?
                 println!("Total retries: {}", total_retries);
             }
 
