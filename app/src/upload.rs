@@ -209,6 +209,8 @@ async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<Upl
                 }
             };
 
+            runtime_clone.cc_tx.send(CommandCenterEvent::Log(format!("Result of upload: {:?}", result))).expect("Failed to send message to command center. Should never happen.");
+
             match result {
                 Ok((etag, metrics)) => {
                     let completed_part = CompletedPartAws::builder()
@@ -226,7 +228,7 @@ async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<Upl
                     runtime_clone.cc_tx.send(CommandCenterEvent::PartTransferred(metrics)).expect("Failed to send message to command center. Should never happen.");
                 }
                 Err(e) => {
-                    CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e)));
+                    runtime_clone.cc_tx.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Error uploading part {} of file {}: {}", part_number, file_info_clone.file_path.to_str().unwrap(), e)))).expect("Failed to send message to command center. Should never happen.");
                 }
             }
         });
@@ -271,7 +273,9 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, 
             runtime.cc_tx.send(CommandCenterEvent::PartTransferred(metrics.1)).expect("Failed to send message to command center. Should never happen.");
             runtime.cc_tx.send(CommandCenterEvent::FileTransferred(file_size)).expect("Failed to send message to command center. Should never happen.");
         },
-        Err(e) => panic!("Error uploading file {}: {}", file_info.file_path.to_str().unwrap(), e),
+        Err(e) => {
+            runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Error uploading file {}: {}", file_info.file_path.to_str().unwrap(), e)))).expect("Failed to send message to command center. Should never happen.");
+        },
     }
 }
 
