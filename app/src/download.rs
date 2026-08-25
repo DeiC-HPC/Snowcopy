@@ -28,6 +28,7 @@ use util_layer::snowcopy_result::SnowcopyResult;
 use util_layer::url_encoder::url_encode_fast;
 use util_layer::{DownloadConfig, FileInfo, S3Object};
 use SnowCopyError::IntegrityError;
+use util_layer::cc_util::CommandCenterEvent::FatalErrorEvent;
 
 /// Ensures that the parent directory of the given path exists.
 /// Uses a cache to avoid redundant filesystem operations.
@@ -257,19 +258,25 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
             IntegrityAlgorithm::None
         };
 
-        let integrity_result = download_files_in_part_and_check_integrity(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &key, total_size, file.clone(), chunk_size, num_parts, hash_algo.clone(), cancellation_token.clone()).await;
+        let download_result = download_files_in_part_and_check_integrity(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &key, total_size, file.clone(), chunk_size, num_parts, hash_algo.clone(), cancellation_token.clone()).await;
 
-        if let Err(IntegrityError(msg)) = integrity_result {
-            cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, msg))).expect("Failed to send message. This should never happen.");
+        match download_result {
+            Ok(()) => {},
 
-            let integrity_result = download_files_in_part_and_check_integrity(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &key, total_size, file, chunk_size, num_parts, hash_algo, cancellation_token).await;
+            Err(IntegrityError(msg)) => {
+                cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, msg))).expect("Failed to send message. This should never happen.");
 
-            if let Err(e) = integrity_result {
-                cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Its likely that there is something with the metadata, the network or the s3 storage system.", object.key, e))).expect("Failed to send message. This should never happen.");
-                //TODO JON: exit with different exit code, when we are done. When we figure out how to cancel / exit the program. I would assume that we send this info to the command center
+                let integrity_result = download_files_in_part_and_check_integrity(&pool_client, &config, &object, &req_sem, &cc_sender, &disk_write_tx, multipart_integrity_verification, &key, total_size, file, chunk_size, num_parts, hash_algo, cancellation_token).await;
+
+                if let Err(e) = integrity_result {
+                    cc_sender.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Failed to download file: {}. Error: {}", object.key, e)))).expect("Failed to send message. This should never happen.");
+                }
             }
 
-            return;
+            Err(e) => {
+                cc_sender.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Failed to download file: {}. Error: {}", object.key, e)))).expect("Failed to send message. This should never happen.");
+                return;
+            }
         }
     } else {
         //simple download
@@ -284,18 +291,23 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
         let canonical_uri = Arc::new(format!("/{}/{}", &config.bucket, object.aws_uri_encoded_key));
         let query_uri = String::new();
 
-        let integrity_result = download_full_file_and_check_integrity(pool_client.clone(), config.clone(), object.clone(), req_sem.clone(), cc_sender.clone(), disk_write_tx.clone(), file_info.clone(), canonical_uri.clone(), query_uri.clone(), cancellation_token.clone()).await;
-        if let Err(IntegrityError(msg)) = integrity_result {
-            cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, msg))).expect("Failed to send message. This should never happen.");
+        let download_result = download_full_file_and_check_integrity(pool_client.clone(), config.clone(), object.clone(), req_sem.clone(), cc_sender.clone(), disk_write_tx.clone(), file_info.clone(), canonical_uri.clone(), query_uri.clone(), cancellation_token.clone()).await;
+        match download_result {
+            Ok(()) => {},
 
-            let integrity_result = download_full_file_and_check_integrity(pool_client, config, object.clone(), req_sem, cc_sender.clone(), disk_write_tx, file_info, canonical_uri, query_uri, cancellation_token).await;
+            Err(IntegrityError(msg)) => {
+                cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Attempting again as it might have been corrupted during transfer.", object.key, msg))).expect("Failed to send message. This should never happen.");
 
-            if let Err(e) = integrity_result {
-                cc_sender.send(CommandCenterEvent::Log(format!("Failed to verify {}: {}. Its likely that there is something with the metadata, the network or the s3 storage system.", object.key, e))).expect("Failed to send message. This should never happen.");
-                //TODO JON: exit with different exit code, when we are done. When we figure out how to cancel / exit the program. I would assume that we send this info to the command center
+                let integrity_result = download_full_file_and_check_integrity(pool_client, config, object.clone(), req_sem, cc_sender.clone(), disk_write_tx, file_info, canonical_uri, query_uri, cancellation_token).await;
+
+                if let Err(e) = integrity_result {
+                    cc_sender.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Failed to download file: {}. Error: {}", object.key, e)))).expect("Failed to send message. This should never happen.");
+                }
+            },
+
+            Err(e) => {
+                cc_sender.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Failed to download file: {}. Error: {}", object.key, e)))).expect("Failed to send message. This should never happen.");
             }
-
-            return;
         }
     }
 }
@@ -366,10 +378,10 @@ async fn download_files_in_part_and_check_integrity(pool_client: &Arc<HyperClien
                 return Ok(()); //TODO JON: What is the best option here?
             }
             Ok(Err(e)) => {
-                panic!("Part download failed for {}: {}", key, e);
+                return Err(e);
             }
             Err(e) => {
-                panic!("Join error for {}: {}", key, e);
+                cc_sender.send(FatalErrorEvent(UserFacingError::new(RequestFailure, "Failed to join tasks".to_string()))).expect("Failed to send fatal error event");
             }
         }
     }
@@ -456,7 +468,6 @@ fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadC
     }
     download_set
 }
-
 
 pub fn spawn_global_writers(
     rx: Receiver<WriteMsg>,
