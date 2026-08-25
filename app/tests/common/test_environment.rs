@@ -21,14 +21,25 @@ pub struct TestEnv {
 }
 
 impl TestEnv {
+    ///Split command into arguments on whitespace
     pub fn run_snowcopy_command(&self, command: String) -> SnowcopyOutput {
+        self.run_snowcopy_args_in_dir(command.split_whitespace(), ".")
+    }
+
+    /// This function allows arguments containing whitespace
+    pub fn run_snowcopy_args_in_dir<I, S>(&self, args: I, current_dir: impl AsRef<std::path::Path>) -> SnowcopyOutput
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
         let output = assert_cmd::Command::cargo_bin("snowcopy")
             .unwrap()
+            .current_dir(current_dir)
             .arg("--config")
             .arg(self.test_file_handler.config_path())
             .arg("--use-unsafe-http")
             .arg("-v")
-            .args(command.split_whitespace())
+            .args(args)
             .output()
             .expect("failed to execute snowcopy");
 
