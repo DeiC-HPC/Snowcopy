@@ -381,7 +381,7 @@ async fn download_files_in_part_and_check_integrity(pool_client: &Arc<HyperClien
                 return Err(e);
             }
             Err(e) => {
-                cc_sender.send(FatalErrorEvent(UserFacingError::new(RequestFailure, "Failed to join tasks".to_string()))).expect("Failed to send fatal error event");
+                cc_sender.send(FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Failed to join tasks: {e}")))).expect("Failed to send fatal error event");
             }
         }
     }
