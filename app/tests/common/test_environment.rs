@@ -37,9 +37,9 @@ impl TestEnv {
             .current_dir(current_dir)
             .arg("--config")
             .arg(self.test_file_handler.config_path())
+            .args(args)
             .arg("--use-unsafe-http")
             .arg("-v")
-            .args(args)
             .output()
             .expect("failed to execute snowcopy");
 
