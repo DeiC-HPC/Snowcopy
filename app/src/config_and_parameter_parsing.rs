@@ -405,7 +405,7 @@ mod tests {
         assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
 
         // HTTP endpoint + --use-unsafe-http present => success
-        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "ls", &format!("{HTTP_PROFILE}:")]).unwrap();
+        let cli = Cli::try_parse_from(["snowcopy", "ls", &format!("{HTTP_PROFILE}:"), "--use-unsafe-http"]).unwrap();
         assert!(build_config(cli, &provider).is_ok());
 
         // HTTPS endpoint => success
@@ -422,7 +422,7 @@ mod tests {
         assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
 
         // HTTP endpoint + --use-unsafe-http present => success
-        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "rm", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        let cli = Cli::try_parse_from(["snowcopy", "rm", &format!("{HTTP_PROFILE}:bucket"), "--use-unsafe-http"]).unwrap();
         assert!(build_config(cli, &provider).is_ok());
 
         // HTTPS endpoint => success
@@ -439,7 +439,7 @@ mod tests {
         assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
 
         // HTTP endpoint + --use-unsafe-http present => success
-        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "cp", "local", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        let cli = Cli::try_parse_from(["snowcopy", "cp", "local", &format!("{HTTP_PROFILE}:bucket"), "--use-unsafe-http"]).unwrap();
         assert!(build_config(cli, &provider).is_ok());
 
         // HTTPS endpoint => success
@@ -456,7 +456,7 @@ mod tests {
         assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
 
         // HTTP endpoint + --use-unsafe-http present => success
-        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "cp", &format!("{HTTP_PROFILE}:bucket"), "local"]).unwrap();
+        let cli = Cli::try_parse_from(["snowcopy", "cp", &format!("{HTTP_PROFILE}:bucket"), "local", "--use-unsafe-http"]).unwrap();
         assert!(build_config(cli, &provider).is_ok());
 
         // HTTPS endpoint => success
@@ -580,9 +580,9 @@ mod tests {
     fn accepts_http_endpoint_with_flag() {
         let cli = Cli::try_parse_from([
             "snowcopy",
-            "--use-unsafe-http",
             "ls",
             &format!("{HTTP_PROFILE}:data"),
+            "--use-unsafe-http",
         ]).unwrap();
 
         let provider = MockProvider;
