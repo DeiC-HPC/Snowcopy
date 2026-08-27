@@ -42,7 +42,7 @@ fn test_expected_amount_of_files_uploaded(execution_folder: &str, input_path: &s
         execution_folder
     );
 
-    let output = env.run_snowcopy_args_in_dir(["cp", input_path, target.as_str()], execution_dir);
+    let output = env.run_snowcopy_args_in_dir(["cp", input_path, target.as_str(), "-v"], execution_dir);
     assert!(output.is_success(), "Upload failed: {}", output.get_combined_logs());
     assert!(output
             .get_combined_logs()

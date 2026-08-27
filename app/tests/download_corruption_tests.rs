@@ -57,7 +57,7 @@ async fn test_download_integrity_checking_disabled_on_multipart_uploaded_file() 
     env.proxy_handler.corrupt_the_body_of_response_x_times("GET", test_file_large, 90000).await.unwrap();
 
     let integrity_disable = "--disable-md5-checksum";
-    let download_output = env.run_snowcopy_command(format!("cp {} {}:{} {}", integrity_disable, DEFAULT_S3_PROFILE, env.unique_bucket, env.test_file_handler.download_folder().to_str().unwrap()));
+    let download_output = env.run_snowcopy_command(format!("cp {} {}:{} {} -v", integrity_disable, DEFAULT_S3_PROFILE, env.unique_bucket, env.test_file_handler.download_folder().to_str().unwrap()));
     assert!(download_output.is_success(), "Download command failed: {}", output.get_combined_logs());
     assert!(!download_output.get_combined_logs().contains(INTEGRITY_RETRY_ATTEMPT_MESSAGE));
     assert!(download_output.get_combined_logs().contains("Transferred: 1/1 files"));
