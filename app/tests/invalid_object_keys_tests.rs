@@ -41,7 +41,7 @@ async fn test_download_and_list_of_objects_with_illegal_chars() {
     }
 
     //Download
-    let download_bucket_to_download_folder = format!("cp {}:{} {}", DEFAULT_S3_PROFILE, env.unique_bucket, env.test_file_handler.download_folder().to_str().unwrap());
+    let download_bucket_to_download_folder = format!("cp {}:{} {} -v", DEFAULT_S3_PROFILE, env.unique_bucket, env.test_file_handler.download_folder().to_str().unwrap());
     let output = env.run_snowcopy_command(download_bucket_to_download_folder);
 
     assert!(env.test_file_handler.download_folder_contains_file(legal_object));

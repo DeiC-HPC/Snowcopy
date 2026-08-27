@@ -129,7 +129,6 @@ pub struct DownloadConfig {
 pub struct ListConfig {
     pub endpoint: EndpointConfig,
     pub bucket: Option<String>,
-    pub req_limit: Option<usize>,
     pub verbose: bool,
     pub use_unsafe_http: bool,
 }
@@ -146,7 +145,6 @@ pub struct RemoveConfig {
 
 #[derive(Debug, Clone)]
 pub struct ConfigModeConfig {
-    pub quiet: bool,
     pub config_path: Option<PathBuf>,
 }
 

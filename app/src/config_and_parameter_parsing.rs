@@ -59,7 +59,7 @@ impl CredentialProvider for FileCredentialProvider {
 name = "snowcopy",
 version = "0.1.0-alpha.1",
 about = "Fast S3 copy tool - ALPHA, use with caution.",
-after_help = "Examples:\n  upload:   snowcopy cp my-folder profile:bucket\n  upload:   snowcopy cp file.txt profile:bucket\n  download: snowcopy cp profile:bucket ."
+after_help = "First time users should run 'snowcopy config' to configure a S3 server.\n\nExamples:\n  upload:   snowcopy cp my-folder profile:bucket\n  upload:   snowcopy cp file.txt profile:bucket\n  download: snowcopy cp profile:bucket ."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -67,14 +67,11 @@ pub struct Cli {
 
     #[arg(long, global = true, help = "Path to a config file to use instead of the default")]
     pub config: Option<PathBuf>,
+}
 
-    #[arg(long, global = true, help = "Allow using insecure HTTP endpoints")]
-    pub use_unsafe_http: bool,
-
-    #[arg(short = 'v', long, global = true, help = "Verbose mode (print http headers)")]
-    pub verbose: bool,
-
-    #[arg(short = 'q', long, global = true, help = "Quiet/silent mode (no output)")]
+#[derive(clap::Args, Debug)]
+pub struct RequestOptions {
+    #[arg(short = 'q', long, help = "Quiet/silent mode (no output)")]
     pub quiet: bool,
 
     #[arg(short = 'r', long, help = "Maximum number of concurrent requests")]
@@ -82,15 +79,21 @@ pub struct Cli {
 }
 
 #[derive(clap::Args, Debug)]
+pub struct SafetyOptions {
+    #[arg(long, help = "Allow using insecure HTTP endpoints")]
+    pub use_unsafe_http: bool,
+}
+
+#[derive(clap::Args, Debug)]
 pub struct UploadOptions {
     #[arg(long, help = "Enable trailing header mode on large files")]
     pub trailing: bool,
 
-    #[arg(long, help = "Enable trailing header mode on small files")]
-    pub trailing_small: bool,
-
     #[arg(long, help = "Size of chunks used for trailing header operations in kB", default_value = "1024")]
     pub trailing_chunk_size: u64,
+
+    #[arg(long, help = "Enable trailing header mode on small files")]
+    pub trailing_small: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -101,6 +104,9 @@ pub struct DownloadOptions {
 
 #[derive(clap::Args, Debug)]
 pub struct TransferOptions {
+    #[arg(long, help = "Disable MD5 checksum validation")]
+    pub disable_md5_checksum: bool,
+
     #[arg(short = 'f', long, help = "Maximum number of files to do read/write operations on at once")]
     pub file_limit: Option<usize>,
 
@@ -110,11 +116,11 @@ pub struct TransferOptions {
     #[arg(long, help = "Prints statistics about the transfer")]
     pub stats: bool,
 
-    #[arg(long, help = "Disable MD5 checksum validation")]
-    pub disable_md5_checksum: bool,
-
     #[arg(long, help = "Transfer method", default_value = "o1")]
     pub transfer_method: TransferMethod,
+
+    #[arg(short = 'v', long, help = "Verbose mode (print http headers)")]
+    pub verbose: bool, //TODO JON: Eventually, this should be on all subcommands besides config
 }
 
 
@@ -122,18 +128,6 @@ pub struct TransferOptions {
 enum Commands {
     #[command(about = "Open the TUI for profile configuration management")]
     Config,
-
-    #[command(about = "List buckets and bucket contents")]
-    Ls {
-        #[arg(help = "Either profile: or profile:bucket (if bucket is empty, all buckets are listed)")]
-        input_path: ParsedInputPath,
-    },
-
-    #[command(about = "Remove/delete a bucket along with ALL its contents")]
-    Rm {
-        #[arg(help = "profile:bucket")]
-        input_path: ParsedInputPath,
-    },
 
     #[command(about = "Upload or download files")]
     Cp {
@@ -143,6 +137,12 @@ enum Commands {
         dest: ParsedInputPath,
 
         #[command(flatten)]
+        safety: SafetyOptions,
+
+        #[command(flatten)]
+        request: RequestOptions,
+
+        #[command(flatten)]
         transfer: TransferOptions,
 
         #[command(flatten)]
@@ -150,6 +150,27 @@ enum Commands {
 
         #[command(flatten)]
         download: DownloadOptions,
+    },
+
+    #[command(about = "List buckets and bucket contents")]
+    Ls {
+        #[arg(help = "Either profile: or profile:bucket (if bucket is empty, all buckets are listed)")]
+        input_path: ParsedInputPath,
+
+        #[command(flatten)]
+        safety: SafetyOptions,
+    },
+
+    #[command(about = "Remove/delete a bucket along with ALL its contents")]
+    Rm {
+        #[arg(help = "profile:bucket")]
+        input_path: ParsedInputPath,
+
+        #[command(flatten)]
+        safety: SafetyOptions,
+
+        #[command(flatten)]
+        request: RequestOptions,
     },
 }
 
@@ -166,34 +187,32 @@ pub async fn read_and_validate_command_line_arguments() -> SnowConfig {
 pub fn build_config(cli: Cli, provider: &dyn CredentialProvider) -> Result<SnowConfig, CliError> {
     match cli.command {
         Commands::Config => {
-            Ok(SnowConfig::Config(ConfigModeConfig { quiet: cli.quiet, config_path : cli.config }))
+            Ok(SnowConfig::Config(ConfigModeConfig { config_path : cli.config }))
         }
 
-        Commands::Ls { input_path } => {
+        Commands::Ls { input_path, safety } => {
             match input_path {
                 ParsedInputPath::S3Server { profile } => {
                     let endpoint = provider.gather(&profile, cli.config.as_ref())?;
-                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
+                    check_http_safeguard(&endpoint, safety.use_unsafe_http)?;
 
                     Ok(SnowConfig::List(ListConfig {
                         endpoint,
                         bucket : None,
-                        req_limit: cli.req_limit,
-                        verbose : cli.verbose,
-                        use_unsafe_http : cli.use_unsafe_http,
+                        verbose: false,
+                        use_unsafe_http : safety.use_unsafe_http,
                     }))
                 }
 
                 ParsedInputPath::S3Bucket { profile, bucket, .. } => {
                     let endpoint = provider.gather(&profile, cli.config.as_ref())?;
-                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
+                    check_http_safeguard(&endpoint, safety.use_unsafe_http)?;
 
                     Ok(SnowConfig::List(ListConfig {
                         endpoint,
                         bucket : Some(bucket),
-                        req_limit: cli.req_limit,
-                        verbose : cli.verbose,
-                        use_unsafe_http : cli.use_unsafe_http,
+                        verbose: false,
+                        use_unsafe_http : safety.use_unsafe_http,
                     }))
                 }
 
@@ -203,7 +222,7 @@ pub fn build_config(cli: Cli, provider: &dyn CredentialProvider) -> Result<SnowC
             }
         }
 
-        Commands::Rm { input_path } => {
+        Commands::Rm { input_path, safety, request } => {
             match input_path {
                 ParsedInputPath::S3Bucket { profile, bucket, key } => {
                     if key.is_some() {
@@ -211,15 +230,15 @@ pub fn build_config(cli: Cli, provider: &dyn CredentialProvider) -> Result<SnowC
                     }
 
                     let endpoint = provider.gather(&profile, cli.config.as_ref())?;
-                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
+                    check_http_safeguard(&endpoint, safety.use_unsafe_http)?;
 
                     Ok(SnowConfig::Remove(RemoveConfig {
                         endpoint,
                         bucket,
-                        quiet: cli.quiet,
-                        verbose : cli.verbose,
-                        use_unsafe_http : cli.use_unsafe_http,
-                        req_limit_overwrite : cli.req_limit,
+                        quiet: request.quiet,
+                        verbose : false,
+                        use_unsafe_http : safety.use_unsafe_http,
+                        req_limit_overwrite : request.req_limit,
                     }))
                 }
 
@@ -229,22 +248,22 @@ pub fn build_config(cli: Cli, provider: &dyn CredentialProvider) -> Result<SnowC
             }
         }
 
-        Commands::Cp { src, dest, transfer, upload, download } => {
+        Commands::Cp { src, dest, safety, request, transfer, upload, download } => {
             match (&src, &dest) {
                 (ParsedInputPath::Local( local_path), ParsedInputPath::S3Bucket { profile, bucket, .. }) => {
                     let endpoint = provider.gather(&profile, cli.config.as_ref())?;
-                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
+                    check_http_safeguard(&endpoint, safety.use_unsafe_http)?;
 
                     Ok(SnowConfig::Upload(UploadConfig {
                         endpoint: endpoint.clone(),
                         md5_checksum_integrity_is_disabled: transfer.disable_md5_checksum,
                         transfer_method : transfer.transfer_method,
                         file_limit_overwrite : transfer.file_limit,
-                        req_limit_overwrite : cli.req_limit,
-                        quiet: cli.quiet,
-                        verbose : cli.verbose,
+                        req_limit_overwrite : request.req_limit,
+                        quiet: request.quiet,
+                        verbose : transfer.verbose,
                         stats : transfer.stats,
-                        use_unsafe_http : cli.use_unsafe_http,
+                        use_unsafe_http : safety.use_unsafe_http,
                         trailing_chunk_size: upload.trailing_chunk_size ,
                         trailing : upload.trailing,
                         trailing_small : upload.trailing_small,
@@ -256,19 +275,19 @@ pub fn build_config(cli: Cli, provider: &dyn CredentialProvider) -> Result<SnowC
 
                 (ParsedInputPath::S3Bucket { profile, bucket, .. }, ParsedInputPath::Local(local_path)) => {
                     let endpoint = provider.gather(&profile, cli.config.as_ref())?;
-                    check_http_safeguard(&endpoint, cli.use_unsafe_http)?;
+                    check_http_safeguard(&endpoint, safety.use_unsafe_http)?;
 
                     Ok(SnowConfig::Download(DownloadConfig {
                         endpoint: endpoint.clone(),
                         md5_checksum_integrity_is_disabled: transfer.disable_md5_checksum,
                         transfer_method : transfer.transfer_method,
                         file_limit_overwrite : transfer.file_limit,
-                        req_limit_overwrite  : cli.req_limit,
+                        req_limit_overwrite  : request.req_limit,
                         download_concurrency_overwrite : download.download_single_file_concurrency_limit,
-                        quiet: cli.quiet,
-                        verbose : cli.verbose,
+                        quiet: request.quiet,
+                        verbose : transfer.verbose,
                         stats : transfer.stats,
-                        use_unsafe_http : cli.use_unsafe_http,
+                        use_unsafe_http : safety.use_unsafe_http,
                         open_file_limit_overwrite : transfer.open_file_limit,
                         bucket : bucket.clone(),
                         local_path: local_path.clone(),
@@ -386,7 +405,7 @@ mod tests {
         assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
 
         // HTTP endpoint + --use-unsafe-http present => success
-        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "ls", &format!("{HTTP_PROFILE}:")]).unwrap();
+        let cli = Cli::try_parse_from(["snowcopy", "ls", &format!("{HTTP_PROFILE}:"), "--use-unsafe-http"]).unwrap();
         assert!(build_config(cli, &provider).is_ok());
 
         // HTTPS endpoint => success
@@ -403,7 +422,7 @@ mod tests {
         assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
 
         // HTTP endpoint + --use-unsafe-http present => success
-        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "rm", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        let cli = Cli::try_parse_from(["snowcopy", "rm", &format!("{HTTP_PROFILE}:bucket"), "--use-unsafe-http"]).unwrap();
         assert!(build_config(cli, &provider).is_ok());
 
         // HTTPS endpoint => success
@@ -420,7 +439,7 @@ mod tests {
         assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
 
         // HTTP endpoint + --use-unsafe-http present => success
-        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "cp", "local", &format!("{HTTP_PROFILE}:bucket")]).unwrap();
+        let cli = Cli::try_parse_from(["snowcopy", "cp", "local", &format!("{HTTP_PROFILE}:bucket"), "--use-unsafe-http"]).unwrap();
         assert!(build_config(cli, &provider).is_ok());
 
         // HTTPS endpoint => success
@@ -437,7 +456,7 @@ mod tests {
         assert!(matches!(build_config(cli, &provider), Err(CliError::UnsafeHttp(_))));
 
         // HTTP endpoint + --use-unsafe-http present => success
-        let cli = Cli::try_parse_from(["snowcopy", "--use-unsafe-http", "cp", &format!("{HTTP_PROFILE}:bucket"), "local"]).unwrap();
+        let cli = Cli::try_parse_from(["snowcopy", "cp", &format!("{HTTP_PROFILE}:bucket"), "local", "--use-unsafe-http"]).unwrap();
         assert!(build_config(cli, &provider).is_ok());
 
         // HTTPS endpoint => success
@@ -511,7 +530,7 @@ mod tests {
         .unwrap();
 
         match cli.command {
-            Commands::Ls { input_path } => {
+            Commands::Ls { input_path, .. } => {
                 match input_path {
                     ParsedInputPath::S3Bucket { profile, bucket, .. } => {
                         assert_eq!(profile, PROFILE);
@@ -528,7 +547,6 @@ mod tests {
     fn ls_bucket_creates_list_config() {
         let cli = Cli::try_parse_from([
             "snowcopy",
-            "--req-limit", "20",
             "ls",
             &format!("{PROFILE}:data"),
         ]).unwrap();
@@ -539,7 +557,6 @@ mod tests {
         match result {
             SnowConfig::List(cfg) => {
                 assert_eq!(cfg.bucket, Some("data".to_string()));
-                assert_eq!(cfg.req_limit, Some(20));
             }
             _ => panic!("expected List config"),
         }
@@ -563,9 +580,9 @@ mod tests {
     fn accepts_http_endpoint_with_flag() {
         let cli = Cli::try_parse_from([
             "snowcopy",
-            "--use-unsafe-http",
             "ls",
             &format!("{HTTP_PROFILE}:data"),
+            "--use-unsafe-http",
         ]).unwrap();
 
         let provider = MockProvider;

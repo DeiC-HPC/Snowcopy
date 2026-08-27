@@ -209,8 +209,6 @@ async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<Upl
                 }
             };
 
-            runtime_clone.cc_tx.send(CommandCenterEvent::Log(format!("Result of upload: {:?}", result))).expect("Failed to send message to command center. Should never happen.");
-
             match result {
                 Ok((etag, metrics)) => {
                     let completed_part = CompletedPartAws::builder()
