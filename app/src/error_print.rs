@@ -64,7 +64,7 @@ mod tests {
 
     #[test]
     fn test_print_fatal_error_logic() {
-        let err = UserFacingError::new(ErrorCode::DiskIoError, "No more space on disk".to_string());
+        let err = UserFacingError::new(ErrorCode::DiskIoError, "Test error message".to_string());
         // Since it prints to stderr, we just call it to ensure no panics and it works as intended.
         print_fatal_error(&err);
     }
