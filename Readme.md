@@ -67,7 +67,7 @@ snowcopy help
 Snowcopy uses file name, size and modification time to determine if a file is already present at the destination. If any file is found to already be at the target, a second progressbar will be displayed:
 ![Incremental transfer progress bar](readme/incremental-transfer-example.png)
 
-The "total" progress bar will show the total number of files already present at the destination. It can be files that were here before the transfer started or files that has been transferred by the running command. "Existing" is the amount of data that already exist and "at target" is the total newly transferred + existing. 
+The "total" progress bar will show the total number of files already present at the destination. It can be files that were there before the transfer started or files that has been transferred by the running command. "Existing" is the amount of data that already exist and "at target" is the total newly transferred + existing. 
 
 ### Integrity
 Snowcopy validates the integrity of all transfers by either md5 or SHA256 depending on the situation. It does so by providing hashes of the content in all uploads. The S3 server then validates that it has received the same content and returns an error if there is a mismatch between the hash and the content.
