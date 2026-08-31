@@ -58,7 +58,7 @@ Snowcopy scans the computer hardware and network link to determine how the trans
 ![config tui](readme/auto-tuning-example.png)
 
 **WIP**:
-It is possible to tune parameters by hand using flags when running the program see help for more information:
+It is possible to tune parameters by hand using flags when running the program. See help for more information:
 ```
 snowcopy help
 ```
@@ -77,9 +77,9 @@ If there is a mismatch between the hash and the transferred content, the transfe
 ## Error codes
 Snowcopy can exit an operation with errors in two different ways:
 
-![Soft error](readme/soft-error.png)
+![Non-fatal error](readme/non-fatal-error.png)
 
-A soft error is where something could not be done, but the rest of the operation is still possible to continue. An example could be a too large file here in the alpha or a S3 object with a key that is not valid as a file on the local file system. The log will contain specific information. A user can trust that the files transferred are correct, but that the transfer is incomplete.
+A non-fatal error is where something could not be done, but the rest of the operation is still possible to continue. An example could be a too large file here in the alpha or a S3 object with a key that is not valid as a file on the local file system. The log will contain specific information. A user can trust that the files transferred are correct, but that the transfer is incomplete.
 
 ![Fatal error](readme/fatal-error.png)
 
