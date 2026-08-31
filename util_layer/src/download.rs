@@ -23,7 +23,7 @@ impl FileCompletionTracker {
                 file.flush().expect("Should never fail");
                 let _ = file.set_modified(mtime); //I expect this to never fail, but we don't want to react to any error
             }
-            cc_sender.send(CommandCenterEvent::FileTransferred(self.total_size)).expect("Should never fail");
+            cc_sender.send(CommandCenterEvent::FileTransferred()).expect("Should never fail");
         }
     }
 

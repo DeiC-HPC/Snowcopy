@@ -5,7 +5,7 @@ use crate::error_codes::{UserFacingError};
 
 pub enum CommandCenterEvent {
     PartTransferred(u64),
-    FileTransferred(u64),
+    FileTransferred(),
     FileDiscovered(u64),
     FileAlreadyAtTarget(u64),
     StatusChanged(Status),

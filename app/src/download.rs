@@ -221,7 +221,7 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
             let _ = file.set_modified(mtime); //I expect this to never fail, but we don't want to react to any error
         }
 
-        cc_sender.send(CommandCenterEvent::FileTransferred(object.size as u64)).expect("Failed to send message");
+        cc_sender.send(CommandCenterEvent::FileTransferred()).expect("Failed to send message");
     } else if (object.size > DOWNLOAD_MULTIPART_THRESHOLD as i64 && !object.sha256_checksum.is_none()) || multipart_integrity_verification { //if sha256_checksum is present without multipart-etag download the simple way
         let file_path = object.local_path.clone();
         let key = object.aws_uri_encoded_key.clone();

@@ -118,9 +118,9 @@ impl CC for CommandCenter {
                     CommandCenterEvent::PartTransferred(amount) => {
                         let _ = ui_tx.send(UiEvent::TransferredData(amount));
                     }
-                    CommandCenterEvent::FileTransferred(bytes) => {
+                    CommandCenterEvent::FileTransferred() => {
                         file_transferred_count += 1;
-                        let _ = ui_tx.send(UiEvent::FileTransferred(bytes));
+                        let _ = ui_tx.send(UiEvent::FileTransferred());
                     }
                     CommandCenterEvent::FileDiscovered(bytes) => {
                         let _ = ui_tx.send(UiEvent::FileDiscovered(bytes));
