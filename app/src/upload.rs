@@ -157,7 +157,7 @@ async fn upload_with_multipart(ctx: Arc<UploadConfig>, aws_client: Arc<S3Client>
         .collect();
 
     aws_client.complete_multipart_upload(&ctx.bucket, &*file_info.key, &upload_id, completed_parts).await.unwrap();
-    let _ = runtime.cc_tx.send(CommandCenterEvent::FileTransferred(file_info.file_size));
+    let _ = runtime.cc_tx.send(CommandCenterEvent::FileTransferred());
 }
 
 async fn upload_each_chunk_with_retry(ctx: &Arc<UploadConfig>, runtime: &Arc<UploadRuntime>, file_info: &Arc<FileInfo>, file: Arc<File>, upload_id: &String, chunk_amount_u64: u64, completed_parts: &Arc<Vec<OnceLock<CompletedPartAws>>>) {
@@ -267,9 +267,8 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, 
 
     match result {
         Ok(metrics) => {
-            let file_size = file_info.file_size;
             runtime.cc_tx.send(CommandCenterEvent::PartTransferred(metrics.1)).expect("Failed to send message to command center. Should never happen.");
-            runtime.cc_tx.send(CommandCenterEvent::FileTransferred(file_size)).expect("Failed to send message to command center. Should never happen.");
+            runtime.cc_tx.send(CommandCenterEvent::FileTransferred()).expect("Failed to send message to command center. Should never happen.");
         },
         Err(e) => {
             runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(RequestFailure, format!("Error uploading file {}: {}", file_info.file_path.to_str().unwrap(), e)))).expect("Failed to send message to command center. Should never happen.");
