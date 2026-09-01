@@ -1,4 +1,4 @@
-use crate::ui::{ProgressBarUi, Ui, UiEvent};
+use crate::ui::{ProgressBarUi, UiEvent};
 use std::cmp::PartialEq;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
@@ -179,7 +179,7 @@ impl CC for CommandCenter {
                 ui_tx.send(UiEvent::Println(format!("Total files completed: {}", file_transferred_count))).expect("Should never fail");
             }
 
-            drop(ui_tx); //This allows the UI task to exit gracefully
+            drop(ui_tx); //This triggers the ui thread to shut down
             if let Some(ui_handle) = ui_handle {
                 let _ = ui_handle.await;
             }

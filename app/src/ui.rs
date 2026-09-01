@@ -1,17 +1,12 @@
 use chrono::Local;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
 use std::io::IsTerminal;
 pub(crate) use util_layer::ui::UiEvent;
-
-pub trait Ui {
-    fn start(&self) -> (UnboundedSender<UiEvent>, JoinHandle<()>);
-}
 
 struct ProgressBarUiInner {
     mp: MultiProgress,
@@ -21,6 +16,7 @@ struct ProgressBarUiInner {
     completed: AtomicBool,
     destination_checker_visible: AtomicBool,
     is_terminal: bool,
+    state: Mutex<UiState>,
 }
 
 #[derive(Default, Debug, Clone)]
@@ -33,7 +29,7 @@ pub struct UiState {
     pub total_files_discovered: u64,
     pub total_data_discovered: u64,
     pub discovery_finished: bool,
-    pub last_message: String,
+    pub message: String,
 }
 
 impl UiState {
@@ -62,7 +58,7 @@ impl UiState {
                 self.discovery_finished = true;
             }
             UiEvent::Message(msg) => {
-                self.last_message = msg;
+                self.message = msg;
             }
             UiEvent::Println(_) => {}
         }
@@ -85,6 +81,7 @@ impl UiState {
     }
 }
 
+//TODO JON: the entire ui flow should get a restructure. Its some of the oldest code in the project. LF-172
 pub struct ProgressBarUi {
     inner: Arc<ProgressBarUiInner>,
 }
@@ -122,7 +119,8 @@ impl ProgressBarUi {
                 started: AtomicBool::new(false),
                 completed: AtomicBool::new(false),
                 destination_checker_visible: AtomicBool::new(false),
-                is_terminal
+                is_terminal,
+                state: Mutex::new(UiState::new()),
             }),
         }
     }
@@ -137,7 +135,7 @@ impl ProgressBarUi {
         self.inner.destination_checker_pb.finish();
     }
 
-    fn format_overall_pb_message(files_preexisting: u64, data_preexisting: u64, total_files_discovered: u64, total_data_discovered: u64, files_at_target: u64, data_at_target: u64) -> String {
+    fn format_total_pb_message(files_preexisting: u64, data_preexisting: u64, total_files_discovered: u64, total_data_discovered: u64, files_at_target: u64, data_at_target: u64) -> String {
         format!(
             "At target: {}/{} ({}/{} files) | Existing {} files, {}",
             indicatif::BinaryBytes(data_at_target),
@@ -148,14 +146,14 @@ impl ProgressBarUi {
         )
     }
 
-    fn show_destination_checker_bar_if_not_already_visible(inner: &Arc<ProgressBarUiInner>) {
-        if !inner.destination_checker_visible.load(Ordering::SeqCst) {
+    fn show_destination_checker_bar_if_needed(inner: &Arc<ProgressBarUiInner>, files_preexisting: u64) {
+        if files_preexisting > 0 && !inner.destination_checker_visible.load(Ordering::SeqCst) {
             inner.mp.insert(0, inner.destination_checker_pb.clone());
             inner.destination_checker_visible.store(true, Ordering::SeqCst);
         }
     }
 
-    fn format_transfer_message(inner: &Arc<ProgressBarUiInner>, total_bytes_to_transfer: u64, current_bytes_transferred: u64, files_to_transfer: u64, files_transferred: u64) -> String {
+    fn format_transfer_pb_message(inner: &Arc<ProgressBarUiInner>, total_bytes_to_transfer: u64, current_bytes_transferred: u64, files_to_transfer: u64, files_transferred: u64) -> String {
         format!(
             "{}/{} files | {}/{} ({}/s)",
             files_transferred, files_to_transfer,
@@ -164,115 +162,80 @@ impl ProgressBarUi {
             indicatif::BinaryBytes(inner.transfer_pb.per_sec() as u64),
         )
     }
-}
 
-impl Ui for ProgressBarUi {
-    fn start(&self) -> (UnboundedSender<UiEvent>, JoinHandle<()>) {
+    fn render(&self) {
+        let state = self.inner.state.lock().unwrap().clone();
+        let inner = &self.inner;
+
+        let files_to_transfer = state.files_to_transfer();
+        let total_bytes_to_transfer = state.total_bytes_to_transfer();
+
+        // Update destination checker progress bar
+        let files_at_target = state.files_at_target();
+        let data_at_target = state.data_at_target();
+
+        Self::show_destination_checker_bar_if_needed(inner, state.files_preexisting);
+
+        inner.destination_checker_pb.set_position(data_at_target);
+        inner.destination_checker_pb.set_length(state.total_data_discovered);
+        inner.destination_checker_pb.set_message(Self::format_total_pb_message(
+            state.files_preexisting,
+            state.data_preexisting,
+            state.total_files_discovered,
+            state.total_data_discovered,
+            files_at_target,
+            data_at_target,
+        ));
+
+        inner.transfer_pb.set_length(total_bytes_to_transfer);
+        inner.transfer_pb.set_position(state.current_bytes_transferred);
+        inner.transfer_pb.set_prefix(state.message.clone());
+        inner.transfer_pb.set_message(Self::format_transfer_pb_message(
+            inner,
+            total_bytes_to_transfer,
+            state.current_bytes_transferred,
+            files_to_transfer,
+            state.files_transferred,
+        ));
+    }
+
+    pub fn start(&self) -> (UnboundedSender<UiEvent>, JoinHandle<()>) {
         let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
         let inner = self.inner.clone();
         inner.started.store(true, Ordering::SeqCst);
-        let handle = tokio::task::spawn_blocking(move || {
-            let mut last_update = Instant::now();
-            let mut state = UiState::new();
-            
-            //Save last values so we know if we need to render something new.
-            let mut last_destination_checker_msg = String::new();
-            let mut last_transfer_msg = String::new();
-            let mut last_destination_checker_position: u64 = 0;
-            let mut last_destination_checker_length: u64 = 0;
-            let mut last_transfer_length: u64 = 0;
 
-            let update_interval = Duration::from_millis(250);
+        let ui_clone = ProgressBarUi { inner: inner.clone() };
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_millis(250));
 
-            while let Some(ev) = ui_rx.blocking_recv() {
-                match &ev {
-                    UiEvent::FileAlreadyAtTarget(_) => {
-                        Self::show_destination_checker_bar_if_not_already_visible(&inner);
-                    }
-                    UiEvent::Message(msg) => {
-                        inner.transfer_pb.set_prefix(msg.clone());
-                    }
-                    UiEvent::Println(msg) => {
-                        let timestamp = Local::now().format("%H:%M:%S");
-                        if inner.is_terminal {
-                            inner.mp.println(format!("[{}] {}", timestamp, msg)).unwrap();
-                        } else {
-                            println!("[{}] {}", timestamp, msg);
+            loop {
+                tokio::select! {
+                    ev = ui_rx.recv() => {
+                        let ev = match ev {
+                            Some(ev) => ev,
+                            None => break,
+                        };
+                        match &ev {
+                            UiEvent::Println(msg) => {
+                                let timestamp = Local::now().format("%H:%M:%S");
+                                if inner.is_terminal {
+                                    inner.mp.println(format!("[{}] {}", timestamp, msg)).unwrap();
+                                } else {
+                                    println!("[{}] {}", timestamp, msg);
+                                }
+                            }
+                            _ => {}
                         }
+                        inner.state.lock().unwrap().handle_event(ev);
                     }
-                    _ => {}
-                }
-                state.handle_event(ev);
-
-                let now = Instant::now();
-                if now.duration_since(last_update) >= update_interval {
-                    let files_to_transfer = state.files_to_transfer();
-                    let total_bytes_to_transfer = state.total_bytes_to_transfer();
-
-                    // Update destination checker progress bar
-                    let files_at_target = state.files_at_target();
-                    let data_at_target = state.data_at_target();
-
-                    if data_at_target != last_destination_checker_position {
-                        inner.destination_checker_pb.set_position(data_at_target);
-                        last_destination_checker_position = data_at_target;
+                    _ = ticker.tick() => {
+                        ui_clone.render();
                     }
-                    let new_destination_msg = Self::format_overall_pb_message(state.files_preexisting, state.data_preexisting, state.total_files_discovered, state.total_data_discovered, files_at_target, data_at_target);
-                    if last_destination_checker_msg != new_destination_msg {
-                        inner.destination_checker_pb.set_message(new_destination_msg.clone());
-                        last_destination_checker_msg = new_destination_msg;
-                    }
-                    if state.total_data_discovered != last_destination_checker_length {
-                        inner.destination_checker_pb.set_length(state.total_data_discovered);
-                        last_destination_checker_length = state.total_data_discovered;
-                    }
-
-                    if total_bytes_to_transfer != last_transfer_length {
-                        inner.transfer_pb.set_length(total_bytes_to_transfer);
-                        last_transfer_length = total_bytes_to_transfer;
-                    }
-                    // Update transfer progress bar
-                    if state.accumulated_bytes > 0 {
-                        inner.transfer_pb.inc(state.accumulated_bytes);
-                        state.accumulated_bytes = 0;
-                    }
-                    let new_transfer_msg = Self::format_transfer_message(&inner, total_bytes_to_transfer, state.current_bytes_transferred, files_to_transfer, state.files_transferred);
-                    if last_transfer_msg != new_transfer_msg {
-                        inner.transfer_pb.set_message(new_transfer_msg.clone());
-                        last_transfer_msg = new_transfer_msg;
-                    }
-
-                    last_update = now;
                 }
             }
 
             // Final update
-            let files_at_target = state.files_at_target();
-            let data_at_target = state.data_at_target();
-            let files_to_transfer = state.files_to_transfer();
-            let total_bytes_to_transfer = state.total_bytes_to_transfer();
-
-            if data_at_target != last_destination_checker_position {
-                inner.destination_checker_pb.set_position(data_at_target);
-            }
-            let new_destination_msg = Self::format_overall_pb_message(state.files_preexisting, state.data_preexisting, state.total_files_discovered, state.total_data_discovered, files_at_target, data_at_target);
-            if last_destination_checker_msg != new_destination_msg {
-                inner.destination_checker_pb.set_message(new_destination_msg);
-            }
-            if state.total_data_discovered != last_destination_checker_length {
-                inner.destination_checker_pb.set_length(state.total_data_discovered);
-            }
-
-            if total_bytes_to_transfer != last_transfer_length {
-                inner.transfer_pb.set_length(total_bytes_to_transfer);
-            }
-            if state.accumulated_bytes > 0 {
-                inner.transfer_pb.inc(state.accumulated_bytes);
-            }
-            let new_transfer_msg = Self::format_transfer_message(&inner, total_bytes_to_transfer, state.current_bytes_transferred, files_to_transfer, state.files_transferred);
-            if last_transfer_msg != new_transfer_msg {
-                inner.transfer_pb.set_message(new_transfer_msg);
-            }
+            ui_clone.render();
 
             inner.completed.store(true, Ordering::SeqCst);
             if !inner.is_terminal {
@@ -332,7 +295,7 @@ mod tests {
     fn test_ui_state_message_sent_is_captured() {
         let mut state = UiState::new();
         state.handle_event(UiEvent::Message("Transferring...".to_string()));
-        assert_eq!(state.last_message, "Transferring...");
+        assert_eq!(state.message, "Transferring...");
     }
 
     #[test]
@@ -362,16 +325,16 @@ mod tests {
         // Initially hidden
         assert!(!ui.inner.destination_checker_visible.load(Ordering::SeqCst));
 
-        // After some uploads, still hidden
         ui_tx.send(UiEvent::FileDiscovered(100)).unwrap();
-        ui_tx.send(UiEvent::TransferredData(100)).unwrap();
-        ui_tx.send(UiEvent::FileTransferred()).unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
+        // Still hidden as files_preexisting is 0
         assert!(!ui.inner.destination_checker_visible.load(Ordering::SeqCst));
 
-        // After FileAlreadyAtTarget, it should become visible
-        ui_tx.send(UiEvent::FileAlreadyAtTarget(100)).unwrap();
+        // Now trigger preexisting file
+        ui_tx.send(UiEvent::FileAlreadyAtTarget(50)).unwrap();
         tokio::time::sleep(Duration::from_millis(300)).await;
+        
+        // Should be visible now
         assert!(ui.inner.destination_checker_visible.load(Ordering::SeqCst));
 
         drop(ui_tx);
@@ -385,8 +348,8 @@ mod tests {
         let term = InMemoryTerm::new(10, 100);
         let mp = MultiProgress::with_draw_target(ProgressDrawTarget::term_like(Box::new(term.clone())));
         
-        let destination_checker_pb = mp.add(ProgressBar::new(300));
-        let transfer_pb = mp.add(ProgressBar::new(200));
+        let destination_checker_pb = mp.add(ProgressBar::new(80));
+        let transfer_pb = mp.add(ProgressBar::new(80));
 
         destination_checker_pb.set_style(
             ProgressStyle::with_template(
@@ -409,27 +372,16 @@ mod tests {
         transfer_pb.set_message("1/1 files | 50 B/200 B (0 B/s)");
         transfer_pb.set_position(50);
 
-        // Tick to ensure it renders. MultiProgress::tick might not render immediately.
-        // indicatif renders in a background thread or on certain calls.
-        // Forcing a draw by calling some method that triggers it.
-        // In MultiProgress, there's no direct tick(), but individual bars have it.
+        // Tick to ensure it renders
         destination_checker_pb.tick();
         transfer_pb.tick();
-        
-        // Wait a bit for potential background rendering (though with term_like it might be sync)
-        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let contents = term.contents();
-
-        // Check if the output contains our expected strings and bar markers
-        // The output will have ANSI escape codes if not handled, but InMemoryTerm::contents() usually returns plain text or similar.
         assert!(contents.contains("Total:"));
         assert!(contents.contains("Transfer:"));
         assert!(contents.contains("Transferring: 1/1 files | 50 B/200 B"));
         assert!(contents.contains("At target: 150 B/300 B"));
-        
-        // Check for progress bar chars
-        assert!(contents.contains("#####")); 
+        assert!(contents.contains("#####"));
     }
 
     #[tokio::test]

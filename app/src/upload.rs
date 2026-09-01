@@ -267,7 +267,6 @@ async fn small_file_upload(ctx: Arc<UploadConfig>, runtime: Arc<UploadRuntime>, 
 
     match result {
         Ok(metrics) => {
-            let file_size = file_info.file_size;
             runtime.cc_tx.send(CommandCenterEvent::PartTransferred(metrics.1)).expect("Failed to send message to command center. Should never happen.");
             runtime.cc_tx.send(CommandCenterEvent::FileTransferred()).expect("Failed to send message to command center. Should never happen.");
         },
