@@ -240,9 +240,9 @@ impl ProgressBarUi {
             inner.completed.store(true, Ordering::SeqCst);
             if !inner.is_terminal {
                 if inner.destination_checker_visible.load(Ordering::SeqCst) {
-                    println!("[{}] Total:    {}", Local::now().format("%H:%M:%S"), inner.destination_checker_pb.message());
+                    eprintln!("[{}] Total:    {}", Local::now().format("%H:%M:%S"), inner.destination_checker_pb.message());
                 }
-                println!("[{}] Transfer: {}: {}", Local::now().format("%H:%M:%S"), inner.transfer_pb.prefix(), inner.transfer_pb.message());
+                eprintln!("[{}] Transfer: {}: {}", Local::now().format("%H:%M:%S"), inner.transfer_pb.prefix(), inner.transfer_pb.message());
             }
         });
         (ui_tx, handle)
