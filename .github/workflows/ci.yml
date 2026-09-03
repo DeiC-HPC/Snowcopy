@@ -17,6 +17,32 @@ jobs:
           - stable
     steps:
       - uses: actions/checkout@v6
-      - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
-      - run: cargo build --verbose
-      - run: cargo test -j 8 --verbose
+
+      - name: Check disk in the beginning
+        run: |
+          df -h
+          docker system df
+
+      - name: Install Rust toolchain
+        run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
+
+      - name: Build
+        run: cargo build --verbose
+
+      - name: Check disk space after build
+        run: |
+          df -h
+          docker system df
+
+      - name: Free disk space
+        run: |
+          docker system prune -af || true
+          df -h
+
+      - name: Check disk space before tests
+        run: |
+          df -h
+          docker system df
+
+      - name: Test
+        run: cargo test -j 2 --verbose -- --test-threads=2
