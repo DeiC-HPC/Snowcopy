@@ -11,18 +11,24 @@ pub struct TestFileHandler {
     base_path: PathBuf,
     upload_folder: PathBuf,
     download_folder: PathBuf,
+    data_folder: PathBuf,
 }
 #[allow(dead_code)]
 impl TestFileHandler {
     pub fn new() -> Self {
         let base_path =std::env::temp_dir().join(SNOWCOPY_TEST_DATA_BASE_DIR_PREFIX).join(Uuid::new_v4().to_string());
 
-        Self {
+        let instance = Self {
             upload_folder: base_path.join("upload"),
             download_folder: base_path.join("download"),
             config_path: base_path.join("config.json"),
+            data_folder: base_path.join("data"),
             base_path,
-        }
+        };
+
+        fs::create_dir_all(&instance.data_folder).unwrap();
+
+        instance
     }
 
     pub fn config_path(&self) -> &std::path::Path {
@@ -31,6 +37,10 @@ impl TestFileHandler {
 
     pub fn upload_folder(&self) -> &std::path::Path {
         &self.upload_folder
+    }
+
+    pub fn data_folder(&self) -> &std::path::Path {
+        &self.data_folder
     }
 
     /// Creates test files in the upload folder.

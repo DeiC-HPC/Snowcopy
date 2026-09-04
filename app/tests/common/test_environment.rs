@@ -15,7 +15,7 @@ pub struct TestEnv {
     pub mitm_host_port: u16,
     pub minio: ContainerAsync<GenericImage>,
     pub mitm: ContainerAsync<GenericImage>,
-    pub test_file_handler: TestFileHandler,
+    pub test_file_handler: TestFileHandler, //must be after minio container in struct, since minio mounts to a folder that test_file_handler cleans up when dropped
     pub unique_bucket: String,
     pub proxy_handler: ProxyHandler,
 }
@@ -101,16 +101,22 @@ impl TestEnv {
 }
 
 pub(crate) async fn get_default_test_env() -> TestEnv {
+    let test_file_handler = TestFileHandler::new();
+
     let mino_name = format!("minio-real-{}", Uuid::new_v4());
     println!("Starting minio and mitmproxy in docker...");
     // 1. Start MinIO
-    let minio_container = GenericImage::new("minio/minio", "latest")
+    let minio_container = GenericImage::new("minio/minio", "RELEASE.2025-07-23T15-54-02Z")
         .with_exposed_port(S3_DOCKER_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stderr("API: "))
         .with_env_var("MINIO_ROOT_USER", S3_ACCESS_KEY)
         .with_env_var("MINIO_ROOT_PASSWORD", S3_SECRET_KEY)
         .with_network(DOCKER_NETWORK_NAME)
         .with_container_name(mino_name.clone())
+        .with_mount(Mount::bind_mount(
+            test_file_handler.data_folder().to_string_lossy().into_owned(),
+            "/data",
+        ))
         .with_cmd([
             "server", "/data",
             "--console-address", ":9001",
@@ -156,7 +162,6 @@ pub(crate) async fn get_default_test_env() -> TestEnv {
     let mitm_handler_port = mitm_container.get_host_port_ipv4(CONTROL_PORT).await.unwrap();
     let proxy_handler = ProxyHandler::new(format!("http://127.0.0.1:{}", mitm_handler_port));
 
-    let test_file_handler = TestFileHandler::new();
     test_file_handler.write_config_file(S3_ACCESS_KEY, S3_SECRET_KEY, &proxy_endpoint, DEFAULT_S3_PROFILE);
     let unique_bucket = format!("test-bucket-{}", Uuid::new_v4());
 
