@@ -64,7 +64,7 @@ async fn test_relative_path_download_input_should_work() {
     env.snowcopy_upload_test_upload_folder();
 
     let work_path = format!("{}/workdir", env.test_file_handler.download_folder().to_str().unwrap());
-    fs::create_dir_all(&work_path).await.unwrap();
+    std::fs::create_dir(&work_path).unwrap();
 
     let target = format!("{}:{}", DEFAULT_S3_PROFILE, env.unique_bucket);
     let output = env.run_snowcopy_args_in_dir(["cp", target.as_str(), "some-folder"], work_path.as_str());
