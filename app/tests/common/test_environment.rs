@@ -106,7 +106,7 @@ pub(crate) async fn get_default_test_env() -> TestEnv {
     let mino_name = format!("minio-real-{}", Uuid::new_v4());
     println!("Starting minio and mitmproxy in docker...");
     // 1. Start MinIO
-    let minio_container = GenericImage::new("minio/minio", "RELEASE.2025-07-23T15-54-02Z")
+    let minio_container = GenericImage::new("minio/minio", "latest")
         .with_exposed_port(S3_DOCKER_PORT.tcp())
         .with_wait_for(WaitFor::message_on_stderr("API: "))
         .with_env_var("MINIO_ROOT_USER", S3_ACCESS_KEY)
