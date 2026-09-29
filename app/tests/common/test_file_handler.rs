@@ -27,6 +27,8 @@ impl TestFileHandler {
         };
 
         fs::create_dir_all(&instance.data_folder).unwrap();
+        fs::create_dir_all(&instance.upload_folder).unwrap();
+        fs::create_dir_all(&instance.download_folder).unwrap();
 
         instance
     }
