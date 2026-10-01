@@ -83,8 +83,6 @@ impl ParsedInputPath {
     /// - Not start with 'xn--', 'sthree-', or 'amzn-s3-demo-'.
     /// - Not end with '-s3alias', '--ol-s3', '.mrap', '--x-s3', or '--table-s3'.
     pub fn validate_bucket_name(bucket: &str) -> Result<(), String> {
-        //TODO JON: Should we even care about aws special names? https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html
-        //TODO JON: I'm unsure if a user would need to download from the special buckets directly, which would mean they are valid. We could just let the S3 servers throw errors if they are invalid for them.
         if bucket.len() < 3 || bucket.len() > 63 {
             return Err("Bucket name must be between 3 and 63 characters long".to_string());
         }
