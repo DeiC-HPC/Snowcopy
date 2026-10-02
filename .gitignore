@@ -1,3 +1,7 @@
 /config.json
 /Cargo.lock
 /target
+/target_build
+/target_tmp
+/.idea
+/.junie
