@@ -1,18 +1,12 @@
 use hyper::{Request, Response};
 use tokio::sync::mpsc::UnboundedSender;
 use util_layer::cc_util::CommandCenterEvent;
-
-fn is_sensitive(name: &hyper::header::HeaderName) -> bool {
-    matches!(
-        name.as_str().to_ascii_lowercase().as_str(),
-        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
-    )
-}
+use util_layer::debug::is_sensitive;
 
 pub fn log_request_headers<B>(req: &Request<B>, cc_tx: UnboundedSender<CommandCenterEvent>) {
     let headers_str = req.headers().iter()
         .map(|(name, value)| {
-            if is_sensitive(name) {
+            if is_sensitive(name.as_str()) {
                 format!("  {}: <redacted>", name)
             } else {
                 format!("  {}: {}", name, value.to_str().unwrap_or("<non-utf8>"))
@@ -34,7 +28,7 @@ pub fn log_request_headers<B>(req: &Request<B>, cc_tx: UnboundedSender<CommandCe
 pub fn log_response_headers<B>(resp: &Response<B>, cc_tx: UnboundedSender<CommandCenterEvent>) {
     let headers_str = resp.headers().iter()
         .map(|(name, value)| {
-            if is_sensitive(name) {
+            if is_sensitive(name.as_str()) {
                 format!("  {}: <redacted>", name)
             } else {
                 format!("  {}: {}", name, value.to_str().unwrap_or("<non-utf8>"))

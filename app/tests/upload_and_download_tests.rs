@@ -90,7 +90,7 @@ async fn test_upload_and_download_with_empty_file() {
 async fn test_upload_and_download_retries_on_failures_multipart() {
     let env = get_default_test_env().await;
 
-    let file_name = "corruption_test.txt";
+    let file_name = "large-file.txt";
     env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&HashMap::from([
         (file_name, (CHUNK_SIZE as usize / 1024) * 2 + 1000), //divide 1024 for kb
     ]));
@@ -112,7 +112,7 @@ async fn test_upload_and_download_retries_on_failures_multipart() {
     let output = env.snowcopy_download_bucket_to_download_folder();
     assert!(env.test_file_handler.assert_upload_and_download_folders_match());
     assert!(output.get_combined_logs().contains("Total retries: 2"));
-    assert!(output.get_combined_logs().contains("Transferred: 1/1 files")); //TODO JON: enable and fix LF-154
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files"));
 }
 
 #[tokio::test]
@@ -145,7 +145,7 @@ async fn test_upload_and_download_retries_on_failures_small_file() {
 async fn test_upload_and_download_retries_on_failures_multipart_trailing() {
     let env = get_default_test_env().await;
 
-    let file_name = "corruption_test.txt";
+    let file_name = "large-file.txt";
     env.test_file_handler.create_files_in_upload_folder_with_sizes_in_kb(&HashMap::from([
         (file_name, (CHUNK_SIZE as usize / 1024) * 2 + 1000), //divide 1024 for kb
     ]));
@@ -167,7 +167,7 @@ async fn test_upload_and_download_retries_on_failures_multipart_trailing() {
     let output = env.snowcopy_download_bucket_to_download_folder();
     assert!(env.test_file_handler.assert_upload_and_download_folders_match());
     assert!(output.get_combined_logs().contains("Total retries: 2"));
-    assert!(output.get_combined_logs().contains("Transferred: 1/1 files")); //TODO JON: enable and fix LF-154
+    assert!(output.get_combined_logs().contains("Transferred: 1/1 files"));
 }
 
 #[tokio::test]

@@ -102,7 +102,7 @@ pub async fn put_file(ctx: Arc<UploadConfig>, file: Arc<File>, file_info: Arc<Fi
         return Err(s3_err.into());
     }
 
-    let etag = resp // TODO LND: Unused currently
+    let etag = resp
         .headers()
         .get("etag")
         .and_then(|v| v.to_str().ok())
@@ -228,7 +228,6 @@ async fn create_in_memory_body_put_with_hashes(file: Arc<File>, start: u64, amou
         signer::get_amz_content_header(AWS_ALGORITHM),
         sha256_hex.clone(),
     );
-    //header_map.insert("x-amz-checksum-sha256".to_string(), sha256_hex.clone()); //AWS and some clones will check against this. TODO JON: Should be base64 encoded
     header_map.insert("x-amz-meta-checksum-sha256".to_string(), sha256_hex); //Store as metadata, since clones cannot be trusted
     if let Some(mtime_str) = mtime_str {
         header_map.insert("x-amz-meta-mtime".to_string(), mtime_str);

@@ -2,7 +2,6 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::num::ParseIntError;
 
 ///This class is taken from Rclone. We are following their mtime format, such that we are compatible.
-/// TODO JON: this is LLM generated. Read/test/think more about this. It does work, but are there edge cases? We are attempting to copy the rclone time format in metadata.
 
 /// Turns a number of ns into a floating point string in seconds
 /// Trims trailing zeros and guaranteed to be perfectly accurate

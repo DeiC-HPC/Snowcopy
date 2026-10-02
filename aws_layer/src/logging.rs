@@ -4,6 +4,7 @@ use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use aws_smithy_types::config_bag::ConfigBag;
 use tokio::sync::mpsc::UnboundedSender;
 use util_layer::cc_util::CommandCenterEvent;
+use util_layer::debug::is_sensitive;
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoggingInterceptor {
@@ -71,9 +72,3 @@ impl Intercept for LoggingInterceptor {
     }
 }
 
-fn is_sensitive(name: &str) -> bool { //TODO Jon: http layer has the same functionality. It should be shared in a layer that both aws and http layer have. I don't want to create a new layer now as it will mess up LND's work
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "authorization" | "proxy-authorization" | "cookie" | "set-cookie" | "x-api-key"
-    )
-}

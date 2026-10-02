@@ -77,7 +77,6 @@ impl UiState {
     }
 }
 
-//TODO JON: the entire ui flow should get a restructure. Its some of the oldest code in the project. LF-172
 pub struct ProgressBarUi {
     inner: Arc<ProgressBarUiInner>,
 }

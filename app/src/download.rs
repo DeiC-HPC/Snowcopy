@@ -100,7 +100,7 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
 
     let checker_client = client.clone();
     let checker_bucket = config.bucket.clone();
-    let checker_task_sem = Arc::new(Semaphore::new(200)); //TODO JON: auto tuned?
+    let checker_task_sem = Arc::new(Semaphore::new(200)); //TODO: Should be set via autotuning
     let cc_sender = cc_tx.clone();
 
     tokio::spawn(async move {
@@ -427,7 +427,6 @@ fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadC
         let pool_client = pool_client.clone();
         let req_sem = req_sem.clone();
         let canonical_uri = canonical_uri.clone();
-        //let query_uri = String::new(); //TODO JON: when would we need this?
         let file = file.clone();
         let disk_write_tx = disk_write_tx.clone();
         let tracker = tracker.clone();
@@ -442,7 +441,6 @@ fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadC
                     let pool_client = pool_client.clone();
                     let req_sem = req_sem.clone();
                     let canonical_uri = canonical_uri.clone();
-                    let query_uri = String::new();
                     let file = file.clone();
                     let disk_write_tx = disk_write_tx.clone();
                     let tracker = tracker.clone();
@@ -450,7 +448,7 @@ fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadC
                     let cc_sender = cc_sender.clone();
 
                     async move {
-                        http_layer::download::download_file_range(start, end, config, &pool_client, req_sem, &canonical_uri, &query_uri, file, disk_write_tx, tracker, hash_algo, cc_sender).await
+                        http_layer::download::download_file_range(start, end, config, &pool_client, req_sem, &canonical_uri, file, disk_write_tx, tracker, hash_algo, cc_sender).await
                     }
                 }, cc_sender.clone(),format!("Downloading part (bytes {} to {}) of {}", start, end, canonical_uri)) => res,
 
