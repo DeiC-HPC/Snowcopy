@@ -42,10 +42,8 @@ pub async fn upload(ctx: Arc<UploadConfig>) {
         let handle = match client
             .upload_objects()
             .bucket(ctx.bucket.as_str())
-            .source(ctx.local_path.to_string_lossy().to_string())
-            .recursive(true)
-            .send()
-            .await {
+            .source(ctx.local_path.clone())
+            .initiate() {
             Ok(h) => h,
             Err(e) => {
                 eprintln!("Failed to initiate directory upload: {:?}", e);
@@ -149,9 +147,8 @@ pub async fn download(ctx: Arc<DownloadConfig>) {
         let handle = match client
             .download_objects()
             .bucket(bucket.as_str())
-            .destination(ctx.local_path.to_string_lossy().to_string())
-            .send()
-            .await {
+            .destination(ctx.local_path.clone())
+            .initiate() {
             Ok(h) => h,
             Err(e) => {
                 eprintln!("Failed to initiate directory download: {:?}", e);

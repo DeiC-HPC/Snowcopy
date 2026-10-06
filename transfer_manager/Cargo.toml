@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 util_layer = { path = "../util_layer"}
-aws-sdk-s3-transfer-manager = "0.1.3"
-aws-config = "1.1.7"
-aws-sdk-s3 = "1.21.0"
+aws-sdk-s3-transfer-manager = "0.2.0"
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
+aws-smithy-runtime = { version = "1", features = ["tls-rustls"] }
 aws-credential-types = "1.1.7"
 tokio = { version = "1", features = ["full"] }
