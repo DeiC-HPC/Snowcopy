@@ -5,14 +5,14 @@ license.workspace = true
 edition.workspace = true
 
 [dependencies]
-util_layer = { path = "../util_layer"}
-hyper = { version = "1", features = ["http1"] }
-hyper-util = { version = "0.1", features = ["client","client-legacy","http1","tokio"] }
-hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "logging", "aws-lc-rs"] }
-http-body-util = "0.1"
-tokio = { version = "1", features = ["full"] }
-bytes = "1"
-openssl = {version = "0.10.75" , features = ["vendored"] }
-chrono = "0.4.44"
-hex = "0.4.3"
-url = "2.5"
+util_layer = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+hyper-rustls = { workspace = true }
+http-body-util = { workspace = true }
+tokio = { workspace = true }
+bytes = { workspace = true }
+openssl = { workspace = true }
+chrono = { workspace = true }
+hex = { workspace = true }
+url = { workspace = true }

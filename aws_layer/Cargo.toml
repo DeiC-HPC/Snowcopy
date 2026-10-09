@@ -5,10 +5,10 @@ license.workspace = true
 edition.workspace = true
 
 [dependencies]
-aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
-aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "rustls"] }
-tokio = { version = "1", features = ["full"] }
-util_layer = { path = "../util_layer"}
-tokio-util = "0.7.18"
-aws-smithy-runtime-api = "1.11.6"
-aws-smithy-types = "1.4.7"
+aws-config = { workspace = true }
+aws-sdk-s3 = { workspace = true }
+tokio = { workspace = true }
+util_layer = { workspace = true }
+tokio-util = { workspace = true }
+aws-smithy-runtime-api = { workspace = true }
+aws-smithy-types = { workspace = true }

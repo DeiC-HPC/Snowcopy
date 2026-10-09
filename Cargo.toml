@@ -7,3 +7,45 @@ license = "EUPL-1.2"
 repository = "https://github.com/you/snowcopy"
 authors = ["Jon B. Jacobsen[jon.jacobsen@deic.dk] & Lukas Nic Dalgaard[lukas.dalgaard@deic.dk]"]
 edition = "2024"
+
+[workspace.dependencies]
+# Internal workspace crates
+aws_layer = { path = "aws_layer" }
+config = { path = "config" }
+http_layer = { path = "http_layer" }
+util_layer = { path = "util_layer" }
+
+# External dependencies
+anyhow = "1.0"
+assert_cmd = "2"
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["behavior-version-latest", "rt-tokio", "default-https-client"] }
+aws-smithy-runtime-api = "1.11.6"
+aws-smithy-types = "1.4.7"
+bytes = "1"
+chrono = "0.4.44"
+clap = { version = "4.5.54", features = ["derive"] }
+crossterm = "0.29.0"
+directories = "6.0"
+hex = "0.4.3"
+http = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["full"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "logging", "aws-lc-rs"] }
+hyper-util = { version = "0.1", features = ["full"] }
+indicatif = { version = "0.18.4", features = ["in_memory"] }
+jemallocator = "0.5.4"
+openssl = { version = "0.10.81", features = ["vendored"] }
+ratatui = "0.30.0"
+regex = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0"
+sysinfo = "0.39.6"
+tempfile = "3.8"
+testcontainers = { version = "0.28.0", default-features = false, features = ["aws-lc-rs"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7.18"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
+url = "2.5"
+uuid = { version = "1.24.0", features = ["v4"] }
+walkdir = "2.5.0"

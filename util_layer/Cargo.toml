@@ -5,12 +5,12 @@ license.workspace = true
 edition.workspace = true
 
 [dependencies]
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0"
-url = "2.5.8"
-tokio = { version = "1", features = ["full"] }
-hyper = "1"
-bytes = "1.11.1"
-openssl = "0.10.81"
-hyper-util = "0.1.20"
-aws-sdk-s3 = { version = "1", default-features = false }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+tokio = { workspace = true }
+hyper = { workspace = true }
+bytes = { workspace = true }
+openssl = { workspace = true }
+hyper-util = { workspace = true }
+aws-sdk-s3 = { workspace = true }
