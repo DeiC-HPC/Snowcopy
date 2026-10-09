@@ -1,13 +1,13 @@
 [package]
 name = "snowcopy"
 version = "0.1.0-alpha.1"
-edition = "2024"
+license.workspace = true
+edition.workspace = true
 
 [dependencies]
 aws_layer = { path = "../aws_layer" }
 http_layer = { path = "../http_layer" }
 util_layer = { path = "../util_layer"}
-transfer_manager = { path = "../transfer_manager"}
 config = { path = "../config" }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4.5.54", features = ["derive"] }
@@ -15,7 +15,7 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 walkdir = "2.5.0"
 anyhow = "1.0"
 indicatif = { version = "0.18.4", features = ["in_memory"] }
-sysinfo = "0.38.2"
+sysinfo = "0.39.6"
 chrono = "0.4.44"
 hex = "0.4.3"
 tokio-util = "0.7.18"

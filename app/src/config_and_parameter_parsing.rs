@@ -2,7 +2,7 @@ use crate::bucket_and_path_parser::ParsedInputPath;
 use clap::{Parser, Subcommand};
 use std::fmt::{Display, Formatter};
 use std::path::PathBuf;
-use util_layer::{ConfigModeConfig, DownloadConfig, EndpointConfig, ListConfig, RemoveConfig, SnowConfig, TransferMethod, UploadConfig};
+use util_layer::{ConfigModeConfig, DownloadConfig, EndpointConfig, ListConfig, RemoveConfig, SnowConfig, UploadConfig};
 use util_layer::error_codes::ErrorCode::{HttpUnsafeError, Unknown};
 
 #[derive(Debug)]
@@ -115,9 +115,6 @@ pub struct TransferOptions {
 
     #[arg(long, help = "Prints statistics about the transfer")]
     pub stats: bool,
-
-    #[arg(long, help = "Transfer method", default_value = "o1")]
-    pub transfer_method: TransferMethod,
 
     #[arg(short = 'v', long, help = "Verbose mode (print http headers)")]
     pub verbose: bool, //TODO JON: Eventually, this should be on all subcommands besides config
@@ -257,7 +254,6 @@ pub fn build_config(cli: Cli, provider: &dyn CredentialProvider) -> Result<SnowC
                     Ok(SnowConfig::Upload(UploadConfig {
                         endpoint: endpoint.clone(),
                         md5_checksum_integrity_is_disabled: transfer.disable_md5_checksum,
-                        transfer_method : transfer.transfer_method,
                         file_limit_overwrite : transfer.file_limit,
                         req_limit_overwrite : request.req_limit,
                         quiet: request.quiet,
@@ -280,7 +276,6 @@ pub fn build_config(cli: Cli, provider: &dyn CredentialProvider) -> Result<SnowC
                     Ok(SnowConfig::Download(DownloadConfig {
                         endpoint: endpoint.clone(),
                         md5_checksum_integrity_is_disabled: transfer.disable_md5_checksum,
-                        transfer_method : transfer.transfer_method,
                         file_limit_overwrite : transfer.file_limit,
                         req_limit_overwrite  : request.req_limit,
                         download_concurrency_overwrite : download.download_single_file_concurrency_limit,

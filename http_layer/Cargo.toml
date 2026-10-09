@@ -1,7 +1,8 @@
 [package]
 name = "http_layer"
 version = "0.1.0"
-edition = "2024"
+license.workspace = true
+edition.workspace = true
 
 [dependencies]
 util_layer = { path = "../util_layer"}

@@ -100,4 +100,6 @@ A fatal error will be shown when an irrecoverable situation is encountered. An e
 TODO: 
 
 ## License
-TODO: EUPL
+This project is licensed under the European Union Public Licence (EUPL) v1.2.
+
+See the LICENSE file for details.
