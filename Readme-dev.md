@@ -1,10 +1,5 @@
-### Useful examples:
-Useful examples for coding https://github.com/awsdocs/aws-doc-sdk-examples/tree/main/rustv1/examples/s3#code-examples
-
-### Run project with (Rust rover):
-run --package snowcopy --bin snowcopy -- my-file.txt lumio:rusty-rust-delete-me5
-
 ### Build on Linux with:
+(musl-gcc needed)
 cargo build --release --target x86_64-unknown-linux-musl
 
 ### Build on Windows setup:
@@ -38,3 +33,6 @@ Check like so:
 cargo deny check
 
 This uses the deny.toml for which licences are allowed.
+
+### Useful examples:
+Useful examples for coding https://github.com/awsdocs/aws-doc-sdk-examples/tree/main/rustv1/examples/s3#code-examples

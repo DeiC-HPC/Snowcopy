@@ -666,11 +666,11 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 .split(body_chunks[1]);
 
             let fields = [
-                (Field::Name, "Name", endpoint.name.as_str()),
+                (Field::Name, "Profile Name", endpoint.name.as_str()),
                 (Field::AccessKey, "S3 Access Key", endpoint.config.as_ref().map(|c| c.s3_access_key.as_str()).unwrap_or("")),
                 (Field::SecretKey, "S3 Secret Key", endpoint.config.as_ref().map(|c| c.s3_secret_key.as_str()).unwrap_or("")),
                 (Field::Url, "S3 URL", endpoint.config.as_ref().map(|c| c.s3_url.as_str()).unwrap_or("")),
-                (Field::Region, "S3 Region (non-aws s3 servers commonly use us-east-1)", endpoint.config.as_ref().map(|c| c.s3_region.as_str()).unwrap_or("")),
+                (Field::Region, "S3 Region (leave default unless targeting AWS)", endpoint.config.as_ref().map(|c| c.s3_region.as_str()).unwrap_or("")),
             ];
 
             for (idx, (field, label, value)) in fields.iter().enumerate() {
