@@ -60,7 +60,7 @@ pub async fn upload(ctx: Arc<UploadConfig>) -> SnowcopyResult {
         files_to_upload_stream = filter_already_existing_files(&ctx, &cc_tx, &s3client, files_to_upload_stream, cancellation_token.clone());
     }
 
-    let runtime = Arc::new(UploadRuntime { //TODO JON: I'm unsure if the internals should be wrapped in Arc as well.
+    let runtime = Arc::new(UploadRuntime {
         file_sem : Arc::new(active_file_io_sem),
         req_sem,
         hyper_client,
@@ -281,7 +281,7 @@ fn filter_already_existing_files(ctx: &Arc<UploadConfig>, cc_tx: &UnboundedSende
 
     let checker_client = client.clone();
     let checker_bucket = ctx.bucket.clone();
-    let checker_task_sem = Arc::new(Semaphore::new(200)); //TODO Jon: we want this to be very fast, but there is also an issue of too many connections and exceeding ulimit. I'm unsure how this should be handled. Furthermore, how can the users understand? Is it really a problem with many connections? _req_sem was very slow on my local pc.
+    let checker_task_sem = Arc::new(Semaphore::new(200));
     let cc_tx_checker = cc_tx.clone();
 
     tokio::spawn(async move {
@@ -425,7 +425,7 @@ pub async fn walk_directory_async(base_path: PathBuf, cc_tx: UnboundedSender<Com
                     }
                 }
                 Err(e) => {
-                    let io_error = io::Error::new(io::ErrorKind::Other, e); //TODO Jon, is this correct error type? I guess there might be some permission issues that could hit here? Not sure how to handle it.
+                    let io_error = io::Error::new(io::ErrorKind::Other, e);
                     tx.blocking_send(Err(io_error)).expect("Failed to send message. Should never happen.");
                 }
             }

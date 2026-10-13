@@ -189,14 +189,9 @@ impl RetryableError for SnowCopyError {
                 false
             }
             SnowCopyError::Hyper(_) => {
-                // Hyper errors can be retryable depending on the cause, but for simplicity
-                // many are treated as retryable in this context (like connection resets)
-                //TODO JON: is there any case where this is meaningless to retry?
                 true
             }
             SnowCopyError::MissingRequiredHeader(_) => {
-                // For multipart UploadPart, a missing ETag means we cannot complete
-                // the multipart upload. Retrying the part is usually safe.
                 true
             }
 

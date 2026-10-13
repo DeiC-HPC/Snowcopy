@@ -11,14 +11,12 @@ pub enum CommandCenterEvent {
     StatusChanged(Status),
     Log(String),
     RetryRequested(oneshot::Sender<Duration>, u32, SystemTime, String),
-    FileIntegrityChecked(bool), //JON: Should have key for some logging?
-    FatalErrorEvent(UserFacingError), //TODO JON: also add metadata for some logging?
+    FileIntegrityChecked(bool),
+    FatalErrorEvent(UserFacingError),
     ErrorEvent(UserFacingError),
 }
 
-#[allow(dead_code)] //TODO Jon: not all status are used currently
 pub enum Status {
-    Idle,
     Transferring,
     Discovering,
     Finished,
@@ -27,7 +25,6 @@ pub enum Status {
 impl fmt::Display for Status {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Status::Idle => write!(f, "Idle"),
             Status::Transferring => write!(f, "Transferred"),
             Status::Discovering => write!(f, "Discovering files"),
             Status::Finished => write!(f, "Finished"),

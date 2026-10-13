@@ -2,7 +2,7 @@ pub const CONFIG_PATH: &str = "config.json";
 pub const DEFAULT_REGION: &str = "us-east-1";
 pub const CHUNK_SIZE: u64 = 5 * 1024 * 1024;
 pub const DOWNLOAD_CHUNK_SIZE: usize = 1 * 1024 * 1024;
-pub const DOWNLOAD_MULTIPART_THRESHOLD: u64 = 6 * 1024 * 1024; //TODO JON: Our download logic requires this to be larger than our multipart upload threshold
+pub const DOWNLOAD_MULTIPART_THRESHOLD: u64 = 6 * 1024 * 1024;
 pub const PRESIGN_LIFETIME: u64 = 900;
 
 pub const MAX_REQUEST_AMOUNT: usize = 400;
@@ -28,7 +28,6 @@ pub const AMZ_STREAMING_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAI
 pub const AMZ_CHUNK_SIGNATURE_HEADER: &str = "chunk-signature";
 pub const AMZ_CHECKSUM_SHA256: &str = "x-amz-checksum-sha256";
 pub const AMZ_TRAILER_SIGNATURE: &str = "x-amz-trailer-signature";
-pub const STREAMING_READ_BUFFER_SIZE_IN_KB: u64 = 128; // In KiloByte
 pub const CHUNK_SIGNATURE_LENGTH: usize = 83; // The fixed length of chars for a chunk signature for trailing headers (Sha256)
 pub const TRAILER_HASH_LENGTH: usize = 44;  // The fixed length of a trailer hash (Sha256)
 

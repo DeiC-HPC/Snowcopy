@@ -28,7 +28,6 @@ pub struct UiState {
     pub data_preexisting: u64,
     pub total_files_discovered: u64,
     pub total_data_discovered: u64,
-    pub discovery_finished: bool,
     pub message: String,
 }
 
@@ -54,9 +53,6 @@ impl UiState {
                 self.total_files_discovered += 1;
                 self.total_data_discovered += bytes;
             }
-            UiEvent::DiscoveryFinished => {
-                self.discovery_finished = true;
-            }
             UiEvent::Message(msg) => {
                 self.message = msg;
             }
@@ -81,7 +77,6 @@ impl UiState {
     }
 }
 
-//TODO JON: the entire ui flow should get a restructure. Its some of the oldest code in the project. LF-172
 pub struct ProgressBarUi {
     inner: Arc<ProgressBarUiInner>,
 }
@@ -408,13 +403,5 @@ mod tests {
 
         drop(ui_tx);
         handle.await.unwrap();
-    }
-
-    #[test]
-    fn test_ui_state_discovery_finished() {
-        let mut state = UiState::new();
-        assert!(!state.discovery_finished);
-        state.handle_event(UiEvent::DiscoveryFinished);
-        assert!(state.discovery_finished);
     }
 }

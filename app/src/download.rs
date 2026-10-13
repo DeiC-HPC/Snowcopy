@@ -89,9 +89,6 @@ pub async fn download(ctx: Arc<DownloadConfig>) -> SnowcopyResult {
             drop(permit);
         });
     }
-    //TODO Jon: should we just check for errors here and react to them? But we would still like a general way to deal with errors and present them to the user. It could be that the command center did not care about errors at all. But the functioning program execution only
-    //TODO Jon: The object streams could propagate their errors and then we would have a single place that all errors are propagated to.
-    //TODO JON: The current design have us calling FATAL_ERROR, but still having to return an error. Its ugly because its hard to understand the error flow.
     while let Some(_) = join_set.join_next().await {};
     drop(disk_write_tx);
     drop(cc_tx);
@@ -103,7 +100,7 @@ async fn fetch_object_metadata_and_filter_already_downloaded(config: &Arc<Downlo
 
     let checker_client = client.clone();
     let checker_bucket = config.bucket.clone();
-    let checker_task_sem = Arc::new(Semaphore::new(200)); //TODO JON: auto tuned?
+    let checker_task_sem = Arc::new(Semaphore::new(200)); //TODO: Should be set via autotuning
     let cc_sender = cc_tx.clone();
 
     tokio::spawn(async move {
@@ -250,7 +247,6 @@ async fn download_object(pool_client: Arc<HyperClient>, config: Arc<DownloadConf
             cc_sender.send(CommandCenterEvent::Log(format!("Skipping integrity check for file: {}, etag: {}", key, object.etag.clone().unwrap()))).expect("Failed to send message"); //TODO JON: add a deeper log level
         }
         let num_parts = (total_size + chunk_size - 1) / chunk_size;
-        //TODO JON: if we are validating integrity, then the etag suffix is the number of parts. We can fail early here if there is a mismatch between the number of parts and the expected number of parts based on the etag suffix. Not sure how we should handle that case, though
 
         let hash_algo = if multipart_integrity_verification {
             IntegrityAlgorithm::MD5
@@ -375,7 +371,7 @@ async fn download_files_in_part_and_check_integrity(pool_client: &Arc<HyperClien
                 part_hashes[part_index as usize] = hash; //Maintain part order to ensure correct integrity verification
             }
             Ok(Err(SnowCopyError::Canceled)) => {
-                return Ok(()); //TODO JON: What is the best option here?
+                return Ok(());
             }
             Ok(Err(e)) => {
                 return Err(e);
@@ -431,7 +427,6 @@ fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadC
         let pool_client = pool_client.clone();
         let req_sem = req_sem.clone();
         let canonical_uri = canonical_uri.clone();
-        //let query_uri = String::new(); //TODO JON: when would we need this?
         let file = file.clone();
         let disk_write_tx = disk_write_tx.clone();
         let tracker = tracker.clone();
@@ -446,7 +441,6 @@ fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadC
                     let pool_client = pool_client.clone();
                     let req_sem = req_sem.clone();
                     let canonical_uri = canonical_uri.clone();
-                    let query_uri = String::new();
                     let file = file.clone();
                     let disk_write_tx = disk_write_tx.clone();
                     let tracker = tracker.clone();
@@ -454,7 +448,7 @@ fn download_file_in_parts(pool_client: &Arc<HyperClient>, config: &Arc<DownloadC
                     let cc_sender = cc_sender.clone();
 
                     async move {
-                        http_layer::download::download_file_range(start, end, config, &pool_client, req_sem, &canonical_uri, &query_uri, file, disk_write_tx, tracker, hash_algo, cc_sender).await
+                        http_layer::download::download_file_range(start, end, config, &pool_client, req_sem, &canonical_uri, file, disk_write_tx, tracker, hash_algo, cc_sender).await
                     }
                 }, cc_sender.clone(),format!("Downloading part (bytes {} to {}) of {}", start, end, canonical_uri)) => res,
 
@@ -496,8 +490,7 @@ pub fn spawn_global_writers(
                 match msg {
                     Some((file, offset, data, tracker)) => {
                         if let Err(e) = &file.write_at_offset(&data, offset) {
-                            eprintln!("write error: {}", e); //TODO JON: Should we just retry? But what kind of local IO error would benefit from that?
-                            //probably panic?
+                            cc_sender.send(FatalErrorEvent(UserFacingError::new(DiskIoError, format!("Failed to write data: {}", e)))).expect("Failed to send message. This should never happen.");
                         } else {
                             tracker.complete_write(&file, data.len(), cc_sender.clone());
                             cc_sender.send(CommandCenterEvent::PartTransferred(data.len() as u64)).unwrap();

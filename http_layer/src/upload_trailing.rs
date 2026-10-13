@@ -117,7 +117,7 @@ fn create_streaming_req_trailing_checksum(
     let encoded_len = signer::aws_chunked_trailer_encoded_length(
         file_size,
         chunk_size,
-        AMZ_CHECKSUM_SHA256,    // TODO LND: We might want to support multiple checksums in the future (with their own trailer hash length)
+        AMZ_CHECKSUM_SHA256,    // Checksum algorithm
         TRAILER_HASH_LENGTH,    // The length of the trailing checksum
     );
     signed_headers.insert("content-length".to_string(), encoded_len.to_string());
@@ -300,8 +300,6 @@ impl Body for StreamingFileChunkedBody {
     type Data = Bytes;
     type Error = std::io::Error;
 
-    //TODO JON: this should be rewritten completely. We should have a spawn_blocking that reads frames into a queue.
-    //TODO JON: this poll frame should be async, so it should wait on the queue for ready frames.
     fn poll_frame(
         mut self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
@@ -335,12 +333,6 @@ impl Body for StreamingFileChunkedBody {
                             std::io::ErrorKind::UnexpectedEof,
                             format!("Expected to read {} bytes, but read {} bytes", to_read, bytes_read),
                         ))));
-                    }
-
-                    if bytes_read == 0 { //TODO JON: We have this information but are wasting a system call to check that we are done
-                        // EOF
-                        inner.state = StreamingChunkedState::FinalChunk;
-                        continue;
                     }
 
                     inner.checksum_hasher.as_mut().expect("Hasher should have been created").update(buf).expect("Failed to update SHA256 hasher");

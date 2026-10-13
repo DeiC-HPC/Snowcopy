@@ -80,7 +80,7 @@ impl CommandCenter {
 
     pub fn new_remove(_config: &util_layer::RemoveConfig, cancellation_token_of_all_ongoing_tasks : tokio_util::sync::CancellationToken, verbose_mode: bool) -> Self {
         CommandCenter {
-            quiet: !verbose_mode, //This will make command_center not print any information. TODO JON: Make progress bar for deletion
+            quiet: !verbose_mode, //This will make command_center not print any information.
             stats: false,
             mode: Mode::Remove,
             cancellation_token_of_all_ongoing_tasks
@@ -129,17 +129,12 @@ impl CC for CommandCenter {
                         let _ = ui_tx.send(UiEvent::FileAlreadyAtTarget(bytes));
                     }
                     CommandCenterEvent::StatusChanged(status) => {
-                        if let Status::Transferring = status { //TODO JON: Who should be responsible of this knowledge? CC should now, but its the discovery threads, that knows, whom sends the message.
-                            // When we switch to transferring, we know that all discovered files
-                            // are either already at target or will be transferred.
-                            let _ = ui_tx.send(UiEvent::DiscoveryFinished);
-                        }
                         let _ = ui_tx.send(UiEvent::Message(status.to_string()));
                     }
                     CommandCenterEvent::Log(string) => {
                         let _ = ui_tx.send(UiEvent::Println(string));
                     }
-                    CommandCenterEvent::RetryRequested(tx, attempts, _time, message) => { //TODO Jon: later we should add some metrics and use them to get an idea of the entire stack
+                    CommandCenterEvent::RetryRequested(tx, attempts, _time, message) => {
                         if attempts > MAX_RETRY {
                             let _ = ui_tx.send(UiEvent::Println(format!(
                                 "{}: Retry amount {} exceeded MAX_RETRY {}. Not retrying.",
@@ -154,7 +149,7 @@ impl CC for CommandCenter {
 
                         let _ = tx.send(delay);
                     }
-                    CommandCenterEvent::FileIntegrityChecked(checked) => { //TODO JON: This could be part of FileTransferred, but it have some issues with getting the information elegantly to the independent writer threads
+                    CommandCenterEvent::FileIntegrityChecked(checked) => {
                         if checked{
                             total_integrity_checked_files += 1;
                         }
@@ -177,6 +172,7 @@ impl CC for CommandCenter {
             //We are out of the loop, the program is terminating:
             if stats {
                 ui_tx.send(UiEvent::Println(format!("Total files completed: {}", file_transferred_count))).expect("Should never fail");
+                ui_tx.send(UiEvent::Println(format!("Total retries: {}", total_retries))).expect("Should never fail");
             }
 
             drop(ui_tx); //This triggers the ui thread to shut down
@@ -189,9 +185,6 @@ impl CC for CommandCenter {
 
             if mode == Mode::Download && file_transferred_count > 0 && file_transferred_count != total_integrity_checked_files {
                 println!("Total files integrity checked: {}/{}", total_integrity_checked_files, file_transferred_count);
-            }
-            if total_retries > 0 && !quiet { //TODO Jon: Perhaps hide this behind stats?
-                println!("Total retries: {}", total_retries);
             }
 
             SnowcopyResult {fatal_error, error}

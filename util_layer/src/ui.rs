@@ -3,7 +3,6 @@ pub enum UiEvent {
     FileTransferred(),
     FileAlreadyAtTarget(u64),
     FileDiscovered(u64),
-    DiscoveryFinished,
     Message(String),
     Println(String),
 }

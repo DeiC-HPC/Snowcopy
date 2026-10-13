@@ -7,7 +7,7 @@ use tokio::sync::Semaphore;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::{DownloadConfig, UploadConfig};
 
-// Network speed detection is supported on Linux more easily than on Windows and MacOS. TODO: take a second look at this
+// Network speed detection is supported on Linux more easily than on Windows and MacOS. TODO: Consider a strategy for non-linux systems
 fn read_network_speed(_interface_name: &str) -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -37,7 +37,7 @@ fn read_network_speed(_interface_name: &str) -> Option<u64> {
 }
 
 pub fn auto_tune_upload(config: Arc<UploadConfig>, cc_tx: UnboundedSender<CommandCenterEvent>) -> (Semaphore, Semaphore, Semaphore, usize) {
-    let (mut file_limit, mut req_limit, mut open_files_sem, buffer_pool_size, _) = auto_tune_internal(&config.local_path, cc_tx.clone());
+    let (mut file_limit, mut req_limit, mut total_tasks_sem, buffer_pool_size, _) = auto_tune_internal(&config.local_path, cc_tx.clone());
 
     if let Some(override_value) = config.file_limit_overwrite {
         file_limit = override_value;
@@ -46,7 +46,7 @@ pub fn auto_tune_upload(config: Arc<UploadConfig>, cc_tx: UnboundedSender<Comman
         req_limit = override_value;
     }
     if let Some(override_value) = config.open_file_limit_overwrite {
-        open_files_sem = override_value;
+        total_tasks_sem = override_value;
     }
 
     let _ = cc_tx.send(CommandCenterEvent::Log(format!(
@@ -58,7 +58,7 @@ pub fn auto_tune_upload(config: Arc<UploadConfig>, cc_tx: UnboundedSender<Comman
 
     let file_sem = Semaphore::new(file_limit);
     let req_sem = Semaphore::new(req_limit);
-    let open_files_sem = Semaphore::new(open_files_sem);
+    let open_files_sem = Semaphore::new(total_tasks_sem);
 
     (file_sem, req_sem, open_files_sem, buffer_pool_size)
 }
@@ -106,7 +106,7 @@ fn auto_tune_internal(
         if available_memory > 16 * 1024 * 1024 * 1024  {
             4 * 1024 * 1024 * 1024
         } else if available_memory > 4 * 1024 * 1024 * 1024 {
-            2 * 1024 * 1024 * 1024 //TODO jon: This should have a relationship with req_limit
+            2 * 1024 * 1024 * 1024
         } else {
             (available_memory / 2) as usize
         }
@@ -180,7 +180,7 @@ fn auto_tune_internal(
         limit
     };
 
-    let open_file_limit = req_limit + file_limit + 100; // TODO LND: This is not a permanent value - it should be using known ulimit constraints and adjusted based on other semaphores
+    let total_task_limit = req_limit + file_limit + 100; // TODO LND: Total task limit should be set in auto_tune_upload (ulimit will be implemented as a guard by LF-124)
     let download_file_concurrency = {
         match disk_type {
             Some(sysinfo::DiskKind::HDD) => 20,
@@ -197,7 +197,7 @@ fn auto_tune_internal(
         max_network_speed.map(|s| format!("{}", s)).unwrap_or_else(|| "N/A".to_string())
     )));
 
-    (file_limit, req_limit, open_file_limit, buffer_pool_size, download_file_concurrency)
+    (file_limit, req_limit, total_task_limit, buffer_pool_size, download_file_concurrency)
 }
 
 fn canonicalize_for_compare(path: &Path) -> PathBuf {
@@ -269,7 +269,7 @@ fn detect(path: &Path) -> (usize, Option<u64>, Option<sysinfo::DiskKind>, u64, u
     let networks = Networks::new_with_refreshed_list();
 
     let mut max_network_speed: Option<u64> = None;
-    for (interface_name, data) in &networks { //TODO Jon: we can actually check for networking errors here: data.errors_on_transmitted() it might be interesting.
+    for (interface_name, data) in &networks {
         // Skip loopback interface
         if interface_name == "lo" {
             continue;

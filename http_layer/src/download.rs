@@ -16,13 +16,14 @@ use util_layer::snow_errors::SnowCopyError;
 use util_layer::{DownloadConfig, FileInfo};
 use util_layer::cc_util::CommandCenterEvent;
 
-pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfig>, pool_client: &Arc<HyperClient>, req_sem: Arc<Semaphore>, canonical_uri: &String, query_uri: &String, fd : Arc<File>, disk_write_tx: Sender<WriteMsg>, tracker: Arc<FileCompletionTracker>, hash_algo : IntegrityAlgorithm, cc_tx: UnboundedSender<CommandCenterEvent>) -> Result<(u64, Option<String>), SnowCopyError> {
+pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfig>, pool_client: &Arc<HyperClient>, req_sem: Arc<Semaphore>, canonical_uri: &String, fd : Arc<File>, disk_write_tx: Sender<WriteMsg>, tracker: Arc<FileCompletionTracker>, hash_algo : IntegrityAlgorithm, cc_tx: UnboundedSender<CommandCenterEvent>) -> Result<(u64, Option<String>), SnowCopyError> {
     let range = format!("bytes={}-{}", start, end);
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
     header_map.insert("range".to_string(), range);
+    let query_uri = String::new();
 
-    let req = create_and_sign_req(config.clone(), canonical_uri, query_uri, None, Method::GET, &header_map)?;
+    let req = create_and_sign_req(config.clone(), canonical_uri, &query_uri, None, Method::GET, &header_map)?;
 
     let req_permit = req_sem.acquire().await.expect("Should never fail");
     let resp = send_request(pool_client, req, cc_tx, config.verbose).await?;
