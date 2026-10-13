@@ -109,8 +109,8 @@ Goals:
 * Compatability with many non-aws S3 systems as well as AWS itself
 
 Non-goals:
-* Fully aws feature complete
-* TODO?
+* Fully aws feature complete 
+* aws-cli compatibility. Any similarities in commands or flags are coincidental and should not be interpreted as intentional compatibility.
 
 ## Compatability
 We aim to be compatible with many non-aws S3 systems. The challenge here is that aws developed the interface and then other storage implementations copied it. Well, some of it. The 70+ clones implements different subsets of the S3 interface. Therein lies the challenge.
