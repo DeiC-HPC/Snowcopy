@@ -21,8 +21,7 @@ use crate::config_and_parameter_parsing::read_and_validate_command_line_argument
 use crate::error_print::{print_error, print_fatal_error};
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
-use util_layer::snowcopy_result::SnowcopyResult;
-use util_layer::{SnowConfig, TransferMethod};
+use util_layer::SnowConfig;
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
 #[cfg(not(target_env = "msvc"))]
@@ -43,13 +42,7 @@ async fn main() {
         SnowConfig::Download(config) => {
             let config = Arc::new(config);
             let silent = config.quiet;
-            let res = match config.transfer_method {
-                TransferMethod::TokioSelfMade => download::download(config).await,
-                TransferMethod::TransferManager => {
-                    transfer_manager::download(config).await;
-                    SnowcopyResult{fatal_error: None, error: None}
-                }
-            };
+            let res = download::download(config).await;
             if !silent {
                 println!("Program execution time: {:.2?}", start_time.elapsed());
             }
@@ -58,13 +51,7 @@ async fn main() {
         SnowConfig::Upload(config) => {
             let config = Arc::new(config);
             let silent = config.quiet;
-            let res = match config.transfer_method {
-                TransferMethod::TokioSelfMade => upload::upload(config).await,
-                TransferMethod::TransferManager => {
-                    transfer_manager::upload(config).await;
-                    SnowcopyResult{fatal_error: None, error: None}
-                }
-            };
+            let res = upload::upload(config).await;
             if !silent {
                 println!("Program execution time: {:.2?}", start_time.elapsed());
             }

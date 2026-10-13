@@ -72,28 +72,10 @@ impl Endpoint {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransferMethod {
-    TokioSelfMade,
-    TransferManager,
-}
-impl std::str::FromStr for TransferMethod {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "o1" => Ok(Self::TokioSelfMade),
-            "o2" => Ok(Self::TransferManager),
-            _ => Err(format!("Unknown transfer method: {}", s)),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct UploadConfig {
     pub endpoint: EndpointConfig,
     pub md5_checksum_integrity_is_disabled: bool,
-    pub transfer_method: TransferMethod,
     pub file_limit_overwrite: Option<usize>,
     pub req_limit_overwrite: Option<usize>,
     pub quiet: bool,
@@ -112,7 +94,6 @@ pub struct UploadConfig {
 pub struct DownloadConfig {
     pub endpoint: EndpointConfig,
     pub md5_checksum_integrity_is_disabled: bool,
-    pub transfer_method: TransferMethod,
     pub file_limit_overwrite: Option<usize>,
     pub req_limit_overwrite: Option<usize>,
     pub download_concurrency_overwrite: Option<usize>,
