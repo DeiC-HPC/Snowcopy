@@ -12,8 +12,8 @@ Main features:
 There are some known limitations in the alpha, with the current features:
 
 * Snowcopy cannot currently transfer files larger than 50GB.
-  * If a file is larger than 50GB is seen, Snowcopy skips it, transfers everything else, then exits with a non-zero status and an error message.
-* The amount of memory used by Snowcopy is auto-tuned, but cannot currently be manually configured. It's tuned excessively for the actual needs and will be more optimized at a later time.
+  * If a file is larger than 50GB is seen, snowcopy skips it, transfers everything else, then exits with a non-zero status and an error message.
+* The amount of memory used by snowcopy is auto-tuned, but cannot currently be manually configured. It's tuned excessively for the actual needs and will be more optimized at a later time.
 * Using a file descriptor limit less than 1024 might crash the program.
 
 We are especially interested in feedback about any instability or correctness issues experienced. Any general feedback is also welcome as an issue or email to lukas.dalgaard@deic.dk or jon.jacobsen@deic.dk
