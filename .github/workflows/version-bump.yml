@@ -1,0 +1,54 @@
+name: Require Version Bump
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compare versions
+        shell: bash
+        run: |
+          CURRENT_VERSION=$(grep '^version *= *"' app/Cargo.toml \
+            | head -1 \
+            | sed -E 's/version *= *"([^"]+)"/\1/')
+
+          git fetch origin main
+
+          git fetch origin ${{ github.base_ref }}
+          git show origin/${{ github.base_ref }}:app/Cargo.toml > /tmp/main-Cargo.toml
+
+          MAIN_VERSION=$(grep '^version *= *"' /tmp/main-Cargo.toml \
+            | head -1 \
+            | sed -E 's/version *= *"([^"]+)"/\1/')
+
+          echo "Main version:    $MAIN_VERSION"
+          echo "Current version: $CURRENT_VERSION"
+
+          if [ "$MAIN_VERSION" = "$CURRENT_VERSION" ]; then
+            echo "::error::Version was not updated"
+            exit 1
+          fi
+
+          python3 - << EOF
+          from packaging.version import Version
+          import sys
+
+          old = Version("$MAIN_VERSION")
+          new = Version("$CURRENT_VERSION")
+
+          if new <= old:
+              print(f"::error::Version must increase ({old} -> {new})")
+              sys.exit(1)
+
+          print(f"Version bump valid: {old} -> {new}")
+          EOF

@@ -1,0 +1,64 @@
+name: Release Candidate
+
+on:
+  push:
+    branches:
+      - staging
+
+env:
+  CARGO_TERM_COLOR: always
+  CC_x86_64_unknown_linux_musl: musl-gcc
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: snowcopy-linux
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: snowcopy-windows.exe
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact: snowcopy-macos
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install MUSL tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir dist
+
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            cp target/${{ matrix.target }}/release/snowcopy.exe dist/${{ matrix.artifact }}
+          else
+            cp target/${{ matrix.target }}/release/snowcopy dist/${{ matrix.artifact }}
+          fi
+
+      - name: Upload RC Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/*
