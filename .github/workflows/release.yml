@@ -74,11 +74,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: |
-          cargo build \
-            --release \
-            --manifest-path app/Cargo.toml \
-            --target ${{ matrix.target }}
+        run: cargo build --release --manifest-path app/Cargo.toml --target ${{ matrix.target }}
 
       - name: Package
         shell: bash
