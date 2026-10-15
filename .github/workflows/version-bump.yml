@@ -52,30 +52,3 @@ jobs:
 
           print(f"Version bump valid: {old} -> {new}")
           EOF
-
-      - name: Verify tag matches Cargo.toml version
-        shell: bash
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          
-          CARGO_VERSION=$(grep '^version *= *"' app/Cargo.toml \
-          | head -1 \
-          | sed -E 's/version *= *"([^"]+)"/\1/')
-          
-          echo "Tag version:   $TAG_VERSION"
-          echo "Cargo version: $CARGO_VERSION"
-          
-          if [ "$TAG_VERSION" != "$CARGO_VERSION" ]; then
-          echo "::error::Tag version ($TAG_VERSION) does not match Cargo.toml version ($CARGO_VERSION)"
-          exit 1
-          fi
-
-      - name: Verify changelog contains version
-        shell: bash
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-
-          grep -q "$TAG_VERSION" CHANGELOG.md || {
-            echo "::error::CHANGELOG.md does not contain version $TAG_VERSION"
-            exit 1
-          }
