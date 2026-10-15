@@ -71,7 +71,7 @@ The "total" progress bar will show the total number of files already present at 
 
 ### Integrity
 Snowcopy validates the integrity of all transfers by either md5 or SHA256 depending on the situation. It does so by providing hashes of the content in all uploads. The S3 server then validates that it has received the same content and returns an error if there is a mismatch between the hash and the content.
-For downloads, snowcopy stores the necessary metadata to verify the expected hashed contents against the downloaded file. The metadata is stored on the object at the S3 server. 
+For downloads, snowcopy stores the necessary metadata (as part of upload) to verify the expected hashed contents against the downloaded file. The metadata is stored on the object at the S3 server. 
 If there is a mismatch between the hash and the transferred content, the transfer will be retried. If the missmatch is persistent, then snowcopy will abort the transfer with a non-zero exit code.
 
 ## Benchmarking
@@ -124,7 +124,7 @@ Currently, this tool have been tested against:
 LLM have been used for suggestions, but there are no autonomous code changed not reviewed or committed by a human. 
 
 ## Testing & Dependencies
-To ensure functionality, we test every change against a local minio instance by giving commands to the snowcopy binary while verifying behaviour and state.
+To ensure correctness, we test every change against a local minio instance by giving commands to the snowcopy binary while verifying behaviour and state.
 
 When selecting dependencies, we prioritize [blessed.rs](https://blessed.rs/crates) crates if possible. All other dependencies is vetted to ensure a lot of other people use it as well and that they are still maintained.
 
