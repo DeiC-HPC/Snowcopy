@@ -2,6 +2,11 @@ name: Cargo Build & Test
 
 on:
   push:
+    branches:
+      - main
+      - staging
+      - development
+
   pull_request:
 
 env:
@@ -11,10 +16,7 @@ jobs:
   build_and_test:
     name: Rust project - latest
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        toolchain:
-          - stable
+
     steps:
       - uses: actions/checkout@v6
 
@@ -24,10 +26,13 @@ jobs:
           docker system df
 
       - name: Install Rust toolchain
-        run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Build
-        run: cargo build --verbose
+      - name: Cache dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Cargo Deny
+        uses: EmbarkStudios/cargo-deny-action@v2
 
       - name: Check disk space after build
         run: |
@@ -44,5 +49,5 @@ jobs:
           df -h
           docker system df
 
-      - name: Test
-        run: cargo test -j 2 --verbose -- --test-threads=2
+      - name: Test #This will build tests
+        run: cargo test #--workspace -j 2 --verbose -- --test-threads=2 #Add parameters if github runner cannot handle parallel image execution
