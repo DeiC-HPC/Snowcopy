@@ -16,6 +16,8 @@ mod traits;
 mod bucket;
 mod upload_singlepart;
 mod upload_multipart;
+pub mod download_multipart;
+pub mod download_singlepart;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -49,7 +51,7 @@ async fn main() {
             let config = Arc::new(config);
             let silent = config.silent;
             let res = match config.transfer_method {
-                TransferMethod::TokioSelfMade => download::download(config).await,
+                TransferMethod::TokioSelfMade => download::run_download(config).await,
                 TransferMethod::TransferManager => {
                     transfer_manager::download(config).await;
                     SnowcopyResult{fatal_error: None, error: None}

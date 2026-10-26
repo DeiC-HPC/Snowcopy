@@ -333,15 +333,15 @@ impl Drop for PooledBuffer {
 }
 
 pub async fn send_request(
-    client: &HyperClient,
+    executor: Arc<dyn HttpExecutor>,
     req: hyper::Request<StreamingBody>,
     cc_tx: UnboundedSender<CommandCenterEvent>,
     logging_enabled: bool,
-) -> Result<hyper::Response<hyper::body::Incoming>, SnowCopyError> {
+) -> Result<HttpExecutorStreamingResponse, SnowCopyError> {
     if logging_enabled { //TODO JON: This will be fast due to branch prediction, but it might be cleaner to create a client with logging instead of this
         logging::log_request_headers(&req, cc_tx.clone());
     }
-    let resp = client.request(req).await?;
+    let resp = executor.execute_stream(req).await?;
     if logging_enabled {
         logging::log_response_headers(&resp, cc_tx);
     }

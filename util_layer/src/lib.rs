@@ -20,7 +20,6 @@ use std::time::SystemTime;
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
 use hyper::{Error, HeaderMap, StatusCode};
-use crate::snow_errors::SnowCopyError;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub enum Mode {

@@ -1,5 +1,6 @@
-use hyper::{Request, Response};
+use hyper::Request;
 use tokio::sync::mpsc::UnboundedSender;
+use util_layer::HttpExecutorStreamingResponse;
 use util_layer::cc_util::CommandCenterEvent;
 
 fn is_sensitive(name: &hyper::header::HeaderName) -> bool {
@@ -31,8 +32,8 @@ pub fn log_request_headers<B>(req: &Request<B>, cc_tx: UnboundedSender<CommandCe
     cc_tx.send(CommandCenterEvent::Log(log_msg)).expect("Failed to send log event to Command Center");
 }
 
-pub fn log_response_headers<B>(resp: &Response<B>, cc_tx: UnboundedSender<CommandCenterEvent>) {
-    let headers_str = resp.headers().iter()
+pub fn log_response_headers(resp: &HttpExecutorStreamingResponse, cc_tx: UnboundedSender<CommandCenterEvent>) {
+    let headers_str = resp.headers.iter()
         .map(|(name, value)| {
             if is_sensitive(name) {
                 format!("  {}: <redacted>", name)
@@ -45,7 +46,7 @@ pub fn log_response_headers<B>(resp: &Response<B>, cc_tx: UnboundedSender<Comman
 
     let log_msg = format!(
         "incoming response\nstatus: {}\nheaders:\n{}",
-        resp.status(),
+        resp.status,
         headers_str
     );
 

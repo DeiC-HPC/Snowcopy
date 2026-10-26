@@ -1,22 +1,22 @@
 use crate::integrity::IntegrityAlgorithm;
-use crate::{create_and_sign_req, map_s3_error, send_request, signer, HyperClient};
+use crate::{create_and_sign_req, map_s3_error_from_http_response, send_request, signer};
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
 use hyper::Method;
 use std::cmp;
 use std::collections::HashMap;
 use std::fs::File;
 use std::sync::Arc;
-use tokio::sync::mpsc::{Sender, UnboundedSender};
 use tokio::sync::Semaphore;
+use tokio::sync::mpsc::{Sender, UnboundedSender};
+use util_layer::cc_util::CommandCenterEvent;
 use util_layer::constants::{AWS_ALGORITHM, DOWNLOAD_CHUNK_SIZE, DOWNLOAD_DIRECT_WRITE_FRAME_THRESHOLD, EMPTY_PAYLOAD_SHA256};
 use util_layer::download::{FileCompletionTracker, WriteMsg};
 use util_layer::snow_errors::SnowCopyError;
-use util_layer::{DownloadConfig, FileInfo};
-use util_layer::cc_util::CommandCenterEvent;
+use util_layer::traits::HttpExecutor;
+use util_layer::{DownloadConfig, FileInfo, ResponseStreamingBody};
 
-pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfig>, pool_client: &Arc<HyperClient>, req_sem: Arc<Semaphore>, canonical_uri: &String, query_uri: &String, fd : Arc<File>, disk_write_tx: Sender<WriteMsg>, tracker: Arc<FileCompletionTracker>, hash_algo : IntegrityAlgorithm, cc_tx: UnboundedSender<CommandCenterEvent>) -> Result<(u64, Option<String>), SnowCopyError> {
+pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfig>, executor: &Arc<dyn HttpExecutor>, req_sem: Arc<Semaphore>, canonical_uri: &String, query_uri: &String, fd : Arc<File>, disk_write_tx: Sender<WriteMsg>, tracker: Arc<FileCompletionTracker>, hash_algo : IntegrityAlgorithm, cc_tx: UnboundedSender<CommandCenterEvent>) -> Result<(u64, Option<String>), SnowCopyError> {
     let range = format!("bytes={}-{}", start, end);
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
@@ -25,16 +25,16 @@ pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfi
     let req = create_and_sign_req(config.clone(), canonical_uri, query_uri, None, Method::GET, &header_map)?;
 
     let req_permit = req_sem.acquire().await.expect("Should never fail");
-    let resp = send_request(pool_client, req, cc_tx, config.verbose).await?;
+    let resp = send_request(executor.clone(), req, cc_tx, config.verbose).await?;
 
-    let status = resp.status();
+    let status = resp.status;
     if !status.is_success() && status != hyper::StatusCode::PARTIAL_CONTENT {
-        let s3_err = map_s3_error(resp).await;
+        let s3_err = map_s3_error_from_http_response(resp).await;
         drop(req_permit);
         return Err(s3_err.into());
     }
 
-    let mut body = resp.into_body();
+    let mut body = resp.body;
 
     let (bytes_read, hash) = download_body_to_buffer_and_offload_to_disk_writers(start, fd, disk_write_tx, &mut body, tracker, (end - start + 1) as usize, hash_algo).await?;
 
@@ -46,7 +46,7 @@ pub async fn download_file_range(start: u64, end: u64, config: Arc<DownloadConfi
     Ok((bytes_read, hash))
 }
 
-async fn download_body_to_buffer_and_offload_to_disk_writers(start: u64, fd: Arc<File>, disk_write_tx: Sender<WriteMsg>, body: &mut Incoming, tracker: Arc<FileCompletionTracker>, file_size: usize, hash_algo : IntegrityAlgorithm) -> Result<(u64, Option<String>), SnowCopyError> {
+async fn download_body_to_buffer_and_offload_to_disk_writers(start: u64, fd: Arc<File>, disk_write_tx: Sender<WriteMsg>, body: &mut ResponseStreamingBody, tracker: Arc<FileCompletionTracker>, file_size: usize, hash_algo : IntegrityAlgorithm) -> Result<(u64, Option<String>), SnowCopyError> {
     let mut bytes_read = 0u64;
 
     let mut buffer = Vec::with_capacity(cmp::min(DOWNLOAD_CHUNK_SIZE, file_size));
@@ -123,24 +123,22 @@ async fn download_body_to_buffer_and_offload_to_disk_writers(start: u64, fd: Arc
     Ok((bytes_read, hash_result))
 }
 
-
-
-pub async fn get_file(config: Arc<DownloadConfig>, file_info: Arc<FileInfo>, client: &HyperClient, canonical_uri: &String, query_uri: &String, req_sem: Arc<Semaphore>, disk_write_tx: Sender<WriteMsg>, cc_sender: UnboundedSender<CommandCenterEvent>) -> Result<Option<String>, SnowCopyError> {
+pub async fn get_file(config: Arc<DownloadConfig>, file_info: Arc<FileInfo>, client: &Arc<dyn HttpExecutor>, canonical_uri: &String, query_uri: &String, req_sem: Arc<Semaphore>, disk_write_tx: Sender<WriteMsg>, cc_sender: UnboundedSender<CommandCenterEvent>) -> Result<Option<String>, SnowCopyError> {
     let mut header_map : HashMap<String, String> = HashMap::new();
     header_map.insert(signer::get_amz_content_header(AWS_ALGORITHM), EMPTY_PAYLOAD_SHA256.to_string());
 
     let req = create_and_sign_req(config.clone(), canonical_uri, query_uri,  None, Method::GET, &header_map)?;
 
     let req_permit = req_sem.acquire().await.expect("Should never fail");
-    let resp = send_request(client, req, cc_sender, config.verbose).await?;
+    let resp = send_request(client.clone(), req, cc_sender, config.verbose).await?;
 
-    let status = resp.status();
+    let status = resp.status;
     if !status.is_success() {
-        let s3_err = map_s3_error(resp).await;
+        let s3_err = map_s3_error_from_http_response(resp).await;
         return Err(s3_err.into());
     }
 
-    let mut body = resp.into_body();
+    let mut body = resp.body;
     let path = file_info.file_path.clone();
 
     // Open file once
