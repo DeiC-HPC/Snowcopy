@@ -1,4 +1,4 @@
-# Snowcopy
+# Snowcopy - Alpha
 Snowcopy is an easy-to-use, fast S3 transfer command line tool with strong data integrity checking.
 
 Main features:
@@ -18,8 +18,8 @@ There are some known limitations in the alpha, with the current features:
 
 We are especially interested in feedback about any instability or correctness issues experienced. Any general feedback is also welcome as an issue or email to lukas.dalgaard@deic.dk or jon.jacobsen@deic.dk
 
-## Release
-TODO: link to release and information
+## Installation
+The [Release](https://github.com/DeiC-HPC/Snowcopy/releases) page provides prebuilt binaries for Linux, Windows and macOS. 
 
 ## Usage
 Before first use, configure a S3 server by running:
@@ -75,8 +75,7 @@ For downloads, snowcopy stores the necessary metadata (as part of upload) to ver
 If there is a mismatch between the hash and the transferred content, the transfer will be retried. If the missmatch is persistent, then snowcopy will abort the transfer with a non-zero exit code.
 
 ## Benchmarking
-TODO:
-
+TODO: Coming soon
 
 
 ## Error codes
