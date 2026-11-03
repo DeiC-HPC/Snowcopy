@@ -15,13 +15,14 @@ mod filesystem_checker;
 mod bucket_and_path_parser;
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::config_and_parameter_parsing::read_and_validate_command_line_arguments;
 use crate::error_print::{print_error, print_fatal_error};
 use tokio;
 use tracing_subscriber::{fmt, EnvFilter};
 use util_layer::SnowConfig;
+use util_layer::snowcopy_result::SnowcopyResult;
 
 // Avoid musl's default allocator due to lackluster performance on systems with many cores
 #[cfg(not(target_env = "msvc"))]
@@ -31,14 +32,34 @@ use jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
 
-#[tokio::main]
-async fn main() {
-    let start_time = Instant::now();
+fn main() {
     init_logging();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to build tokio runtime");
+
+    let result = runtime.block_on(run());
+
+    // Stop all worker threads (incl. hyper connection tasks still streaming bodies). This can happen during cancellation.
+    runtime.shutdown_timeout(Duration::from_secs(5));
+
+    if let Some(error) = result.fatal_error {
+        print_fatal_error(&error);
+        std::process::exit(error.code().as_i32());
+    } else if let Some(error) = result.error {
+        print_error(&error);
+        std::process::exit(error.code().as_i32());
+    }
+}
+
+async fn run() -> SnowcopyResult {
+    let start_time = Instant::now();
 
     let snow_config = read_and_validate_command_line_arguments().await;
 
-    let result = match snow_config {
+    match snow_config {
         SnowConfig::Download(config) => {
             let config = Arc::new(config);
             let silent = config.quiet;
@@ -60,7 +81,7 @@ async fn main() {
         SnowConfig::List(config) => {
             list::list(config).await
         }
-        
+
         SnowConfig::Remove(config) => {
             let silent = config.quiet;
             let res = remove::remove(config).await;
@@ -72,19 +93,8 @@ async fn main() {
         SnowConfig::Config(config) => {
             config::run_tui(config)
         }
-    };
-
-    if result.fatal_error.is_some() {
-        let error = result.fatal_error.unwrap();
-        print_fatal_error(&error);
-        std::process::exit(error.code().as_i32());
-    } else if result.error.is_some() {
-        let error = result.error.unwrap();
-        print_error(&error);
-        std::process::exit(error.code().as_i32());
     }
 }
-
 
 fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
