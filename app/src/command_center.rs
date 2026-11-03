@@ -102,7 +102,7 @@ impl CC for CommandCenter {
 
         let mode = self.mode.clone();
         let stats = self.stats;
-        let quiet = self.quiet;
+        let _quiet = self.quiet;
         let cancellation_token_of_all_ongoing_tasks = self.cancellation_token_of_all_ongoing_tasks.clone();
         let handle = tokio::task::spawn(async move {
             let mut file_transferred_count = 0u64;
