@@ -28,7 +28,8 @@ impl SnowcopyOutput {
     }
 
     pub fn is_failure(&self, code: ErrorCode) -> bool {
-        !self.output.status.success() && code.as_i32() == self.output.status.code().unwrap()
+        !self.output.status.success()
+            && self.output.status.code() == Some(code.as_i32())
     }
 
     pub fn get_status(&self) -> &std::process::ExitStatus {
