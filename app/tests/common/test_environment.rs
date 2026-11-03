@@ -4,10 +4,15 @@ use crate::common::test_file_handler::TestFileHandler;
 use crate::common::test_snowcopy_runner::SnowcopyOutput;
 use std::path::PathBuf;
 use std::env;
+use std::time::Duration;
 use testcontainers::core::{IntoContainerPort, Mount, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use uuid::Uuid;
+
+//We experienced issues with concurrently pulling many docker images quickly.  //TODO Jon: remove when s3 container reuse is implemented (INF-169)
+const TEST_ENV_START_ATTEMPTS: usize = 3;
+const TEST_ENV_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 #[allow(dead_code)]
 pub struct TestEnv {
@@ -100,7 +105,39 @@ impl TestEnv {
     }
 }
 
-pub(crate) async fn get_default_test_env() -> TestEnv {
+pub async fn get_default_test_env() -> TestEnv {
+    let mut errors = Vec::new();
+
+    for attempt in 1..=TEST_ENV_START_ATTEMPTS {
+        match try_get_default_test_env().await {
+            Ok(env) => return env,
+            Err(err) => {
+                eprintln!(
+                    "Failed to start test environment, attempt {}/{}:\n{err}",
+                    attempt,
+                    TEST_ENV_START_ATTEMPTS,
+                );
+
+                errors.push(format!("attempt {attempt}: {err}"));
+
+                if attempt < TEST_ENV_START_ATTEMPTS {
+                    tokio::time::sleep(TEST_ENV_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+
+    panic!(
+        "Failed to start test environment after {} attempts.\n\n{}\n\n\
+         If this failed while pulling a Docker image, try:\n\
+           docker pull pgsty/silo:latest\n\
+           docker system prune -f",
+        TEST_ENV_START_ATTEMPTS,
+        errors.join("\n\n"),
+    );
+}
+
+pub(crate) async fn try_get_default_test_env() -> Result<TestEnv, String> {
     let test_file_handler = TestFileHandler::new();
 
     let mino_name = format!("minio-real-{}", Uuid::new_v4());
@@ -123,7 +160,12 @@ pub(crate) async fn get_default_test_env() -> TestEnv {
         ])
         .start()
         .await
-        .expect("Failed to start MinIO container");
+        .map_err(|err| {
+            format!(
+                "Failed to start MinIO container from image pgsty/silo:latest.\n\
+                 Docker/testcontainers error: {err:?}"
+            )
+        })?;
 
     let minio_host_port = minio_container.get_host_port_ipv4(S3_DOCKER_PORT).await.unwrap();
 
@@ -154,7 +196,12 @@ pub(crate) async fn get_default_test_env() -> TestEnv {
         ])
         .start()
         .await
-        .expect("Failed to start mitmproxy container");
+        .map_err(|err| {
+            format!(
+                "Failed to start MITM/proxy container.\n\
+                 Docker/testcontainers error: {err:?}"
+            )
+        })?;
 
     let mitm_host_port = mitm_container.get_host_port_ipv4(PROXY_DOCKER_PORT).await.unwrap();
     let proxy_endpoint = format!("http://127.0.0.1:{}", mitm_host_port);
@@ -165,13 +212,13 @@ pub(crate) async fn get_default_test_env() -> TestEnv {
     test_file_handler.write_config_file(S3_ACCESS_KEY, S3_SECRET_KEY, &proxy_endpoint, DEFAULT_S3_PROFILE);
     let unique_bucket = format!("test-bucket-{}", Uuid::new_v4());
 
-    TestEnv {
+    Ok(TestEnv {
         minio_host_port,
         mitm_host_port,
-        minio: minio_container,
-        mitm: mitm_container,
+        minio : minio_container,
+        mitm : mitm_container,
         test_file_handler,
         unique_bucket,
         proxy_handler,
-    }
+    })
 }
