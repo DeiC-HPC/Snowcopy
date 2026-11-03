@@ -57,7 +57,7 @@ impl CredentialProvider for FileCredentialProvider {
 #[derive(Parser)]
 #[command(
 name = "snowcopy",
-version = "0.1.0-alpha.1",
+version,
 about = "Fast S3 copy tool - ALPHA, use with caution.",
 after_help = "First time users should run 'snowcopy config' to configure a S3 server.\n\nExamples:\n  upload:   snowcopy cp my-folder profile:bucket\n  upload:   snowcopy cp file.txt profile:bucket\n  download: snowcopy cp profile:bucket ."
 )]
