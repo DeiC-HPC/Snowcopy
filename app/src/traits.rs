@@ -7,7 +7,7 @@ use tokio_util::sync::CancellationToken;
 use util_layer::cc_util::CommandCenterEvent;
 use util_layer::download::WriteMsg;
 
-pub trait UploadTrait {
+pub trait UploadTrait: Send + Sync {
     fn upload_file(&self) -> Pin<Box<dyn Future<Output=()> + Send + '_>>;
 }
 

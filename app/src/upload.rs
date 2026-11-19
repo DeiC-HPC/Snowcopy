@@ -94,21 +94,17 @@ async fn upload_files_from_stream(ctx: Arc<UploadConfig>, files_to_upload_stream
                         let runtime = runtime.clone();
                         let aws_client = aws_client.clone();
                         let hyper_http_executor = HyperHttpExecutor::new(hyper_client.clone());
+                        let uploader: Box<dyn UploadTrait>;
                         if file_info_arc.file_size > CHUNK_SIZE {
-                            let multipart_upload = Box::new(MultipartUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), aws_client.clone(), Arc::new(hyper_http_executor), Arc::new(ImplFileHandler{})));
-                            let permit = task_sem.clone().acquire_owned().await.unwrap();
-                            join_set.spawn(async move {
-                                multipart_upload.upload_file().await;
-                                drop(permit);
-                            });
+                            uploader = Box::new(MultipartUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), aws_client.clone(), Arc::new(hyper_http_executor), Arc::new(ImplFileHandler{})));
                         } else {
-                            let single_upload = Box::new(SingleUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), Arc::new(hyper_http_executor), Arc::new(ImplFileHandler{})));
-                            let permit = task_sem.clone().acquire_owned().await.unwrap();
-                            join_set.spawn(async move {
-                                single_upload.upload_file().await;
-                                drop(permit);
-                            });
+                            uploader = Box::new(SingleUpload::new(ctx.clone(), file_info_arc.clone(), runtime.clone(), Arc::new(hyper_http_executor), Arc::new(ImplFileHandler{})));
                         }
+                        let permit = task_sem.clone().acquire_owned().await.unwrap();
+                        join_set.spawn(async move {
+                            uploader.upload_file().await;
+                            drop(permit);
+                        });
                     }
                     Some(Err(e)) => {
                         runtime.cc_tx.send(CommandCenterEvent::FatalErrorEvent(UserFacingError::new(DiskIoError, format!("Error walking directory: {}", e)))).expect("Failed to send message to command center. Should never happen.");
